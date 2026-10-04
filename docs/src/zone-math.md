@@ -7,7 +7,7 @@ Open a zone's detail view to see its governing model, water need, planned minute
 At its simplest:
 
 ```text
-runtime in minutes = required gross depth in mm Ã· application rate in mm/hour × 60
+runtime in minutes = required gross depth in mm / application rate in mm/hour × 60
 ```
 
 The gross depth accounts for the applicable capture efficiency. The final runtime also reflects configured adjustments, zone caps, restrictions, and scheduling capacity.
@@ -25,6 +25,33 @@ Measure the rate with catch cups where practical. A catalog head rate is a start
 | Explicit manual run | Requested duration, subject to the manual dispatch policy |
 
 Check the model on the zone. Sessions per week affects weekly scheduling; it is not the soil model's primary trigger.
+
+## Without a soil sensor
+
+The deficit is modeled water missing from the root zone, not a measured moisture
+percentage. LocalSky replays recent weather and watering history:
+
+```text
+deficit = previous deficit + plant water use - effective rain - retained irrigation
+plant water use = reference ET × the plant's seasonal crop coefficient
+retained irrigation = valve-open hours × application rate × retained fraction
+```
+
+The result stays between zero and the soil's available storage. Soil texture
+and root depth set that storage; the plant's allowed depletion sets the watering
+trigger. Uncertain starting conditions remain a range until the evidence resolves
+them. Forecast rain and the next permitted watering opportunity shape the refill.
+
+**Area does not multiply runtime.** Application rate is already a water depth
+across the zone. **Sun/shade is saved but does not currently apply a separate
+soil-demand adjustment.** A sensor can supply moisture checks; the modeled
+deficit should still be read as an estimate.
+
+A 10 mm/hour rotor with 70% retained water supplies only 7 mm to the roots in an
+hour. A 38 mm/hour spray with the same setting supplies 26.6 mm in an hour.
+A long capped run can therefore leave a rotor zone with a remaining deficit.
+Check actual application rate with catch cups and verify soil and plant settings
+before treating a modeled deficit as proof that the yard needs more water.
 
 ## Why minutes can be capped
 

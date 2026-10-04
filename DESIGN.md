@@ -5,6 +5,27 @@ incrementally; a CI grep gate (below) keeps drift from regrowing once the migrat
 is clean. This document is the source of truth a reviewer approves **once**, so the
 per-component migration is mechanical, not 163 individual judgment calls.
 
+## Product identity (0.9.4)
+
+Use warm paper and dark ink in Light, deep green and soft white in Dark. DM Sans
+is the interface family; Instrument Serif is reserved for page titles and the
+daily watering headline. Numbers and controls stay sans or monospace. Keep the
+brand mark prominent, borders clear, and shadows restrained. Colored header
+fields distinguish section identity from semantic decision states. Theme preferences,
+Auto, high contrast, reduced motion, and the radar's scientific scale remain.
+
+Measurement colors have named tokens: `--chart-water` blue, `--chart-rain` teal,
+`--chart-temperature` ochre, `--chart-soil` green, `--chart-pressure` violet and
+`--chart-wind` slate. Put a visible key beside each multi-series chart, with its
+units and line/bar shape. Trend-series hues remain stable. Threshold bars retain
+teal before the reference line and use amber only for the excess; a reached
+marker and "Threshold met" label distinguish the exact boundary. Rain beyond
+the ET budget uses green after its marker. Never rely on color alone.
+Label projections and retain missing data.
+Decision colors are separate: watering blue, held amber, fault red, unknown gray;
+confirmed completion and healthy equipment are green. Keep the reason in text
+beside the state; a saved plan is not proof of completed watering.
+
 ## Primitives
 
 Reach for a primitive before writing a raw element.
@@ -50,6 +71,17 @@ When in doubt: if it's a standalone "do this thing" action, it's a `<Button>`; i
 part of a custom control (a group, a chip rail, a slider), it stays.
 
 ## Values and descriptions
+
+Temperature callouts use `TemperatureValue`: a prominent number, raised degree
+glyph and smaller, readable F/C scale, kept on one line. It follows the viewer's
+unit preference and supplies a full spoken value. `StatTile` accepts
+`temperature_f` for this anatomy; do not concatenate a bare `F` onto a number.
+Compact forecast rows and chart axes may retain their existing short notation.
+
+Weather outlook cards explain the forecast signal before showing model values.
+CAPE and pressure readings belong in expandable Forecast details. Gusts or
+falling pressure alone do not earn a thunderstorm title. Label forecast peak
+windows explicitly and keep unreported readings absent.
 
 Keep each value together, including its unit. Do not split identifiers across
 lines, clip values, or replace them with an ellipsis. Let the description wrap

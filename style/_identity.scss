@@ -1,0 +1,87 @@
+// Section identity is separate from decision state. Colored header fields and
+// crisp edges give every surface a clear beginning in both reading themes.
+.panel, .hist-panel, .zone-detail__panel, .forecast-panel, .settings-card {
+  --panel-accent: var(--chart-water);
+  border-color: var(--elev-border);
+}
+.wind { --panel-accent: var(--chart-wind); }
+.rain, .humidity, .forecast-panel { --panel-accent: var(--chart-rain); }
+.solar { --panel-accent: var(--chart-temperature); }
+.pressure { --panel-accent: var(--chart-pressure); }
+.lightning { --panel-accent: var(--accent-lightning); }
+.zone-detail__panel { --panel-accent: var(--chart-soil); }
+.panel-title, .panel__title, .forecast-title, .forecast-section-title, .hist-panel__title,
+.zone-detail__panel-title, .settings-card__title, .rulelab__section-title {
+  padding: var(--space-2) var(--space-3);
+  background: color-mix(in oklab, var(--panel-accent, var(--accent)) 13%, var(--elev-1));
+  border-left: 3px solid var(--panel-accent, var(--accent));
+  border-bottom: 1px solid color-mix(in oklab, var(--panel-accent, var(--accent)) 35%, var(--elev-border));
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+}
+.weather-grid .panel-title::before { content: none; }
+.weather-observations > .panel { box-shadow: var(--shadow-2); }
+.condition-card {
+  --condition-accent: var(--chart-pressure);
+  border-left: 4px solid var(--condition-accent);
+  background: color-mix(in oklab, var(--condition-accent) 13%, var(--elev-1));
+}
+.condition-card[data-condition="heat"] { --condition-accent: var(--chart-temperature); }
+.condition-card.is-alert {
+  border-color: var(--accent-warn);
+  background: color-mix(in oklab, var(--accent-warn) 18%, var(--elev-1));
+}
+.condition-card__head { font-size: var(--text-h3); }
+.home-watering-verdict {
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center; gap: var(--space-3);
+}
+.history-views {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.history-views button {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) var(--space-3);
+  padding: var(--space-4); text-align: left; font: inherit; cursor: pointer;
+  border: 1px solid color-mix(in oklab, var(--view-accent) 55%, var(--elev-border)); border-radius: var(--radius-md);
+  border-top: 4px solid var(--view-accent);
+  background: color-mix(in oklab, var(--view-accent) 10%, var(--elev-1)); color: var(--text);
+  svg { grid-row: 1 / span 3; color: var(--view-accent); }
+  strong { font-size: var(--text-body); }
+  small { grid-column: 2; color: var(--text); line-height: 1.5; }
+  &[aria-pressed="true"] {
+    background: color-mix(in oklab, var(--view-accent) 19%, var(--elev-1));
+    border-color: var(--view-accent); box-shadow: inset 0 0 0 1px var(--view-accent);
+  }
+  &:hover { background: color-mix(in oklab, var(--view-accent) 23%, var(--elev-1)); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+}
+.history-view--daily { --view-accent: var(--chart-rain); }
+.history-view--runs { --view-accent: var(--chart-water); }
+.history-view__action { grid-column: 2; font-size: var(--text-caption); color: var(--text-bright); font-weight: 700; margin-top: var(--space-2); }
+.daily-log__zone {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-4);
+  padding: var(--space-3); border: 1px solid var(--elev-border); border-radius: var(--radius-sm);
+  background: var(--elev-2);
+  strong { color: var(--chart-water); }
+  p { grid-column: 1 / -1; }
+}
+.daily-log__runs-link { justify-self: start; padding: var(--space-2) 0; color: var(--accent-text); font-weight: 700; }
+.wind-update-note { margin: 0; color: var(--text-dim); font-size: var(--text-caption); line-height: 1.6; }
+@media (max-width: 760px) {
+  .home-watering-verdict {
+    grid-template-columns: auto minmax(0, 1fr) auto; row-gap: var(--space-2);
+    > span:nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
+    > span:last-child { grid-column: 3; grid-row: 1; }
+  }
+  .history-views { gap: var(--space-2); }
+  .history-views button { padding: var(--space-3); grid-template-columns: minmax(0, 1fr); }
+  .history-views button svg { grid-row: auto; }
+  .history-views button small { grid-column: 1; }
+  .history-view__action { grid-column: 1; }
+  .daily-log__zone { grid-template-columns: minmax(0, 1fr); }
+}
+// Selection adds a colored surface; its secondary text needs a stronger tone.
+.sensor-row.is-active .sensor-row__sub,
+.rulelab-history__item.is-active .rulelab-history__reason,
+.ui-list-item.is-selected .ui-list-item__subtitle { color: var(--text-dim); }

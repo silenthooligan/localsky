@@ -118,6 +118,7 @@ pub fn build(
         forecast_priority: config.forecast_priority.clone(),
         watering_policy: config.policy.clone(),
         manual_schedules: config.manual_schedules.clone(),
+        retention: config.retention.clone(),
         source_reachable: sources.reachable.clone(),
         source_last_seen: Some(sources.last_seen.clone()),
         push: Some(stores.push.clone()),

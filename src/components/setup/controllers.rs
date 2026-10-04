@@ -179,18 +179,17 @@ pub fn ControllersStep() -> impl IntoView {
             .unwrap_or_default();
         if controllers.is_empty() {
             return view! {
-                <div class="setup-empty">
+                <li class="setup-empty">
                     <p class="setup-step__body" class:u-mb3=true>
-                        "No controllers added yet. Add your hardware below, or, if you don't have "
-                        "irrigation hardware yet, simulate runs to explore scheduling first."
+                        "No controller yet. Add one below, or explore watering without hardware."
                     </p>
                     <Button
-                        variant="primary"
+                        variant="secondary"
                         on_click=Callback::new(add_dry_run)
                     >
-                        "I have no irrigation hardware (simulate)"
+                        "Simulate without hardware"
                     </Button>
-                </div>
+                </li>
             }
             .into_any();
         }
@@ -207,12 +206,7 @@ pub fn ControllersStep() -> impl IntoView {
                 {crate::voice::WHAT_RUNS_YOUR_SPRINKLERS}<HelpHint topic="controllers"/>
             </h2>
             <p class="setup-step__body">
-                "Which hardware fires your valves? OpenSprinkler and DIY boards (HTTP or MQTT) "
-                "talk directly on your network; Rachio, Hydrawise, B-hyve and Rain Bird connect "
-                "through their cloud APIs; Home Assistant fires the valves for everything else. "
-                "Add one, test the connection, then scan it to pull in your zones automatically. "
-                "No irrigation hardware? You can simulate runs to explore scheduling first, and "
-                "add real hardware any time."
+                "Connect your controller, test its connection, then import its zones. Choose a local connection, vendor cloud, or Home Assistant in the controller options."
             </p>
 
             <crate::components::setup::discover::NetworkScan mode="controllers" draft=draft/>
@@ -233,10 +227,7 @@ pub fn ControllersStep() -> impl IntoView {
             }}
 
             <p class="sensors-section__hint" class:u-mt3=true>
-                "Skipping is fine: with Home Assistant connected, LocalSky "
-                "synthesizes a Home Assistant controller automatically; otherwise add one later "
-                "under "<a href="/settings?section=devices">"Settings"</a>". Zones imported from a scan "
-                "land in the next step with sensible placeholders you can refine."
+                "Weather only? Skip this step. You can add a controller later in "<a href="/settings?section=devices">"Settings"</a>"."
             </p>
 
             <SetupFooter

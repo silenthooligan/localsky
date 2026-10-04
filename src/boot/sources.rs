@@ -152,13 +152,8 @@ fn open_sensor_history(storage: &Storage, config: &BootConfig) -> Option<SensorH
             c.pragma_update(None, "journal_mode", "WAL").ok();
             c.pragma_update(None, "synchronous", "NORMAL").ok();
             Some(
-                SensorHistoryStore::new(Arc::new(tokio::sync::Mutex::new(c))).with_retention_days(
-                    config
-                        .cfg
-                        .as_ref()
-                        .map(|c| c.persistence.retention_days)
-                        .unwrap_or_else(crate::config::schema::default_retention_days),
-                ),
+                SensorHistoryStore::new(Arc::new(tokio::sync::Mutex::new(c)))
+                    .with_retention_policy(config.retention.clone()),
             )
         }
         Err(e) => {

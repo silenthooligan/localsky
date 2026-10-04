@@ -53,6 +53,7 @@ impl ControllerRegistry {
     /// Replace the registry contents atomically. Used by the hot-reload
     /// path when config.controllers changes.
     pub fn set(&self, controllers: Vec<(Arc<dyn IrrigationController>, bool /* default */)>) {
+        self.locks.notification_runs.clear();
         let mut by_id = HashMap::new();
         let mut default_id = None;
         for (c, is_default) in controllers {

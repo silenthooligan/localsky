@@ -121,7 +121,7 @@ pub fn from_snapshot(
                 ("missed_window".into(), "The morning window passed before the scheduler could record its decision. Current conditions cannot establish the earlier outcome.".into())
             } else if held {
                 verdict.map(|v| (v.reason_code.clone(), v.reason.clone()))
-                    .unwrap_or_else(|| ("unknown".into(), "Decision unavailable; watering held".into()))
+                    .unwrap_or_else(|| ("unknown".into(), "Decision unavailable; watering skipped".into()))
             } else if zone.smart_suppressed.as_ref().is_some_and(|s| s.active_today) {
                 ("manual_schedule".into(), "An owner schedule replaces automatic irrigation today".into())
             } else if zone.planned_run_seconds == 0 {

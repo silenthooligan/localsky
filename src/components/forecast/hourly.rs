@@ -4,6 +4,7 @@
 // small screens so phone users get the whole 48h without zooming.
 
 use crate::components::forecast::glyph::weather_code_glyph;
+use crate::components::ui::ChartKey;
 use crate::components::units_fmt::{fmt_optional_temp_short, use_unit_prefs, UnitPrefs};
 use crate::forecast::snapshot::{ForecastSnapshot, HourlyEntry};
 use crate::timefmt::{format_hm, format_wday_short};
@@ -37,6 +38,10 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     }}
                 </span>
             </header>
+            <div class="chart-key">
+                <ChartKey label="Temperature" color="var(--chart-temperature)"/>
+                <ChartKey label="Rain chance (%)" color="var(--chart-rain)" bars=true/>
+            </div>
             // Horizontally scrollable, so it is focusable for a keyboard.
             <div class="hourly-scroll" tabindex="0" role="region" aria-label="Hourly forecast">
                 {move || {
@@ -52,6 +57,7 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     }
                 }}
             </div>
+            <p class="chart-note">"Scroll for later hours. Rain bars show probability, not amount. A dash means unavailable."</p>
         </section>
     }
 }
@@ -64,7 +70,7 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
     let header_h: f64 = 70.0;
     let temp_h: f64 = 90.0;
     let rain_h: f64 = 50.0;
-    let total_h = header_h + temp_h + rain_h + 10.0;
+    let total_h = header_h + temp_h + rain_h + 24.0;
 
     let temps: Vec<Option<f64>> = entries.iter().map(|e| e.temp_f).collect();
     let (temp_path, temp_area) = temperature_paths(&temps, col_w, header_h, temp_h);
@@ -132,6 +138,7 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
             let opacity = 0.35 + 0.65 * frac;
             let title = format!("{prob}% rain at {}", format_local_hour(e.time_epoch, &tz));
             view! {
+                <g>
                 <rect
                     x={x.to_string()}
                     y={y.to_string()}
@@ -143,6 +150,10 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
                 >
                     <title>{title}</title>
                 </rect>
+                <text x={(x + bar_w / 2.0).to_string()}
+                    y={(rain_baseline + rain_h + 17.0).to_string()}
+                    text-anchor="middle" class="hourly-time">{format!("{prob}%")}</text>
+                </g>
             }
             .into_any()
         })
@@ -172,8 +183,8 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
 
             <defs>
                 <linearGradient id="hourly-temp-grad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="var(--accent-warm)" stop-opacity="0.20"/>
-                    <stop offset="100%" stop-color="var(--accent-warm)" stop-opacity="0"/>
+                    <stop offset="0%" stop-color="var(--chart-temperature)" stop-opacity="0.12"/>
+                    <stop offset="100%" stop-color="var(--chart-temperature)" stop-opacity="0"/>
                 </linearGradient>
             </defs>
             {now_line}

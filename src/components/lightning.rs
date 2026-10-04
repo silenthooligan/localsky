@@ -87,7 +87,8 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                 }
             >
             <div class="lightning-row">
-                <svg viewBox="-50 -50 100 100" class="strike-radar">
+                <svg viewBox="-50 -50 100 100" class="strike-radar" role="img"
+                    aria-label="Recent lightning by distance. Dot direction is illustrative, not a measured bearing.">
                     <defs>
                         <radialGradient id="radarGlow">
                             <stop offset="0%" stop-color="rgba(255,235,150,0.18)"/>
@@ -150,6 +151,10 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     </div>
                 </div>
             </div>
+            <p class="chart-note">{move || format!(
+                "Dots show strikes in the last hour. Rings: {}, {}, {}. Direction is illustrative; more distant strikes sit at the outer edge.",
+                fmt_distance_mi(10.0, prefs.get()), fmt_distance_mi(20.0, prefs.get()), fmt_distance_mi(30.0, prefs.get())
+            )}</p>
             <Show when=move || has_community.get()>
                 <p class="lightning-attribution">
                     "Includes lightning data from "

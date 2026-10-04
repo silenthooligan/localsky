@@ -62,7 +62,7 @@ pub fn help_topic(topic: &str) -> &'static str {
         "forecast" =>
             "Next-rain probability, expected amounts, and the heat-stress + wind metrics the skip rules check. Live, refreshed every 30 minutes.",
         "skip-breakdown" =>
-            "Each row shows one skip-rule input next to its threshold. A red bar means that input is currently outside its allowed range and will trip a skip.",
+            "Each row compares a current input with its threshold. Read the rule result and final decision together; exemptions can change whether a rule stops watering.",
         "advisor" =>
             "Optional LLM advisor. Reads the same inputs the decision uses and explains the verdict in plain English. Off by default; configure under Settings -> LLM.",
         "location" =>
@@ -92,11 +92,11 @@ pub fn help_topic(topic: &str) -> &'static str {
         "zones" =>
             "A zone is one chunk of yard on one valve. Its grass species, soil texture, and area drive how much water is scheduled; everything else has a sensible default under Advanced.",
         "theme" =>
-            "How LocalSky looks on this device: Dark, Light, Auto (follow your system), or High-contrast. Per-browser and applied instantly.",
+            "Choose Field Green, Slate, or Classic Blue, then Light, Dark, Auto, or High contrast. Choices apply instantly and stay in this browser.",
         "irrigation-engine" =>
             "How a run is sized: the scheduling model, cycle-and-soak pacing, and the seasonal water budget. The thresholds that skip a run live on Skip rules.",
         "zone-math" =>
-            "How this morning's minutes were worked out: the deficit or the weekly target, this zone's throughput, the seasonal adjustment, and the cap that holds it.",
+            "How this morning's minutes were worked out: the deficit or the weekly target, this zone's throughput, the seasonal adjustment, and any limit on run time.",
         "sensors" =>
             "Every weather and soil reading LocalSky holds, and which source each one came from. A receiver shows its readings the moment they arrive.",
         "units" =>

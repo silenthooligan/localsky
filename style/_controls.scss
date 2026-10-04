@@ -98,7 +98,8 @@
 // extra needed (armed styling is gated on .stop-all--armed).
 
 .radar-time {
-  flex: 1;
+  flex: 0 0 auto;
+  white-space: nowrap;
   text-align: left;
   color: var(--accent);
 }
@@ -111,7 +112,7 @@
 }
 
 .leaflet-control-attribution {
-  background: rgba(0, 0, 0, 0.55) !important;
+  background: var(--bg-panel) !important;
   color: var(--text-faint) !important;
   font-size: 0.65rem !important;
   a { color: var(--text-dim) !important; }
@@ -175,12 +176,12 @@
     // (set in shell()). On notched iPhones this lifts the bar off the home
     // indicator so it doesn't sit half-occluded.
     padding-bottom: calc(0.4rem + env(safe-area-inset-bottom));
-    background: rgba(8, 12, 20, 0.78);
+    background: var(--elev-1);
     -webkit-backdrop-filter: var(--blur-chrome);
     backdrop-filter: var(--blur-chrome);
     border-top: 1px solid var(--glass-border);
     box-shadow:
-      0 -4px 20px rgba(0, 0, 0, 0.5),
+      0 -2px 10px rgba(0, 0, 0, 0.08),
       var(--specular);
   }
 
@@ -202,7 +203,7 @@
 
   .mobile-tab.is-on {
     color: var(--text-bright);
-    background: rgba(255, 255, 255, 0.05);
+    background: color-mix(in oklab, var(--accent) 12%, var(--elev-1));
   }
 
   .mobile-tab-glyph {
@@ -262,103 +263,7 @@
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// "Now running" banner. Always present in the irrigation page DOM; renders
-// only when at least one zone is running (the component returns ().into_any()
-// when none are). Sticky to the top of /irrigation so a running zone is
-// always one tap from being stopped, regardless of scroll position.
-// ─────────────────────────────────────────────────────────────────────────
-.running-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-  padding: 0.7rem 0.95rem;
-  margin: 0 0 1rem 0;
-  @include surface($background: (linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--verdict-run) 18%, transparent),
-      color-mix(in oklab, var(--verdict-run) 5%, transparent)
-    ),
-    var(--glass-bg)), $border: (1px solid color-mix(in oklab, var(--verdict-run) 35%, transparent)), $radius: (var(--radius)), $shadow: (0 6px 24px color-mix(in oklab, var(--verdict-run) 18%, transparent),
-    var(--specular)));
-  // Watering NOW is a positive, working state -> verdict-run teal, not red. Red
-  // is the STOP semantic (kept on the stop button); a red banner + red stop
-  // button destroyed the signal. (S4 verdict-color discipline.)
-
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-
-}
-
-.running-banner-pulse {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--verdict-run);
-  box-shadow: 0 0 12px color-mix(in oklab, var(--verdict-run) 90%, transparent);
-  --pulse-min: 0.45;
-  animation: pulse-scale 1.6s ease-in-out infinite;
-}
-
-@include reduced-motion {
-  .running-banner-pulse {
-    animation: none;
-    opacity: 0.85;
-  }
-}
-
-.running-banner-text {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.running-banner-zone {
-  font-family: var(--font-display);
-  font-size: 1rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-bright);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.running-banner-meta {
-  font-size: 0.78rem;
-  color: var(--text-dim);
-  margin-top: 0.1rem;
-}
-
-// Live measured flow from the controller's flow meter, shown only while a
-// zone runs and the controller reports flow. Slightly brighter than meta
-// so the live reading reads as the active number.
-.running-banner-flow {
-  font-size: 0.82rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--accent, var(--text-bright));
-  margin-top: 0.1rem;
-}
-
-.running-banner-stop {
-  flex: 0 0 auto;
-  padding: 0.55rem 1.1rem;
-  font-size: 0.85rem;
-  letter-spacing: 0.06em;
-}
-
-@include phone {
-  // On mobile, stick to the top of the scroll container so the banner stays
-  // visible while the user scrolls through bento cells.
-  .running-banner {
-    position: sticky;
-    top: 0;
-    z-index: var(--z-nav);
-    margin: -0.25rem -0.25rem 1rem -0.25rem;
-    border-radius: var(--radius-md);
-  }
-}
-
-// Soil-anomaly banner. Mirrors the running-banner layout but uses the warn
+// Soil-anomaly banner uses the warn
 // token (amber) instead of the verdict-run teal: a suspect/offline probe is a
 // "needs attention" state, not a positive working one. Quiet by default
 // (the component renders nothing when there are no anomalies).

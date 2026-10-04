@@ -13,9 +13,10 @@
 // POST /api/push/subscribe slip through). The model is:
 //
 //   - BLOCK every non-GET/HEAD/OPTIONS request under /api/ ...
-//   - ... EXCEPT a tiny explicit ALLOWLIST of demo-legit writes:
+//   - ... EXCEPT a tiny explicit ALLOWLIST of demo-legit POSTs:
 //       POST /api/auth/login   (the demo's auth UI is explorable)
 //       POST /api/auth/logout
+//       POST /api/irrigation/simulate (pure calculation; no writes/probes)
 //     (+ their /api/v1/* forms). No account can be created and no token
 //     minted: POST /api/auth/setup and the token CRUD are NOT allowlisted,
 //     so they remain blocked by the default-deny rule.
@@ -125,12 +126,17 @@ fn is_blocked_demo_request(method: &Method, path: &str) -> bool {
     // it is added, with no edit here required (closes the enumeration gap
     // that left POST /api/zones/photo + POST /api/push/subscribe live).
     //
-    // ALLOWLIST: only login + logout, so the demo's auth UI stays
-    // explorable. Account creation (POST /api/auth/setup) and token CRUD
+    // ALLOWLIST: login/logout and the read-only simulator. The simulator
+    // reads a snapshot and policy, computes traces and never reaches a
+    // controller or persistence. Account creation and token CRUD
     // are deliberately NOT here, so they remain blocked. Path is already
     // version-normalized, so /api/v1/auth/login matches /api/auth/login.
-    let allowed_write = path == "/api/auth/login" || path == "/api/auth/logout";
-    !allowed_write
+    let allowed_post = *method == Method::POST
+        && matches!(
+            path,
+            "/api/auth/login" | "/api/auth/logout" | "/api/irrigation/simulate"
+        );
+    !allowed_post
 }
 
 /// Tower middleware: when LOCALSKY_DEMO=1, refuse state-changing +
@@ -159,6 +165,28 @@ mod tests {
         assert!(blocked(Method::PUT, "/api/v1/config/raw"));
         assert!(blocked(Method::POST, "/api/config/rollback"));
         assert!(blocked(Method::POST, "/api/v1/config/rollback"));
+    }
+
+    #[test]
+    fn quick_run_cannot_actuate_the_public_demo() {
+        for prefix in ["/api", "/api/v1"] {
+            assert!(blocked(
+                Method::POST,
+                &format!("{prefix}/irrigation/notification-stop")
+            ));
+            assert!(blocked(
+                Method::POST,
+                &format!("{prefix}/irrigation/quick-run")
+            ));
+            assert!(blocked(
+                Method::POST,
+                &format!("{prefix}/irrigation/quick-run/stop")
+            ));
+            assert!(!blocked(
+                Method::GET,
+                &format!("{prefix}/irrigation/quick-run")
+            ));
+        }
     }
 
     #[test]
@@ -226,7 +254,7 @@ mod tests {
     fn blocks_irrigation_action() {
         assert!(blocked(Method::POST, "/api/irrigation/action"));
         assert!(blocked(Method::POST, "/api/v1/irrigation/action"));
-        // Reads + the SSE stream + simulate-as-GET stay open.
+        // Reads and the SSE stream stay open.
         assert!(!blocked(Method::GET, "/api/irrigation/snapshot"));
         assert!(!blocked(Method::GET, "/api/v1/irrigation/stream"));
     }
@@ -283,12 +311,18 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_only_admits_login_logout() {
-        // The sole demo-legit writes: login + logout, both prefixes.
+    fn allowlist_only_admits_explicit_posts() {
+        // Auth UI exploration and pure simulation, both prefixes.
         assert!(!blocked(Method::POST, "/api/auth/login"));
         assert!(!blocked(Method::POST, "/api/v1/auth/login"));
         assert!(!blocked(Method::POST, "/api/auth/logout"));
         assert!(!blocked(Method::POST, "/api/v1/auth/logout"));
+        assert!(!blocked(Method::POST, "/api/irrigation/simulate"));
+        assert!(!blocked(Method::POST, "/api/v1/irrigation/simulate"));
+        assert!(blocked(Method::PUT, "/api/irrigation/simulate"));
+        assert!(blocked(Method::DELETE, "/api/v1/irrigation/simulate"));
+        assert!(blocked(Method::POST, "/api/irrigation/simulate/apply"));
+        assert!(blocked(Method::PUT, "/api/auth/login"));
         // Everything else under /api/auth that mutates is still blocked.
         assert!(blocked(Method::POST, "/api/auth/setup"));
         assert!(blocked(Method::POST, "/api/auth/tokens"));

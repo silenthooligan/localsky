@@ -17,6 +17,11 @@ LocalSky brings your weather, soil conditions, and irrigation into one app. It d
 
 Run it on your own server, NAS, Raspberry Pi, or Home Assistant OS. Use your existing supported controller and sensors. Home Assistant is optional. There is no LocalSky cloud account or subscription.
 
+**LocalSky 1.0.0 is the first stable release.** It adds Quick Run, watering
+progress and Stop across the app, Field Green and Classic Blue theme choices,
+and clearer setup, Settings and watering decisions. Feedback remains available
+in the app. [Release notes](https://github.com/silenthooligan/localsky/releases/tag/v1.0.0)
+
 ![Irrigation overview with today's outcome, tomorrow's projection, and zone controls](docs/assets/screenshots/irrigation-desktop.png)
 
 ## Start here
@@ -37,7 +42,7 @@ with light and dark reading themes, search, and mobile navigation.
 
 Each zone has its own soil, plants, sprinkler rate, and limits. LocalSky uses reference evapotranspiration and a soil water balance to estimate demand. Rain and completed watering replenish that balance; soil capacity limits how much water can remain available.
 
-The plan carries those conditions forward through the forecast. Expected rain can defer watering when the zone can wait. Restrictions, weather holds, and available watering time also shape the schedule.
+The plan carries those conditions forward through the forecast. Expected rain can defer watering when the zone can wait. Restrictions, weather conditions, and available watering time also shape the schedule.
 
 **Today is a record. Tomorrow is a projection.** Open Watering decisions for the inputs and zone reasons. History shows runs, cycles, and recorded skipped mornings. Missing measurements remain unknown.
 
@@ -60,7 +65,7 @@ You can use LocalSky for weather alone. Add a controller when you want irrigatio
 
 Support and testing vary by adapter. Check the [compatibility guide](https://localsky.io/docs/controllers) before choosing hardware.
 
-Local operation depends on the connections you choose. LAN sensors and controllers can work without vendor clouds; online forecasts, radar, and cloud controllers need internet access. If required decision data becomes unavailable, automatic watering can be held. [Offline behavior →](https://localsky.io/docs/standalone)
+Local operation depends on the connections you choose. LAN sensors and controllers can work without vendor clouds; online forecasts, radar, and cloud controllers need internet access. If required decision data becomes unavailable, automatic watering can be paused. [Offline behavior →](https://localsky.io/docs/standalone)
 
 ## Install with Docker
 
@@ -75,7 +80,7 @@ docker run -d \
 
 Open **http://localhost:8090** and complete setup. Your configuration and history live in the persistent volume. For Tempest broadcasts and LAN discovery, follow the [networking instructions](https://localsky.io/docs/getting-started#networking-for-local-devices).
 
-LocalSky is in beta. Review zone bindings, application rates, and run limits before enabling automatic watering.
+Review zone bindings, application rates, and run limits before enabling automatic watering.
 
 ## Build on LocalSky
 

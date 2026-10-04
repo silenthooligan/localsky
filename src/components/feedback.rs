@@ -1,4 +1,4 @@
-// Beta feedback affordance. A fixed pill (desktop bottom-right; above
+// Feedback affordance. A fixed pill (desktop bottom-right; above
 // the tab bar on phones) that opens a small composer: pick Bug or Idea,
 // describe it, and "Open on GitHub" builds a prefilled issue with the
 // instance's diagnostic context (version, API, mode, route, viewport)
@@ -7,12 +7,12 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{Button, Icon};
+use crate::components::ui::{Button, Icon, Sheet};
 #[cfg(feature = "hydrate")]
 use crate::docs::REPO_URL;
 
 #[component]
-pub fn BetaFeedback() -> impl IntoView {
+pub fn Feedback() -> impl IntoView {
     let open = RwSignal::new(false);
     let kind = RwSignal::new("bug".to_string());
     let text = RwSignal::new(String::new());
@@ -78,21 +78,21 @@ pub fn BetaFeedback() -> impl IntoView {
                 .collect::<String>();
             let title = if title_seed.is_empty() {
                 if is_bug {
-                    "Beta feedback: bug".to_string()
+                    "LocalSky feedback: bug".to_string()
                 } else {
-                    "Beta feedback: idea".to_string()
+                    "LocalSky feedback: idea".to_string()
                 }
             } else {
                 title_seed
             };
             let label = if is_bug { "bug" } else { "enhancement" };
             let body = format!(
-                "{}\n\n---\n**Environment** (auto-filled by the in-app beta feedback button)\n{}\n",
+                "{}\n\n---\n**Environment** (auto-filled by the in-app feedback button)\n{}\n",
                 body_text,
                 ctx.get_untracked()
             );
             let url = format!(
-                "{REPO_URL}/issues/new?title={}&body={}&labels={label},beta-feedback",
+                "{REPO_URL}/issues/new?title={}&body={}&labels={label}",
                 js_sys::encode_uri_component(&title),
                 js_sys::encode_uri_component(&body),
             );
@@ -114,32 +114,32 @@ pub fn BetaFeedback() -> impl IntoView {
                 aria-controls="beta-fb-sheet"
             >
                 <Icon name="zap" size=14/>
-                "Beta feedback"
+                "Feedback"
             </button>
-
-            {move || open.get().then(|| view! {
-                <div class="beta-fb__sheet" id="beta-fb-sheet" role="dialog" aria-label="Send beta feedback">
-                    <p class="beta-fb__title">"Help shape LocalSky"</p>
+        </div>
+            <Sheet open title="Send feedback".to_string() id="beta-fb-sheet">
                     <p class="beta-fb__sub">
-                        "This is a beta: rough edges are findable, and reports like "
-                        "yours are how they get fixed."
+                        "Report a problem or suggest an improvement."
                     </p>
-                    <div class="beta-fb__kind" role="radiogroup" aria-label="Feedback type">
+                    <div class="beta-fb__kind" role="group" aria-label="Feedback type">
                         <button
                             type="button"
                             class="beta-fb__kind-btn"
                             class:is-active=move || kind.get() == "bug"
+                            aria-pressed=move || kind.get() == "bug"
                             on:click=move |_| kind.set("bug".into())
                         >"Something broke"</button>
                         <button
                             type="button"
                             class="beta-fb__kind-btn"
                             class:is-active=move || kind.get() == "idea"
+                            aria-pressed=move || kind.get() == "idea"
                             on:click=move |_| kind.set("idea".into())
                         >"I have an idea"</button>
                     </div>
                     <textarea
                         class="beta-fb__text"
+                        aria-label="Your feedback"
                         rows="4"
                         placeholder="What happened, or what would make this better? First line becomes the title."
                         prop:value=move || text.get()
@@ -153,8 +153,6 @@ pub fn BetaFeedback() -> impl IntoView {
                         "Opens a prefilled GitHub issue with your version and page attached. "
                         "Nothing is sent until you submit it there."
                     </p>
-                </div>
-            })}
-        </div>
+            </Sheet>
     }
 }

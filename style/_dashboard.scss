@@ -6,23 +6,16 @@
 // Load order is the cascade: see the @use list in main.scss.
 
 // ─────────────────────────────────────────────────────────────────────
-// Weather dashboard grid (v3)
-//
-// Narrow: a plain stacked flex column (vertical scroll expected).
-// Wide (>=1440px): an area grid -- hero + wind + lightning across the top row,
-//   the four compact metric cards (rain / humidity / pressure / sun) across the
-//   second row, and the radar spanning the full-width bottom.
-// Ultrawide (>=2000px): the grid locks to the viewport height so the whole
-//   dashboard shows without scrolling; the radar absorbs the leftover height
-//   and the forecast strips (.weather-extra) sit just below the fold.
-// Panels are placed by their own root class via grid-template-areas.
+// Weather dashboard: a tall radar beside independently sized observations.
+// On phones, radar follows current conditions instead of sitting below every
+// metric. Paired cards share a natural-height row so their headers align.
 // ─────────────────────────────────────────────────────────────────────
 .weather-grid {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
 }
-.weather-grid > * {
+.weather-grid > *, .weather-observations > * {
   min-width: 0;
 }
 .weather-extra {
@@ -30,85 +23,44 @@
   flex-direction: column;
   gap: 1.25rem;
 }
+.weather-observations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.weather-grid .radar { margin: 0; }
+.weather-grid .radar-map { height: 440px; min-height: 320px; }
 
-@media (min-width: 1440px) {
+@media (min-width: 761px) {
+  .weather-observations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
+}
+@media (min-width: 1101px) {
   .weather-grid {
     display: grid;
-    // Four metric columns on the left + a wide radar column on the right that
-    // spans every row, so the radar stays a tall side panel (the right way to
-    // read a map) while the metrics + forecast fill the rest.
-    grid-template-columns: repeat(4, 1fr) 2.2fr;
-    grid-template-rows: minmax(280px, auto) auto auto;
-    grid-template-areas:
-      "hero hero wind lightning radar"
-      "rain humidity pressure sun  radar"
-      "extra extra extra extra     radar";
-    gap: var(--space-4);
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: "hero radar" "observations radar" "extra extra";
+    align-items: start;
   }
-  .weather-grid > .hero {
-    grid-area: hero;
-  }
-  .weather-grid > .wind {
-    grid-area: wind;
-  }
-  .weather-grid > .lightning {
-    grid-area: lightning;
-  }
-  .weather-grid > .rain {
-    grid-area: rain;
-  }
-  .weather-grid > .humidity {
-    grid-area: humidity;
-  }
-  .weather-grid > .pressure {
-    grid-area: pressure;
-  }
-  .weather-grid > .solar {
-    grid-area: sun;
-  }
-  .weather-grid > .radar {
-    grid-area: radar;
-    margin-top: 0;
-  }
-  .weather-grid > .weather-extra {
-    grid-area: extra;
-    min-height: 0;
-  }
-  // Every cell's card fills its grid area.
-  .weather-grid > .panel,
-  .weather-grid > .hero,
-  .weather-grid > .radar {
-    height: 100%;
-    min-height: 0;
-  }
-  // The radar map fills its full-height side column instead of a fixed 480px.
-  .weather-grid > .radar,
-  .weather-grid > .radar > .radar-panel,
-  .weather-grid > .radar .radar-map-shell {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    flex: 1;
-  }
-  .weather-grid > .radar .radar-map {
-    flex: 1;
-    height: auto;
-    min-height: 240px;
-  }
-  // Top-row cards center their content vertically so the taller hero row reads
-  // as intentional instead of top-loaded with empty space beneath.
-  .weather-grid > .hero,
-  .weather-grid > .wind,
-  .weather-grid > .lightning {
-    justify-content: center;
-  }
+  .weather-grid > .hero { grid-area: hero; }
+  .weather-grid > .weather-observations { grid-area: observations; }
+  .weather-grid > .radar { grid-area: radar; align-self: stretch; }
+  .weather-grid > .weather-extra { grid-area: extra; }
+  .weather-grid .radar-panel { height: 100%; display: flex; flex-direction: column; }
+  .weather-grid .radar-map-shell { flex: 1; min-height: 600px; }
+  .weather-grid .radar-map { position: absolute; inset: 0; height: 100%; }
 }
-
-// The radar spans all three grid rows, so its height equals the left column's
-// content height automatically -- its bottom edge lines up with the bottom of
-// the forecast strips. (We deliberately do NOT force the grid to 100vh: that
-// stretched the radar past the shorter left content. A compact dashboard still
-// fits an ultrawide viewport without scrolling.)
+.weather-grid > .hero, .weather-observations > .panel { container-type: inline-size; }
+.weather-observations > .panel { padding: var(--space-4); }
+.weather-observations .lightning-empty { min-height: 0; }
+@container (max-width: 450px) {
+  .weather-grid .wind-row, .weather-grid .lightning-row, .weather-grid .solar-row { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .weather-grid .wind-bars, .weather-grid .lightning-stats { width: 100%; }
+  .weather-grid .rain-stats { grid-template-columns: minmax(0, 1fr); }
+  .weather-grid .pressure-row { flex-wrap: wrap; }
+  .weather-grid .big-number { font-size: clamp(1.4rem, 9cqi, 2.6rem); white-space: nowrap; }
+  .weather-grid .compass, .weather-grid .strike-radar { width: 90px; height: 90px; }
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Header / brand identity
@@ -142,8 +94,8 @@
   &__mark {
     display: inline-flex;
     align-items: center;
-    width: 28px;
-    height: 28px;
+    width: 36px;
+    height: 36px;
     flex-shrink: 0;
     // Inline SVG inside; let it scale to the parent.
     > svg, > img { width: 100%; height: 100%; display: block; }
@@ -387,19 +339,7 @@
   overflow: hidden;
 }
 
-.panel::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 60%;
-  background: radial-gradient(
-    ellipse at 50% 0%,
-    rgba(255, 255, 255, 0.06),
-    transparent 70%
-  );
-  pointer-events: none;
-  z-index: -1;
-}
+.panel::before { content: none; }
 
 // Browsers without backdrop-filter (mostly older mobile WebView) get a
 // solid panel that still reads correctly. Detect via @supports.
@@ -422,7 +362,7 @@
   width: 3px;
   height: 0.85em;
   border-radius: 999px;
-  background: var(--grad-flow);
+  background: var(--panel-accent, var(--accent));
 }
 
 .big-number {

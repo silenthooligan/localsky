@@ -92,37 +92,6 @@ pub fn Sheet(
     let close = move |_| request_close.run(());
     let panel: NodeRef<leptos::html::Div> = NodeRef::new();
 
-    // Focus management: remember the opener, focus the panel's close
-    // button on open, restore on close.
-    #[cfg(feature = "hydrate")]
-    {
-        use wasm_bindgen::JsCast;
-        let prev_focus: StoredValue<Option<web_sys::HtmlElement>> = StoredValue::new(None);
-        Effect::new(move |_| {
-            let is_open = open.get();
-            let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
-                return;
-            };
-            if is_open {
-                prev_focus.set_value(
-                    doc.active_element()
-                        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()),
-                );
-                if let Some(panel_el) = panel.get() {
-                    let el: &web_sys::Element = panel_el.as_ref();
-                    if let Ok(Some(btn)) = el.query_selector(".sheet__close") {
-                        if let Ok(btn) = btn.dyn_into::<web_sys::HtmlElement>() {
-                            let _ = btn.focus();
-                        }
-                    }
-                }
-            } else if let Some(prev) = prev_focus.with_value(|p| p.clone()) {
-                let _ = prev.focus();
-                prev_focus.set_value(None);
-            }
-        });
-    }
-
     // Everything behind the sheet goes inert while it is open.
     //
     // The obvious move, marking <main class="page"> inert, does not work:
@@ -139,6 +108,7 @@ pub fn Sheet(
         // arena rejects it. Same reason as the keydown closure below.
         let marked: StoredValue<Vec<web_sys::Element>, LocalStorage> =
             StoredValue::new_local(Vec::new());
+        let prev_focus: StoredValue<Option<web_sys::HtmlElement>> = StoredValue::new(None);
 
         let release = move || {
             if let Some(list) = marked.try_update_value(std::mem::take) {
@@ -151,6 +121,12 @@ pub fn Sheet(
         Effect::new(move |_| {
             if !open.get() {
                 release();
+                // The opener cannot receive focus while it is still inert.
+                // Keep release and focus restoration in the same effect.
+                if let Some(prev) = prev_focus.with_value(|p| p.clone()) {
+                    let _ = prev.focus();
+                    prev_focus.set_value(None);
+                }
                 return;
             }
             let Some(panel_el) = panel.get() else {
@@ -159,9 +135,18 @@ pub fn Sheet(
             let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
                 return;
             };
+            prev_focus.set_value(
+                doc.active_element()
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()),
+            );
+            let panel_ref: &web_sys::Element = panel_el.as_ref();
+            if let Ok(Some(btn)) = panel_ref.query_selector(".sheet__close") {
+                if let Ok(btn) = btn.dyn_into::<web_sys::HtmlElement>() {
+                    let _ = btn.focus();
+                }
+            }
             let body: Option<web_sys::Element> = doc.body().map(|b| b.unchecked_into());
             // Start at the sheet wrapper, which is the panel's parent.
-            let panel_ref: &web_sys::Element = panel_el.as_ref();
             let mut node: web_sys::Element = panel_ref.clone();
             if let Some(wrapper) = node.parent_element() {
                 node = wrapper;

@@ -383,7 +383,7 @@ pub fn compute_zone_for_horizon(
     } else if next_24h_rain_in.is_none() {
         (
             0,
-            "Rain forecast unavailable for the next 24 hours; watering held".into(),
+            "Rain forecast unavailable for the next 24 hours; watering skipped".into(),
         )
     } else if next_24h_rain_in.is_some_and(|amount| amount >= g.session_rain_defer_in) {
         (

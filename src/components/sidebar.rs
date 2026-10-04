@@ -23,7 +23,7 @@ pub fn Sidebar() -> impl IntoView {
         <div class="mobile-app-bar">
             <a href="/" class="header-brand" aria-label="LocalSky home">
                 <span class="header-brand__mark" aria-hidden="true">
-                    <img src="/brand-mark.svg" alt="" width="20" height="20"/>
+                    <img src=crate::base::url("/brand-mark.svg") alt="" width="20" height="20"/>
                 </span>
                 <span>
                     <span class="header-brand__local">"LOCAL"</span><span class="header-brand__sky">"SKY"</span>
@@ -42,7 +42,7 @@ pub fn Sidebar() -> impl IntoView {
                     // Lucide-style outline that diverged from the
                     // real logomark; using the real SVG here keeps
                     // them in sync.
-                    <img src="/brand-mark.svg" alt="" width="32" height="32"/>
+                    <img src=crate::base::url("/brand-mark.svg") alt="" width="32" height="32"/>
                 </span>
                 <span class="sidebar-brand-name">
                     <span class="header-brand__local">"LOCAL"</span><span class="header-brand__sky">"SKY"</span>

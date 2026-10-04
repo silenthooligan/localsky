@@ -74,7 +74,7 @@ pub(super) fn recorded_morning(runs: &[RunRecord], now: i64, tz: &str) -> Option
         .into_iter()
         .filter(|group| day_key_in_tz(group[0].start_epoch, tz) == today)
         .flatten()
-        .filter(|r| r.source == "smart_morning")
+        .filter(crate::history::rollup::is_automatic_record)
         .collect();
     if automatic.is_empty() {
         return None;
@@ -108,7 +108,7 @@ pub(super) fn recorded_morning(runs: &[RunRecord], now: i64, tz: &str) -> Option
     } else if automatic.iter().all(|r| r.status == "skipped") {
         "Did not water".to_string()
     } else {
-        "Run recorded · awaiting outcome".to_string()
+        "Watering not confirmed".to_string()
     };
     if reasons.is_empty() {
         reasons.push(
@@ -153,9 +153,9 @@ pub(super) fn morning(history: &HistoryWindow, now: i64, tz: &str) -> MorningSum
                 "scheduled_legacy" if day.zones.iter().all(|z| z.reason_code == "soil_not_due") => {
                     "No automatic watering requested"
                 }
-                "scheduled" => "Morning plan recorded · see run log for delivery",
+                "scheduled" => "Watering planned · completion not confirmed",
                 "missed_window" => "Morning window missed",
-                _ => "Recorded hold decisions · no automatic run on record",
+                _ => "Skip decisions recorded · no automatic run on record",
             };
             MorningSummary {
                 state: if headline == "No automatic watering requested" {
@@ -237,5 +237,35 @@ mod tests {
             recorded_morning(&runs, now, "UTC").unwrap().state,
             MorningState::Unconfirmed
         );
+    }
+
+    #[test]
+    fn controller_cycles_keep_their_automatic_identity_without_double_counting() {
+        let now = 1789210317;
+        let mut runs = vec![RunRecord {
+            zone: "back_yard".into(),
+            source: "ha_refresher".into(),
+            session_id: Some("smart:2026-09-12:back_yard".into()),
+            start_epoch: now - 600,
+            duration_s: 120,
+            status: "completed".into(),
+            ..Default::default()
+        }];
+        let mut second = runs[0].clone();
+        second.start_epoch += 300;
+        runs.push(second);
+        runs.push(runs[0].clone()); // An overlapping delivery record is not more water.
+        let summary = recorded_morning(&runs, now, "UTC").unwrap();
+        assert_eq!(summary.state, MorningState::Watered);
+        assert_eq!(summary.headline, "Watered 4 min");
+        runs[0].status = "aborted".into();
+        assert_eq!(
+            recorded_morning(&runs, now, "UTC").unwrap().state,
+            MorningState::Unconfirmed
+        );
+        for r in &mut runs {
+            r.session_id = Some("manual:back_yard".into());
+        }
+        assert!(recorded_morning(&runs, now, "UTC").is_none());
     }
 }

@@ -246,10 +246,11 @@ fn why_for_next_slot(reason_code: &str, reason: &str) -> String {
             "Heavy rain is expected over the surrounding days, so the run is skipped.".to_string()
         }
         "freeze_now" | "overnight_freeze" | "soil_frost" => {
-            "Freezing conditions are expected, so watering is held to avoid ice damage.".to_string()
+            "Freezing conditions are expected, so watering is skipped to avoid ice damage."
+                .to_string()
         }
         "wind_now" | "wind_forecast" => {
-            "High wind is expected; spray would drift, so the run is held.".to_string()
+            "High wind is expected; spray would drift, so the run is skipped.".to_string()
         }
         "soil_saturation" => {
             "The soil is projected to still be saturated, so no watering is needed.".to_string()
@@ -420,18 +421,20 @@ fn why_for_fired(r: &RuleEval) -> String {
         }
         "rain_now" => "It is raining right now, so watering would be wasted.",
         "freeze_now" => {
-            "It is cold enough to risk freezing, so watering is held to protect \
+            "It is cold enough to risk freezing, so watering is skipped to protect \
              the plants and pipes."
         }
         "overnight_freeze" => {
-            "A freeze is forecast overnight, so watering is held to avoid ice damage."
+            "A freeze is forecast overnight, so watering is skipped to avoid ice damage."
         }
-        "soil_frost" => "The soil is at frost temperature, so watering is held.",
+        "soil_frost" => "The soil is at frost temperature, so watering is skipped.",
         "wind_now" => {
             "It is too windy right now; spray would drift instead of landing on \
              the lawn."
         }
-        "wind_forecast" => "High wind is forecast today; spray would drift, so watering is held.",
+        "wind_forecast" => {
+            "High wind is forecast today; spray would drift, so watering is skipped."
+        }
         "already_wet" => {
             "Enough rain has already fallen today, so the lawn does not need watering."
         }

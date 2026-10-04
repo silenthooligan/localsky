@@ -288,7 +288,7 @@ fn spawn_schedulers(
     tuning: Option<&Arc<TuningHandles>>,
     control: Option<IrrigationControlStore>,
 ) {
-    let (Some(cfg), Some(runs)) = (config.cfg.as_ref(), runs) else {
+    let (Some(_cfg), Some(runs)) = (config.cfg.as_ref(), runs) else {
         return;
     };
     crate::scheduler::manual::spawn(
@@ -315,31 +315,32 @@ fn spawn_schedulers(
         stores.irrigation.clone(),
         Some(stores.push.clone()),
     );
-    // Optional run-history retention: prune daily when capped. The
-    // default (0) keeps everything forever for long-range trends.
-    let runs_retention = cfg.persistence.runs_retention_days;
-    if runs_retention > 0 {
-        if let Some(hc) = storage.history_conn.clone() {
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(86_400));
-                loop {
-                    tick.tick().await;
-                    let cutoff = chrono::Utc::now().timestamp() - (runs_retention as i64) * 86_400;
-                    let runs = crate::persistence::RunsStore::new(hc.clone());
-                    match runs.prune_older_than(cutoff).await {
-                        Ok(n) if n > 0 => tracing::info!(rows = n, "runs retention prune"),
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(error = %e, "runs retention prune failed"),
-                    }
-                    let verdicts = crate::persistence::VerdictHistoryStore::new(hc.clone());
-                    match verdicts.prune_older_than(cutoff).await {
-                        Ok(n) if n > 0 => tracing::info!(rows = n, "verdict retention prune"),
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(error = %e, "verdict retention prune failed"),
-                    }
+    // Spawn even when uncapped so the first saved cap applies without a restart.
+    if let Some(hc) = storage.history_conn.clone() {
+        let retention = config.retention.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(86_400));
+            loop {
+                tick.tick().await;
+                let days = retention.load().runs_retention_days;
+                if days == 0 {
+                    continue;
                 }
-            });
-        }
+                let cutoff = chrono::Utc::now().timestamp() - i64::from(days) * 86_400;
+                let runs = crate::persistence::RunsStore::new(hc.clone());
+                match runs.prune_older_than(cutoff).await {
+                    Ok(n) if n > 0 => tracing::info!(rows = n, "runs retention prune"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "runs retention prune failed"),
+                }
+                let verdicts = crate::persistence::VerdictHistoryStore::new(hc.clone());
+                match verdicts.prune_older_than(cutoff).await {
+                    Ok(n) if n > 0 => tracing::info!(rows = n, "verdict retention prune"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "verdict retention prune failed"),
+                }
+            }
+        });
     }
     // Weekly tuning-report notification: hourly tick, 7-local-day dedupe
     // persisted so redeploys never double-notify.

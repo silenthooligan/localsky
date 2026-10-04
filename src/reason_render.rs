@@ -6,7 +6,7 @@
 //! when the resolved `UnitPrefs` is metric.
 //!
 //! THE CONTRACT (`imperial_identity` test below): under IMPERIAL these functions
-//! are BYTE-IDENTICAL to the engine's baked string. That is the safety guarantee
+//! are BYTE-IDENTICAL to the current engine's baked string. That is the safety guarantee
 //! (imperial users are unchanged) and the drift guard (any future wording change
 //! in the engine that this renderer doesn't mirror fails CI). The metric branch
 //! converts the numbers and swaps in metric unit words.
@@ -27,10 +27,37 @@
 //! Every other code (override, pause(_until), restrictions, live_data, dry_run,
 //! run, soil_floor aggregate, wind_forecast [slack not carried], observed_rain
 //! [window-day count not carried], condition, soil_quarantine) falls back to the
-//! engine's baked string verbatim, never fabricated.
+//! engine's baked string, with legacy watering wording clarified, never fabricated.
 
 use crate::components::units_fmt::{f_to_c, in_to_mm, mph_to_kph, temp_unit, wind_unit, UnitPrefs};
 use crate::model::{DecisionTrace, RuleEval, SkipCheck, ZoneVerdict};
+
+/// Older persisted decisions retain their original evidence. Translate only
+/// known watering phrases at display time; never rewrite stored rows or codes.
+pub fn plain_watering_reason(reason: &str) -> String {
+    reason
+        .replace("New watering held until", "Watering cannot start until")
+        .replace("Watering stays held", "Watering cannot start")
+        .replace(
+            "Watering held after restart:",
+            "Watering cannot start after restart:",
+        )
+        .replace("Watering held:", "Watering cannot start:")
+        .replace("watering held", "watering skipped")
+        .replace("Watering is held by", "Watering is paused by")
+        .replace("All watering is on hold", "Skip all watering is enabled")
+        .replace("remain on hold", "will be skipped")
+        .replace("remains on hold", "will be skipped")
+        .replace("watering is held", "watering is skipped")
+        .replace("Held: ", "Watering cannot start: ")
+        .replace("Held by the ", "Watering skipped by the ")
+        .replace("held to the weekly ceiling", "limited by the weekly target")
+        .replace("soil bucket holds:", "No watering needed:")
+        .replace(
+            "Additional script hold; an earlier gate already holds watering.",
+            "Additional reason to skip; an earlier rule already prevents watering.",
+        )
+}
 
 // ── unit-aware operand formatters ───────────────────────────────────────────
 // Each reproduces the engine's IMPERIAL token verbatim (same precision, spacing,
@@ -129,7 +156,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
     match s.reason_code.as_str() {
         // "Currently raining ({:.2} in/hr)"
         "rain_now" => known_rain(s.rain_intensity_now_in_hr).map_or_else(
-            || s.reason.clone(),
+            || plain_watering_reason(&s.reason),
             |value| format!("Currently raining ({})", rate(value, p)),
         ),
         // "Freeze risk now ({:.0}°F < {:.0}°F)"
@@ -156,7 +183,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
             .soil_temp_yard_min_f
             .filter(|v| v.is_finite())
             .map_or_else(
-                || s.reason.clone(),
+                || plain_watering_reason(&s.reason),
                 |value| {
                     format!(
                         "Soil frost ({} < {} threshold)",
@@ -177,7 +204,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
         }
         // "Rain forecast today ({:.2}\" expected, not measured)"
         "rain_today_forecast" => known_rain(s.rain_today_forecast_in).map_or_else(
-            || s.reason.clone(),
+            || plain_watering_reason(&s.reason),
             |value| {
                 format!(
                     "Rain forecast today ({} expected, not measured)",
@@ -187,7 +214,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
         ),
         // "Rain expected within 4h ({:.2}\" forecast)"
         "rain_next_4h" => known_rain(s.rain_next_4h_in).map_or_else(
-            || s.reason.clone(),
+            || plain_watering_reason(&s.reason),
             |value| format!("Rain expected within 4h ({} forecast)", depth(value, p)),
         ),
         // "Tomorrow rain ({:.2}\" × {}% confidence)" when a probability was
@@ -195,7 +222,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
         // none (the engine weighted the amount at full value and made no
         // confidence claim). Mirrors engine tomorrow_rain_reason exactly.
         "tomorrow_rain" => known_rain(s.forecast_in).map_or_else(
-            || s.reason.clone(),
+            || plain_watering_reason(&s.reason),
             |value| match s.rain_tomorrow_prob_pct {
                 Some(prob) => format!(
                     "Tomorrow rain ({} \u{d7} {prob}% confidence)",
@@ -206,7 +233,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
         ),
         // "Heavy rain in next 3 days ({:.2}\" weighted)"
         "rain_3day" => known_rain(s.rain_3day_weighted_in).map_or_else(
-            || s.reason.clone(),
+            || plain_watering_reason(&s.reason),
             |value| format!("Heavy rain in next 3 days ({} weighted)", depth(value, p)),
         ),
         // "Heat advisory: running planned + 15% (peak {:.0}°F)"
@@ -232,7 +259,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
         // and the aggregate soil_floor: sentences with no measurement in
         // them, so keeping the engine's baked string cannot show a metric
         // viewer an imperial number. Never fabricate.
-        _ => s.reason.clone(),
+        _ => plain_watering_reason(&s.reason),
     }
 }
 
@@ -248,10 +275,10 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
 /// by `imperial_identity_trace`).
 pub fn render_trace_reason(trace: &DecisionTrace, p: UnitPrefs) -> String {
     let Some(r) = trace.rules.iter().find(|r| r.decided()) else {
-        return trace.reason.clone();
+        return plain_watering_reason(&trace.reason);
     };
     let (Some(v), Some(t), Some(kind)) = (r.value, r.threshold, r.unit_kind.as_deref()) else {
-        return trace.reason.clone();
+        return plain_watering_reason(&trace.reason);
     };
     match (r.id.as_str(), kind) {
         ("rain_now", "rain_rate_in_hr") => format!("Currently raining ({})", rate(v, p)),
@@ -291,7 +318,7 @@ pub fn render_trace_reason(trace: &DecisionTrace, p: UnitPrefs) -> String {
         // (not the raw operands the reason needs); heat_advisory's reason rides
         // temp_max_3day_f, which the heat gate doesn't expose as value/threshold.
         // Both fall back to the baked reason (correct imperial, unchanged metric).
-        _ => trace.reason.clone(),
+        _ => plain_watering_reason(&trace.reason),
     }
 }
 
@@ -307,7 +334,7 @@ pub fn render_trace_reason(trace: &DecisionTrace, p: UnitPrefs) -> String {
 /// `detail` (pinned by `imperial_identity`).
 pub fn render_rule_detail(r: &RuleEval, p: UnitPrefs) -> String {
     let (Some(v), Some(t), Some(kind)) = (r.value, r.threshold, r.unit_kind.as_deref()) else {
-        return r.detail.clone();
+        return plain_watering_reason(&r.detail);
     };
     match (r.id.as_str(), kind) {
         // "{:.2} in/hr vs {:.2} threshold"
@@ -343,7 +370,7 @@ pub fn render_rule_detail(r: &RuleEval, p: UnitPrefs) -> String {
         // zone name, which isn't a carried operand; wind_forecast / observed_rain /
         // tomorrow_rain details embed extra terms (slack, day count, the product)
         // not reconstructible from value/threshold alone. Keep the baked detail.
-        _ => r.detail.clone(),
+        _ => plain_watering_reason(&r.detail),
     }
 }
 
@@ -467,11 +494,43 @@ pub fn render_zone_reason(z: &ZoneVerdict, _p: UnitPrefs) -> String {
     // reason is the correct unit-aware string, so render it verbatim. (This keeps
     // the soil-percent surfaces stable and avoids fabricating a global weather
     // reason from operands the zone doesn't carry.)
-    z.reason.clone()
+    plain_watering_reason(&z.reason)
 }
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
+
+    #[test]
+    fn legacy_history_explains_skips_without_changing_recorded_evidence() {
+        let trace = DecisionTrace {
+            verdict: "skip".into(),
+            reason: "Rain forecast unavailable; watering held".into(),
+            reason_code: "planning_forecast".into(),
+            ..Default::default()
+        };
+        for prefs in [IMPERIAL, METRIC] {
+            assert_eq!(
+                render_trace_reason(&trace, prefs),
+                "Rain forecast unavailable; watering skipped"
+            );
+        }
+        assert_eq!(trace.reason, "Rain forecast unavailable; watering held");
+        assert_eq!(trace.reason_code, "planning_forecast");
+        assert_eq!(
+            plain_watering_reason("held to the weekly ceiling: 0.80 in delivered"),
+            "limited by the weekly target: 0.80 in delivered"
+        );
+        assert_eq!(
+            plain_watering_reason(
+                "Additional script hold; an earlier gate already holds watering."
+            ),
+            "Additional reason to skip; an earlier rule already prevents watering."
+        );
+        assert_eq!(
+            plain_watering_reason("Soil holds enough water"),
+            "Soil holds enough water"
+        );
+    }
 
     /// 2026-09-20: `rain_3day` fired at 0.38727" against its 0.375" line and
     /// the soil model set it aside. The ladder rewrote the row's outcome to
@@ -982,7 +1041,7 @@ mod tests {
         let mut skip = SkipCheck {
             reason_code: "rain_today_forecast".into(),
             rain_today_forecast_in: Some(0.0),
-            reason: "Today's rain forecast unavailable; watering held".into(),
+            reason: "Today's rain forecast unavailable; watering skipped".into(),
             ..Default::default()
         };
         assert_eq!(

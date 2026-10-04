@@ -72,6 +72,32 @@ pub fn stop_requested_since(at_start: u64) -> bool {
     generation() > at_start
 }
 
+/// Captures the actual gate as well as its generation, so a spawned manual
+/// sequence retains its caller's isolated gate in tests.
+#[derive(Clone)]
+pub struct StopToken {
+    scoped: Option<Arc<StopGate>>,
+    generation: u64,
+}
+
+impl StopToken {
+    pub fn capture() -> Self {
+        Self {
+            scoped: SCOPED.try_with(Arc::clone).ok(),
+            generation: generation(),
+        }
+    }
+
+    pub fn requested(&self) -> bool {
+        self.scoped
+            .as_deref()
+            .unwrap_or(&GLOBAL)
+            .0
+            .load(Ordering::SeqCst)
+            > self.generation
+    }
+}
+
 /// Compatibility for the callers that stamped wall-clock epochs. The
 /// epoch is not consulted: a stop is a request, not a time, and the
 /// generation decides what it applies to.

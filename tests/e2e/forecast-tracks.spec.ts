@@ -60,7 +60,10 @@ for (const width of [1280, 390, 320]) {
     if (width === 320) {
       const notice = page.locator(".health-banner--sticky");
       await expect(notice).toBeVisible();
-      expect((await notice.boundingBox())!.height).toBeLessThanOrEqual(315);
+      // Chromium can report 315.000015px for an exact 35vh cap. Preserve the
+      // 315px limit while discarding floating-point noise below 0.01px.
+      const height = (await notice.boundingBox())!.height;
+      expect(Math.round(height * 100) / 100).toBeLessThanOrEqual(315);
     }
     await card.getByRole("textbox", { name: "Short name" }).fill("nbm");
     await card.getByRole("combobox", { name: "Weather model" }).selectOption("ncep_nbm_conus");

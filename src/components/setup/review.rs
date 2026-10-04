@@ -351,12 +351,7 @@ pub fn ReviewStep() -> impl IntoView {
             <RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
             <h2 class="setup-step__title">"Everything look right?"</h2>
             <p class="setup-step__body">
-                "When you click apply, your settings are saved. Anything LocalSky "
-                "can only set up while it is starting keeps you on this page, with "
-                "a button that starts it: on a new install that is most of it, "
-                "because LocalSky came up before your yard existed. Otherwise the "
-                "dashboard opens. If something does not check out, you get a "
-                "specific message here and nothing changes."
+                "Review your choices, then save. If a restart is needed, LocalSky will show you how to apply the changes."
             </p>
 
             {move || {
@@ -392,13 +387,10 @@ pub fn ReviewStep() -> impl IntoView {
 
             <div class="review-summary">
                 <p class="review-summary__line">
-                    "Your settings are saved, and a copy of each version is kept "
-                    "so you can roll back from Settings if you change your mind."
+                    "A backup of your previous settings is kept when you apply changes."
                 </p>
                 <p class="review-summary__line">
-                    "Once applied, day-to-day edits live in /settings. If you "
-                    "open the wizard again it offers a choice: modify the "
-                    "current setup or start fresh."
+                    "You can make further changes in Settings."
                 </p>
             </div>
 
@@ -416,10 +408,7 @@ pub fn ReviewStep() -> impl IntoView {
                 } else {
                     view! {
                         <p class="setup-zero-zone-warn">
-                            "Heads up: no zones are configured yet, so irrigation is idle "
-                            "and nothing will water. The weather home still works fully. "
-                            "You can apply now and add zones any time under Settings -> "
-                            "Zones, or go back to the Zones step to add your first one."
+                            "No watering zones added. Weather will work; irrigation stays idle until you add zones in Settings."
                         </p>
                     }
                     .into_any()

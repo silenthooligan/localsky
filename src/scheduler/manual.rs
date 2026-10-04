@@ -519,7 +519,7 @@ async fn run_tick(
         // commanded. Ordered after restrictions so a schedule blocked by BOTH
         // still names the legal block, the way the ladder does.
         if control.is_dry_run {
-            let reason = "All watering is on hold";
+            let reason = "Skip all watering is enabled";
             record_skip(runs, controllers, s, now_epoch, reason).await;
             info!(
                 schedule = %s.id,
@@ -716,13 +716,13 @@ const NO_VERDICT_CODE: &str = "live_data";
 /// against. Not an engine string -- the engine did not speak -- so it says the
 /// honest thing instead of naming a gate that never fired.
 const NO_SCRIPT_VERDICT_REASON: &str =
-    "Held: no recent verdict for the enabled user watering scripts";
+    "Watering cannot start: no recent verdict for the enabled user watering scripts";
 
 const NO_PROBE_VERDICT_REASON: &str =
-    "Held: no recent soil probe verdict for this configured probe";
+    "Watering cannot start: no recent soil probe verdict for this configured probe";
 
 const NO_VERDICT_REASON: &str =
-    "Held: no recent weather verdict to check freeze, wind or rain against";
+    "Watering cannot start: no recent weather verdict to check freeze, wind or rain against";
 
 /// A weather gate that binds this schedule right now.
 struct WeatherHold {
@@ -780,7 +780,7 @@ fn weather_hold(
         return Some(WeatherHold {
             code: v.reason_code.clone(),
             reason: if v.reason.trim().is_empty() {
-                format!("Held by the {} safety gate", v.reason_code)
+                format!("Watering skipped by the {} safety check", v.reason_code)
             } else {
                 v.reason.clone()
             },
@@ -808,7 +808,7 @@ fn weather_hold(
         // Older snapshots (and any producer that set a code but no sentence)
         // can carry an empty reason; History must never show a blank hold.
         reason: if sc.reason.trim().is_empty() {
-            format!("Held by the {} safety gate", sc.reason_code)
+            format!("Watering skipped by the {} safety check", sc.reason_code)
         } else {
             sc.reason.clone()
         },
@@ -977,7 +977,8 @@ fn permitted_span_s(
 /// the refresher answers the same failure by reusing the last state it read,
 /// and this dispatcher deliberately keeps nothing across ticks, so it says the
 /// honest thing instead of naming a hold nobody set.
-const CONTROL_UNREADABLE_REASON: &str = "Held: the pause and override settings could not be read";
+const CONTROL_UNREADABLE_REASON: &str =
+    "Watering cannot start: the pause and override settings could not be read";
 
 /// The control-surface hold binding this zone right now, if one does, worded
 /// exactly as the skip-rule ladder words it.
@@ -1938,7 +1939,7 @@ mod tests {
         );
         assert_eq!(
             skip_row_reason(&runs, "held").await.as_deref(),
-            Some("All watering is on hold"),
+            Some("Skip all watering is enabled"),
             "the skip row carries the ladder's own dry-run sentence, verbatim"
         );
     }
@@ -2725,9 +2726,9 @@ mod tests {
                 "{label}: no verdict to judge on is not permission to water"
             );
             assert!(
-                skip_row_reason(&runs, "s")
-                    .await
-                    .is_some_and(|r| r.starts_with("Held: no recent weather verdict")),
+                skip_row_reason(&runs, "s").await.is_some_and(
+                    |r| r.starts_with("Watering cannot start: no recent weather verdict")
+                ),
                 "{label}: History says the honest thing, not a gate that never fired"
             );
             assert!(

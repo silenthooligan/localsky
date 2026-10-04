@@ -35,6 +35,7 @@ pub struct BootConfig {
     pub policy: Arc<ArcSwap<WateringPolicy>>,
     /// The manual schedule set the manual dispatcher loads each tick.
     pub manual_schedules: Arc<ArcSwap<Vec<ManualSchedule>>>,
+    pub retention: Arc<ArcSwap<crate::config::schema::PersistenceConfig>>,
     /// Per-source forecast priority, read by the forecast bridge on every
     /// emit; populated by the sources phase and by every config write.
     pub forecast_priority: Arc<ArcSwap<HashMap<String, i32>>>,
@@ -86,6 +87,11 @@ pub async fn load(storage: &Storage) -> anyhow::Result<BootConfig> {
             .map(|c| c.manual_schedules.clone())
             .unwrap_or_default(),
     ));
+    let retention = Arc::new(ArcSwap::from_pointee(
+        cfg.as_ref()
+            .map(|c| c.persistence.clone())
+            .unwrap_or_default(),
+    ));
     let forecast_priority = Arc::new(ArcSwap::from_pointee(HashMap::new()));
 
     Ok(BootConfig {
@@ -94,6 +100,7 @@ pub async fn load(storage: &Storage) -> anyhow::Result<BootConfig> {
         cfg,
         policy,
         manual_schedules,
+        retention,
         forecast_priority,
     })
 }

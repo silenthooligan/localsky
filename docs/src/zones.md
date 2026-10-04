@@ -1,5 +1,19 @@
 # Set up zones
 
+## Quick Run
+
+Open **Quick Run** on Irrigation or Zones to water once without changing your
+schedule. Select one zone, several, or **Select all**. Choose a minutes preset,
+adjust individual times if needed, then review the total and tap **Start Quick Run**.
+
+Zones run one at a time. You can close the app and return to **View Quick Run**
+to see progress or **Stop Quick Run**, which cancels the remaining zones too.
+Quick Run bypasses rain delays and weather skips; your run-time and daily
+watering limits still apply. The app will ask you to stop existing watering first.
+
+If LocalSky restarts or a controller fails, remaining zones are cancelled.
+History shows controller-reported watering separately from the requested run.
+
 A zone is one planted area controlled by one valve. Its plants, soil, sprinkler rate, and controller binding tell LocalSky how to plan and deliver water.
 
 Open **Zones > Edit zone** to edit in place. The same editor is available in Settings. **Cancel** sits beside **Save zone changes**; a failed save preserves your draft.

@@ -203,7 +203,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                         helptext=format!("Afternoon RH at or above this. Default: {:.0}", seed.heat_advisory_humidity_pct)
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=heat_advisory_humidity_pct min=0.0 max=100.0 step=5.0 suffix="%".to_string()/>
+                        <Slider value=heat_advisory_humidity_pct min=0.0 max=100.0 step=5.0 suffix="%".to_string() aria_label="Heat advisory humidity (%)"/>
                     </FormField>
                     <FormField
                         label="Heat advisory dry days".to_string()

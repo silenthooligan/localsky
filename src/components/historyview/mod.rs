@@ -19,6 +19,7 @@ mod daily;
 use crate::history::types::{HistoryWindow, RunRecord};
 #[cfg(feature = "hydrate")]
 use crate::model::IrrigationSnapshot;
+use crate::reason_render::plain_watering_reason;
 use crate::timefmt::{format_hm, format_md, format_wday_short};
 
 use crate::timefmt::day_key_in_tz;
@@ -151,8 +152,8 @@ fn skip_breakdown(runs: &[RunRecord], tz: &str) -> Vec<(&'static str, usize, &'s
     }
     let mut v = vec![
         ("Rain", rain, "var(--accent-rain)"),
-        ("Wind", wind, "var(--accent-warm)"),
-        ("Restriction", restriction, "var(--accent)"),
+        ("Wind", wind, "var(--chart-wind)"),
+        ("Restriction", restriction, "var(--accent-warn)"),
         ("Cold / freeze", cold, "var(--verdict-skip)"),
         ("Soil / budget", soil, "var(--accent-good)"),
         ("Other", other, "var(--text-faint)"),
@@ -296,13 +297,17 @@ fn month_options(tz: &str) -> Vec<(i32, u32, String)> {
 
 fn render_run_record(r: RunRecord, tz: &str) -> impl IntoView {
     let skipped = r.skip_reason.is_some();
-    let detail = r.skip_reason.clone().unwrap_or_else(|| {
-        let duration = fmt_duration(r.duration_s);
-        match r.note.as_deref() {
-            Some(note) => format!("{duration} · {note}"),
-            None => duration,
-        }
-    });
+    let detail = r
+        .skip_reason
+        .as_deref()
+        .map(plain_watering_reason)
+        .unwrap_or_else(|| {
+            let duration = fmt_duration(r.duration_s);
+            match r.note.as_deref() {
+                Some(note) => format!("{duration} · {note}"),
+                None => duration,
+            }
+        });
     let cycle = r
         .cycle_index
         .zip(r.cycle_count)
@@ -458,7 +463,7 @@ fn cal_weeks(b: &[f64], max: f64, tz: &str) -> impl IntoView {
                                 "var(--elev-1)".to_string()
                             } else {
                                 let pct = (18.0 + (minutes / max).min(1.0) * 67.0) as i32;
-                                format!("color-mix(in oklab, var(--accent) {pct}%, transparent)")
+                                format!("color-mix(in oklab, var(--chart-water) {pct}%, transparent)")
                             };
                             let is_today = date == today;
                             // Weekday + date in the deployment TZ (e.g. "Sun, Jun 28").
@@ -612,6 +617,9 @@ pub fn HistoryPage() -> impl IntoView {
     // Set / clear the month jump, preserving window + run-log range.
     let n_view = nav.clone();
     let set_daily_view: Callback<bool> = Callback::new(move |daily| {
+        if daily == daily_view.get_untracked() {
+            return;
+        }
         n_view(
             &history_url(
                 days.get_untracked(),
@@ -619,7 +627,7 @@ pub fn HistoryPage() -> impl IntoView {
                 runlog_month.get_untracked(),
                 daily,
             ),
-            replace_nav(),
+            Default::default(),
         );
     });
     let n_month = nav;
@@ -785,6 +793,21 @@ pub fn HistoryPage() -> impl IntoView {
                 </div>
             </header>
 
+            <div class="history-views" role="group" aria-label="History view">
+                <button type="button" class="history-view history-view--daily" aria-label="Daily log" aria-pressed=move || if daily_view.get() { "true" } else { "false" }
+                    on:click=move |_| set_daily_view.run(true)>
+                    <crate::components::ui::Icon name="calendar" size=24/>
+                    <strong>"Daily log"</strong><small>"The day's outcome and each zone's reasons."</small>
+                    <span class="history-view__action">{move || if daily_view.get() { "Viewing daily log" } else { "Open daily log →" }}</span>
+                </button>
+                <button type="button" class="history-view history-view--runs" aria-label="Run log" aria-pressed=move || if !daily_view.get() { "true" } else { "false" }
+                    on:click=move |_| set_daily_view.run(false)>
+                    <crate::components::ui::Icon name="sprinkler" size=24/>
+                    <strong>"Run log"</strong><small>"Actual sessions, valve time, and cycle details."</small>
+                    <span class="history-view__action">{move || if !daily_view.get() { "Viewing run log" } else { "Open run log →" }}</span>
+                </button>
+            </div>
+
             // Run log: the precise record, one row per run or skip. Its own
             // range chips (default 7 days) so a long memory doesn't shove
             // the rest of the page below the fold.
@@ -792,7 +815,7 @@ pub fn HistoryPage() -> impl IntoView {
                 <div class="hist-panel__head-row">
                     <div>
                         <h2 class="hist-panel__title">{move || if daily_view.get() { "Daily log" } else { "Run log" }}</h2>
-                        <p class="hist-panel__sub">{move || if daily_view.get() { "What watered, what held, and why. Expand a day to read its recorded reasons." } else { "Sessions grouped by start date. Expand one to inspect its cycles and original records." }}</p>
+                        <p class="hist-panel__sub">{move || if daily_view.get() { "What watered, what was skipped, and why." } else { "Watering sessions and their individual cycles." }}</p>
                     </div>
                     <div class="runlog-range" role="group" aria-label="Run log range">
                         {[(7i64, "7d"), (30, "30d"), (90, "90d"), (0, "All")].into_iter().map(|(d, label)| view! {
@@ -803,10 +826,6 @@ pub fn HistoryPage() -> impl IntoView {
     class=Signal::derive(move || format!("runlog-range__btn{}", if runlog_month.get().is_none() && runlog_days.get() == d { " is-active" } else { "" }))>{label}</crate::components::ui::Button>
                         }).collect_view()}
                     </div>
-                </div>
-                <div class="runlog-range" role="group" aria-label="History view">
-                    <crate::components::ui::Button variant="secondary" size="sm" on_click=Callback::new(move |_| set_daily_view.run(false)) class=Signal::derive(move || format!("runlog-range__btn{}", if !daily_view.get() { " is-active" } else { "" }))>"Run log"</crate::components::ui::Button>
-                    <crate::components::ui::Button variant="secondary" size="sm" on_click=Callback::new(move |_| set_daily_view.run(true)) class=Signal::derive(move || format!("runlog-range__btn{}", if daily_view.get() { " is-active" } else { "" }))>"Daily log"</crate::components::ui::Button>
                 </div>
                 <div class="runlog-tools">
                     <input
@@ -833,6 +852,11 @@ pub fn HistoryPage() -> impl IntoView {
                         }).collect_view()}
                     </select>
                 </div>
+                {move || search_param(&loc.search.get(), "date").map(|date| view! {
+                    <p class="hist-panel__sub">{format!("Sessions for {date} · ")}
+                        <a href=crate::base::url("/history")>"Show all dates"</a>
+                    </p>
+                })}
                 {move || {
                     if daily_view.get() {
                         return view! { <daily::DailyLog window=runlog_window loaded=runlog_loaded error=runlog_error tz month=runlog_month query=runlog_query/> }.into_any();
@@ -862,11 +886,14 @@ pub fn HistoryPage() -> impl IntoView {
                             }
                         }
                     };
+                    if let Some(date) = search_param(&loc.search.get(), "date") {
+                        runs.retain(|r| day_key_in_tz(r.start_epoch, &tz.get()) == date);
+                    }
                     let q = runlog_query.get().trim().to_lowercase();
                     if !q.is_empty() {
                         runs.retain(|r| {
                             r.zone.to_lowercase().replace('_', " ").contains(&q.replace('_', " "))
-                                || r.skip_reason.as_deref().is_some_and(|s| s.to_lowercase().contains(&q))
+                                || r.skip_reason.as_deref().is_some_and(|s| plain_watering_reason(s).to_lowercase().contains(&q))
                                 || (r.skip_reason.is_none() && "watered".contains(&q))
                                 || (r.skip_reason.is_some() && "skipped".contains(&q))
                         });
@@ -915,13 +942,13 @@ pub fn HistoryPage() -> impl IntoView {
                     }).collect_view().into_any()
                 }}
                 <p class="hist-panel__hint">
-                    "History is kept forever by default, which is what makes year-over-year trends possible. A retention cap is available under Settings if you ever want one."
+                    "Manage stored records in " <a href="/settings?section=history">"History retention"</a>"."
                 </p>
             </section>
 
             <div class="hist-insights-heading">
                 <div><h2 class="hist-panel__title">"Watering insights"</h2>
-                <p class="hist-panel__sub">{move || format!("Past {} days · recorded watering and automatic holds", days.get())}</p></div>
+                <p class="hist-panel__sub">{move || format!("Past {} days · recorded watering and skipped runs", days.get())}</p></div>
                 <div class="hist-page__tools" role="group" aria-label="Insights range">
                     <RangeBtn label="30d" d=30 days set_days/>
                     <RangeBtn label="90d" d=90 days set_days/>
@@ -963,10 +990,10 @@ pub fn HistoryPage() -> impl IntoView {
                 let overall = day_buckets(&w.runs, days.get(), None, &tz.get());
                 view! {
                     <div class="hist-kpis">
-                        <StatTile label="Watering time" value=fmt_min(total_min) unit="min" icon="droplet" spark=overall.clone() accent="var(--accent)".to_string()/>
-                        <StatTile label="Watering sessions" value=run_count.to_string() icon="play" accent="var(--accent-good)".to_string()/>
-                        <StatTile label="Skipped zone mornings" value=skip_count.to_string() icon="ban" accent="var(--accent-rain)".to_string()/>
-                        <StatTile label="Avg / day" value=fmt_min(overall.iter().sum::<f64>() / overall.len().max(1) as f64) unit="min" icon="gauge" accent="var(--accent-warm)".to_string()/>
+                        <StatTile label="Watering time" value=fmt_min(total_min) unit="min" icon="droplet" spark=overall.clone() accent="var(--chart-water)".to_string()/>
+                        <StatTile label="Watering sessions" value=run_count.to_string() icon="play" accent="var(--chart-water)".to_string()/>
+                        <StatTile label="Skipped zone mornings" value=skip_count.to_string() icon="ban" accent="var(--verdict-skip)".to_string()/>
+                        <StatTile label="Avg / day" value=fmt_min(overall.iter().sum::<f64>() / overall.len().max(1) as f64) unit="min" icon="gauge" accent="var(--chart-water)".to_string()/>
                     </div>
                 }
                 .into_any()
@@ -1003,14 +1030,14 @@ pub fn HistoryPage() -> impl IntoView {
                             format_md(epoch, &tzs)
                         })
                         .collect();
-                    let series = vec![Series::new("Watered (min)", "var(--accent)", pts)];
+                    let series = vec![Series::new("Watered (min)", "var(--chart-water)", pts)];
                     view! { <LineChart series height=200 y_unit=" min".to_string() x_labels=labels/> }.into_any()
                 }}
             </section>
 
             <section class="hist-panel">
                 <h2 class="hist-panel__title">"Watering calendar"</h2>
-                <p class="hist-panel__hint">"Each square is a day, aligned by weekday; greener = more watering, empty = no watering recorded."</p>
+                <p class="hist-panel__hint">"Each square is a day. Deeper blue means more recorded watering; an empty square means none recorded."</p>
                 {move || {
                     // Gate on `loaded` like the KPI + line-chart sections. cal_weeks
                     // derives its grid structure (leading blanks + whole-week row
@@ -1034,13 +1061,13 @@ pub fn HistoryPage() -> impl IntoView {
 
             // Why it skipped, the headline "story" of the period.
             <section class="hist-panel">
-                <h2 class="hist-panel__title">"Why scheduled zones held"</h2>
-                <p class="hist-panel__hint">"Recorded automatic holds, counted once per zone and local day. A later watering outcome replaces an earlier hold."</p>
+                <h2 class="hist-panel__title">"Why watering was skipped"</h2>
+                <p class="hist-panel__hint">"Final recorded skip reason per zone and day. Zones that later watered are excluded."</p>
                 {move || {
                     let bd = skip_breakdown(&window.get().runs, &tz.get());
                     let total: usize = bd.iter().map(|(_, c, _)| *c).sum();
                     if total == 0 {
-                        return view! { <div class="hist-empty">"No automatic holds were recorded in this window. Missing records do not confirm that watering ran."</div> }.into_any();
+                        return view! { <div class="hist-empty">"No skipped watering recorded in this period."</div> }.into_any();
                     }
                     view! {
                         <div class="hist-breakdown">
@@ -1078,8 +1105,8 @@ pub fn HistoryPage() -> impl IntoView {
                         let total: f64 = b.iter().sum();
                         view! {
                             <div class="hist-zone-row">
-                                <span class="hist-zone-row__name">{z}</span>
-                                <span class="hist-zone-row__spark"><Sparkline points=b accent="var(--accent)".to_string() height=34/></span>
+                                <span class="hist-zone-row__name">{z.replace('_', " ")}</span>
+                                <span class="hist-zone-row__spark"><Sparkline points=b accent="var(--chart-water)".to_string() height=34/></span>
                                 <span class="hist-zone-row__total">{format!("{:.0} min", total)}</span>
                             </div>
                         }
@@ -1089,6 +1116,7 @@ pub fn HistoryPage() -> impl IntoView {
             </Show>
             <details class="hist-panel scoreboard hist-forecast-review">
                 <summary class="hist-panel__title">"Rain forecast review"</summary>
+                <crate::components::zones::tuning::RainDecisionSummary/>
                 <p class="hist-panel__hint">"How completed-day rain forecasts compared with the gauge. This is forecast feedback, not a record of watering or water saved."</p>
                 {move || {
                     if !scoreboard_loaded.get() {

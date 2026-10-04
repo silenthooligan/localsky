@@ -74,6 +74,16 @@ pub fn is_watering_record(r: &RunRecord) -> bool {
     is_watering_evidence(&r.source, &r.status, r.skip_reason.as_deref())
 }
 
+/// Automatic intent survives controller readback: observer rows carry the
+/// scheduler's session id even though their source is `ha_refresher`.
+/// Unlinked controller/manual records must never be presented as automatic.
+pub fn is_automatic_record(r: &RunRecord) -> bool {
+    r.source == "smart_morning"
+        || r.session_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("smart:"))
+}
+
 /// Physical valve-open union, independent of job identity. Never count the
 /// same physical seconds twice, even when distinct commands overlap.
 pub fn union_intervals(segments: &[RunSegment]) -> Vec<IrrigationEvent> {

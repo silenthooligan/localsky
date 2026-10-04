@@ -23,6 +23,7 @@
 //   secret_input.rs - masked input + show/hide reveal toggle
 
 pub mod button;
+pub mod chart_key;
 pub mod confirm_sheet;
 pub mod diagnostic_details;
 pub mod empty_state;
@@ -41,10 +42,12 @@ pub mod slider;
 pub mod sparkline;
 pub mod stat_tile;
 pub mod stepper;
+pub mod temperature_value;
 pub mod toast;
 pub mod toggle;
 
 pub use button::Button;
+pub use chart_key::ChartKey;
 pub use confirm_sheet::ConfirmSheet;
 pub use empty_state::EmptyState;
 pub use form_field::FormField;
@@ -61,6 +64,7 @@ pub use slider::Slider;
 pub use sparkline::Sparkline;
 pub use stat_tile::StatTile;
 pub use stepper::Stepper;
+pub use temperature_value::TemperatureValue;
 pub use toast::{use_toast, ToastHub, ToastKind, ToastViewport};
 pub use toggle::Toggle;
 

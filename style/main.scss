@@ -29,5 +29,9 @@
 @use "features"; // Rule Lab, Simulator, History
 @use "watering"; // watering status, daily outlook and decision evidence
 @use "overrides"; // theme-scoped fixes and late overrides
+@use "identity"; // section color, readable surfaces and activity navigation
+@use "styles"; // selectable visual styles and searchable Settings
+@use "setup"; // focused, responsive setup with the shared appearance preferences
+@use "quick_run"; // one-time zone selection and server-owned manual run progress
 
 @use "utilities"; // shared fixed layout recipes

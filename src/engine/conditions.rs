@@ -274,6 +274,16 @@ pub fn eval_expr(e: &ConditionExpr, ctx: &ConditionCtx) -> bool {
     eval_tri(e, ctx) == Tri::True
 }
 
+/// The same evaluator, retaining unknown evidence for the rule editor preview.
+/// Production decisions continue to use `eval_expr` and its fail-safe coercion.
+pub fn preview_expr(e: &ConditionExpr, ctx: &ConditionCtx) -> Option<bool> {
+    match eval_tri(e, ctx) {
+        Tri::True => Some(true),
+        Tri::False => Some(false),
+        Tri::Unknown => None,
+    }
+}
+
 /// Run every enabled, in-scope rule for one zone and fold their effects.
 /// The first Skip wins (later skips are still recorded but don't change
 /// the reason). Multipliers compose then clamp.
@@ -527,6 +537,34 @@ mod tests {
             op: CmpOp::Gt,
             value: 100.0,
         };
+        assert_eq!(
+            preview_expr(
+                &ConditionExpr::All(vec![truthy.clone(), unknown.clone()]),
+                &c
+            ),
+            None
+        );
+        assert_eq!(
+            preview_expr(
+                &ConditionExpr::All(vec![falsy.clone(), unknown.clone()]),
+                &c
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            preview_expr(
+                &ConditionExpr::Any(vec![truthy.clone(), unknown.clone()]),
+                &c
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            preview_expr(
+                &ConditionExpr::Any(vec![falsy.clone(), unknown.clone()]),
+                &c
+            ),
+            None
+        );
         // All(True, Unknown) depends on the missing value → does not fire.
         assert!(!eval_expr(
             &ConditionExpr::All(vec![truthy.clone(), unknown.clone()]),

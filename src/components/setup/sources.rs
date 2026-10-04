@@ -116,7 +116,7 @@ pub fn SourcesStep() -> impl IntoView {
         let sources = local_sources();
         if sources.is_empty() {
             return view! {
-                <p class="setup-step__body" class:u-m0=true>"No weather station added yet."</p>
+                <li class="setup-step__body" class:u-m0=true>"No weather station added yet."</li>
             }
             .into_any();
         }
@@ -154,13 +154,9 @@ pub fn SourcesStep() -> impl IntoView {
         view! {
             <section class="setup-sources-block entity-stripe entity-stripe--sensor">
                 <div class="setup-sources-block__head">
-                    <h3 class="setup-sources-block__title">"Your weather stations (strongest signal)"</h3>
+                    <h3 class="setup-sources-block__title">"Your weather stations"</h3>
                     <p class="setup-sources-block__lede">
-                        "Own a Tempest, Ecowitt, or Davis station on your network? Add it here and it "
-                        "takes priority over cloud for the readings it carries. A mixed device (an "
-                        "Ecowitt gateway that also reads soil) is added here as one source; its soil "
-                        "channels become assignable in the Zones step. Most people skip this and start "
-                        "on the cloud feeds."
+                        "Add a supported station for readings from your yard. Its measurements take priority; cloud sources fill the gaps. Soil probes on the same device can be matched to zones later."
                     </p>
                 </div>
 
@@ -228,12 +224,7 @@ pub fn SourcesStep() -> impl IntoView {
             }}
 
             <p class="sensors-section__hint" class:u-mt3=true>
-                "Everything you set here goes live when you finish setup: the cloud providers you "
-                "turned on, and any station you added. To confirm a source is actually ingesting "
-                "(and see its live readings), open the "<a href="/sensors">"Sensors hub"</a>
-                " afterward, that is also where you can add or edit sensors any time, no wizard "
-                "required. Change nothing and LocalSky runs on your region's free cloud feeds (and "
-                "listens for a Tempest on your network if you have one)."
+                "After setup, see live readings and manage sources in "<a href="/sensors">"Sensors"</a>"."
             </p>
 
             <SetupFooter

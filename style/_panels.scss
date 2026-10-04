@@ -268,13 +268,10 @@
   transition: width 0.6s ease-out;
 }
 
-.wind-bar-cool .wind-bar-fill { background: var(--accent-cool); }
-.wind-bar-mid  .wind-bar-fill { background: var(--accent); }
-.wind-bar-hot  .wind-bar-fill { background: var(--accent-hot); }
-.wind-bar-live .wind-bar-fill {
-  background: linear-gradient(90deg, var(--accent-good), var(--accent-warm));
-  box-shadow: 0 0 8px color-mix(in oklab, var(--accent-good) 40%, transparent);
-}
+// All four rows measure wind speed on one scale; the label identifies the
+// sampling window. A gust is not automatically a fault.
+.wind-bar-fill { background: var(--chart-wind); }
+.wind-bar-live .wind-bar-fill { background: var(--chart-wind); }
 
 .wind-bar-value {
   text-align: right;
@@ -405,13 +402,13 @@
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  &-rising  { color: var(--accent-good); border-color: color-mix(in oklab, var(--accent-good) 35%, transparent); }
-  &-falling { color: var(--accent-hot);  border-color: color-mix(in oklab, var(--accent-hot) 35%, transparent); }
+  &-rising  { color: var(--chart-pressure); border-color: var(--border); }
+  &-falling { color: var(--chart-pressure); border-color: var(--border); }
   &-flat,
   &-steady { color: var(--text-dim); }
   // The weather hero's pressure tendency uses the BEM modifiers.
-  &--up   { color: var(--accent-good); }
-  &--down { color: var(--accent-rain); }
+  &--up   { color: var(--chart-pressure); }
+  &--down { color: var(--chart-pressure); }
   &--flat { color: var(--text-faint); }
   .trend-arrow { font-size: 1rem; line-height: 1; }
 }
@@ -424,9 +421,8 @@
 
 .sparkline-path {
   fill: none;
-  stroke: var(--accent);
-  stroke-width: 1.5;
-  filter: drop-shadow(0 0 4px color-mix(in oklab, var(--accent) 40%, transparent));
+  stroke: var(--chart-pressure);
+  stroke-width: 2;
 }
 
 .sparkline-axis {
@@ -936,26 +932,22 @@ html { scroll-behavior: smooth; }
     }
   }
   &-skip-freeze {
-    // Alert/stop family (red): freeze gate. Was blue (--accent-cool), which
-    // read as "water"; freeze is a safety stop, not water.
-    border-color: color-mix(in oklab, var(--accent-danger) 50%, transparent);
-    background: color-mix(in oklab, var(--accent-danger) 6%, transparent);
+    // Amber identifies held watering; the tag names the freeze reason.
+    border-color: color-mix(in oklab, var(--verdict-skip) 50%, transparent);
+    background: color-mix(in oklab, var(--verdict-skip) 6%, transparent);
     .verdict-cell-tag {
-      color: var(--accent-danger);
-      background: color-mix(in oklab, var(--accent-danger) 15%, transparent);
-      border-color: color-mix(in oklab, var(--accent-danger) 55%, transparent);
+      color: var(--verdict-skip);
+      background: color-mix(in oklab, var(--verdict-skip) 15%, transparent);
+      border-color: color-mix(in oklab, var(--verdict-skip) 55%, transparent);
     }
   }
   &-skip-wind {
-    // Alert/stop family (red): wind gate. Was amber (--accent-warn), which
-    // collided with the "drying out / needs water" amber; wind is a safety
-    // stop. Uses --accent-hot so it stays inside the red family but reads a
-    // half-step apart from the freeze cell next to it.
-    border-color: color-mix(in oklab, var(--accent-hot) 45%, transparent);
+    // Wind holds use the same amber as every other watering hold.
+    border-color: color-mix(in oklab, var(--verdict-skip) 45%, transparent);
     .verdict-cell-tag {
-      color: var(--accent-hot);
-      background: color-mix(in oklab, var(--accent-hot) 13%, transparent);
-      border-color: color-mix(in oklab, var(--accent-hot) 50%, transparent);
+      color: var(--verdict-skip);
+      background: color-mix(in oklab, var(--verdict-skip) 13%, transparent);
+      border-color: color-mix(in oklab, var(--verdict-skip) 50%, transparent);
     }
   }
   &-skip-pause {
@@ -968,11 +960,11 @@ html { scroll-behavior: smooth; }
   &-skip-law {
     // The law accent the Week page already uses for a district rule: a
     // calendar fact, not a weather stop, so not the blue "skip" family.
-    border-color: color-mix(in oklab, var(--accent-danger) 40%, transparent);
+    border-color: color-mix(in oklab, var(--verdict-skip) 40%, transparent);
     .verdict-cell-tag {
-      color: var(--accent-danger);
-      background: color-mix(in oklab, var(--accent-danger) 12%, transparent);
-      border-color: color-mix(in oklab, var(--accent-danger) 45%, transparent);
+      color: var(--verdict-skip);
+      background: color-mix(in oklab, var(--verdict-skip) 12%, transparent);
+      border-color: color-mix(in oklab, var(--verdict-skip) 45%, transparent);
     }
   }
 }

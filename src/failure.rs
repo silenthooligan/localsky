@@ -76,7 +76,7 @@ codes! {
     SqliteShape => ("LS_SQLITE_SHAPE", "database result does not match the expected schema", "Inspect the identified database operation and column index; verify migrations completed on this database."),
     TaskCancelled => ("LS_TASK_CANCELLED", "background operation was cancelled", "Check shutdown or worker cancellation at this timestamp; completion was not confirmed."),
     TaskPanic => ("LS_TASK_PANIC", "background operation panicked", "Check the panic trace at this timestamp and include the operation and LocalSky revision in a bug report."),
-    WateringHeld => ("LS_WATERING_HELD", "watering is held before dispatch", "Read the accompanying hold reason and system readiness; no controller command was sent."),
+    WateringHeld => ("LS_WATERING_HELD", "watering cannot start", "Read the reason and system readiness; no controller command was sent."),
     ControllerOffline => ("LS_CONTROLLER_OFFLINE", "no current controller status is available", "Check the controller connection and the preceding status failure at this timestamp."),
     ZoneMapping => ("LS_CONTROLLER_ZONE_MAPPING", "zone has no station mapping on this controller", "Edit the zone's Controller station and select the matching physical valve."),
     UnsupportedOperation => ("LS_CONTROLLER_UNSUPPORTED", "controller does not support this operation", "Check the controller's reported capabilities and choose a supported operation."),

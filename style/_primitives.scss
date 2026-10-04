@@ -70,10 +70,10 @@
   &:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
 }
 .btn--danger {
-  background: color-mix(in oklab, var(--accent-danger) 16%, var(--elev-2));
+  background: color-mix(in oklab, var(--accent-danger) 6%, var(--elev-1));
   color: var(--accent-danger);
   border-color: color-mix(in oklab, var(--accent-danger) 35%, transparent);
-  &:hover:not(:disabled) { background: color-mix(in oklab, var(--accent-danger) 26%, var(--elev-2)); }
+  &:hover:not(:disabled) { border-color: var(--accent-danger); }
 }
 // Positive "go / confirm / install" actions. Solid green, same prominent
 // treatment as --primary so it reads as a real call-to-action (replaces the
@@ -196,6 +196,31 @@
 .stat-tile--hero .stat-tile__value-row { order: 1; }
 .stat-tile--hero .stat-tile__value { font-size: var(--text-stat); }
 
+// Keep number, degree glyph and scale together at every display size. The
+// unit has a readable floor even in the compact current-readings strip.
+.temperature-value {
+  display: inline-flex;
+  align-items: flex-start;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: var(--tracking-tight);
+}
+.temperature-value__number { font-weight: inherit; }
+.temperature-value__degree {
+  font-size: max(0.58em, var(--text-meta));
+  line-height: 1;
+}
+.temperature-value__scale {
+  align-self: flex-end;
+  margin-left: var(--space-1);
+  font-size: max(0.4em, var(--text-meta));
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+
 // ── Sparkline ──────────────────────────────────────────────────────────
 .ui-sparkline {
   display: block;
@@ -218,11 +243,11 @@
 .ui-line-chart { display: flex; flex-direction: column; gap: var(--space-3); }
 .ui-line-chart__plot { position: relative; width: 100%; touch-action: pan-y; }
 .ui-line-chart__cross { position: absolute; top: 0; bottom: 0; width: 1px; background: color-mix(in oklab, var(--text-bright) 35%, transparent); pointer-events: none; }
-.ui-line-chart__tip { position: absolute; top: 6px; z-index: var(--z-raised); display: flex; flex-direction: column; gap: 3px; padding: var(--space-2) var(--space-3); background: var(--elev-3); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-2); pointer-events: none; min-width: 8rem; max-width: 16rem; }
+.ui-line-chart__tip { position: absolute; top: 6px; z-index: var(--z-raised); display: flex; flex-direction: column; gap: 3px; padding: var(--space-2) var(--space-3); background: var(--elev-3); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-2); pointer-events: none; width: min(16rem, 100%); left: clamp(0px, var(--chart-cursor), max(0px, calc(100% - 16rem))); }
 .ui-line-chart__tip-head { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
 .ui-line-chart__tip-row { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-meta); color: var(--text); }
 .ui-line-chart__tip-label { color: var(--text-dim); margin-right: auto; }
-.ui-line-chart__tip-val { font-family: var(--font-mono); color: var(--text-bright); }
+.ui-line-chart__tip-val { white-space: nowrap; font-family: var(--font-mono); color: var(--text-bright); }
 .ui-line-chart__svg { display: block; width: 100%; overflow: visible; }
 .ui-line-chart__grid { stroke: var(--elev-line); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .ui-line-chart__line {
@@ -232,7 +257,7 @@
   stroke-linejoin: round;
   stroke-linecap: round;
 }
-.ui-line-chart__line--dashed { opacity: 0.55; stroke-dasharray: 4 4; }
+.ui-line-chart__line--dashed { stroke-dasharray: 4 4; }
 .ui-line-chart__yaxis {
   position: absolute;
   top: 0; right: 0; bottom: 0;
@@ -252,7 +277,7 @@
   color: var(--text-dim);
 }
 .ui-line-chart__swatch { width: 14px; height: 3px; border-radius: 2px; }
-.ui-line-chart__swatch--dashed { opacity: 0.55; }
+.ui-line-chart__swatch--dashed { mask-image: repeating-linear-gradient(90deg, #000 0 4px, transparent 4px 7px); }
 
 // ── Stepper ────────────────────────────────────────────────────────────
 .ui-stepper {
@@ -612,5 +637,14 @@ button.mobile-tab {
 
 .page-head { display: flex; flex-direction: column; gap: var(--space-2); }
 .page-eyebrow { margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--accent); font-weight: 700; }
-.page-title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.page-title { font-family: var(--font-editorial); font-weight: 400; line-height: 1.1; margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
 .btn--danger-solid { background: var(--accent-danger); color: var(--on-danger); font-weight: 700; text-transform: uppercase; }
+
+// Shared readable key: shape plus words, never color alone.
+.chart-key { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin: var(--space-3) 0; color: var(--text-dim); font-size: var(--text-caption); line-height: 1.5; }
+.chart-key__item { display: inline-flex; align-items: center; gap: var(--space-2); }
+.chart-key__mark { flex: none; width: 20px; height: 3px; background: var(--series-color); }
+.chart-key__mark--bar { width: 9px; height: 12px; }
+.chart-note { margin: var(--space-2) 0 0; color: var(--text-faint); font-size: var(--text-caption); line-height: 1.5; }
+.ui-line-chart__plot:focus-visible { outline-offset: 4px; }
+.ui-line-chart__empty { padding: var(--space-5); color: var(--text-faint); }

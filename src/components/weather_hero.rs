@@ -18,10 +18,8 @@
 // is used by data. Brand gradient accent stripe at the top.
 
 use crate::components::forecast::glyph::weather_code_glyph;
-use crate::components::ui::Icon;
-use crate::components::units_fmt::{
-    fmt_pressure, fmt_rain_rate, fmt_temp_short, fmt_wind, use_unit_prefs,
-};
+use crate::components::ui::{Icon, TemperatureValue};
+use crate::components::units_fmt::{fmt_pressure, fmt_rain_rate, fmt_wind, use_unit_prefs};
 use crate::forecast::snapshot::ForecastSnapshot;
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
@@ -231,7 +229,7 @@ fn HeroReadings(
                 }}
                 <div class="hero-headline">
                     <div class="hero-temp">
-                        {move || fmt_temp_short(snap.get().air_temp_f, prefs.get())}
+                        <TemperatureValue value=Signal::derive(move || snap.get().air_temp_f)/>
                     </div>
                     <div class="hero-condition">{move || condition().1}</div>
                     // Provenance: a subtle "via {source}" chip on the headline
@@ -253,9 +251,9 @@ fn HeroReadings(
                 </div>
                 <div class="hero-callouts">
                     <span class="hero-callout">
-                        <span class="hero-callout__k">"feels"</span>
+                        <span class="hero-callout__k">"Feels like"</span>
                         <span class="hero-callout__v">
-                            {move || fmt_temp_short(snap.get().feels_like_f, prefs.get())}
+                            <TemperatureValue value=Signal::derive(move || snap.get().feels_like_f)/>
                         </span>
                     </span>
                     <span class="hero-callout">
@@ -273,10 +271,10 @@ fn HeroReadings(
             <div class="hero-strip" role="list" aria-label="Current readings">
                 <crate::components::ui::StatTile layout="inline" role="listitem" label="HUM"
                     value=Signal::derive(move || format!("{:.0}%", snap.get().rh_pct))/>
-                <crate::components::ui::StatTile layout="inline" role="listitem" label="DEW"
-                    value=Signal::derive(move || fmt_temp_short(snap.get().dew_point_f, prefs.get()))/>
-                <crate::components::ui::StatTile layout="inline" role="listitem" label="WET"
-                    value=Signal::derive(move || fmt_temp_short(snap.get().wet_bulb_f, prefs.get()))/>
+                <crate::components::ui::StatTile layout="inline" role="listitem" label="Dew point"
+                    temperature_f=Signal::derive(move || snap.get().dew_point_f)/>
+                <crate::components::ui::StatTile layout="inline" role="listitem" label="Wet bulb"
+                    temperature_f=Signal::derive(move || snap.get().wet_bulb_f)/>
                 <crate::components::ui::StatTile layout="inline" role="listitem" label="WIND"
                     value=Signal::derive(move || {
                         let s = snap.get();

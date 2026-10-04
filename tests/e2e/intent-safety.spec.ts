@@ -94,7 +94,7 @@ test("a pending runtime restart stays visible across navigation and another save
   await open(page, "/irrigation");
   const notice = page.locator(".health-banner").filter({ hasText: "Restart required to apply." });
   await expect(notice).toHaveCount(1);
-  await expect(notice).toContainText("New watering is on hold");
+  await expect(notice).toContainText("Restart LocalSky to apply the changes before watering can resume");
   await expect(notice).toContainText("Fixture controller bindings changed.");
   await expect(notice.getByRole("button", { name: /Dismiss/ })).toHaveCount(0);
   await page.locator(".sidebar").getByRole("link", { name: "Settings", exact: true }).click();

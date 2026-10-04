@@ -69,10 +69,9 @@ pub fn WelcomeStep() -> impl IntoView {
         <div class="setup-step">
             <div class="setup-hero">
                 <span class="setup-hero__icon"><Icon name="weather" size=30/></span>
-                <h2 class="setup-hero__title">"Let's get your weather and watering dialed in"</h2>
+                <h2 class="setup-hero__title">"Good watering starts with your yard."</h2>
                 <p class="setup-hero__sub">
-                    "LocalSky watches the sky over your yard and waters exactly "
-                    "what each zone needs: no more, no less."
+                    "Start with your location. Add weather sources and a controller, or use LocalSky for weather alone."
                 </p>
             </div>
 
@@ -80,34 +79,31 @@ pub fn WelcomeStep() -> impl IntoView {
                 <div class="setup-pillar">
                     <Icon name="home" size=18/>
                     <strong>"Local-first"</strong>
-                    <span>"Runs on your hardware. Your data never leaves home."</span>
+                    <span>"Runs on your hardware. You choose which cloud services to connect."</span>
                 </div>
                 <div class="setup-pillar">
                     <Icon name="sources" size=18/>
-                    <strong>"Any hardware, or none"</strong>
-                    <span>"Works with a backyard station, or just your address and a forecast."</span>
+                    <strong>"Weather your way"</strong>
+                    <span>"Use a supported station, free forecasts, or both."</span>
                 </div>
                 <div class="setup-pillar">
                     <Icon name="zap" size=18/>
-                    <strong>"Plays well with others"</strong>
-                    <span>"Home Assistant optional; one integration when you want it."</span>
+                    <strong>"Room to grow"</strong>
+                    <span>"Add watering zones and Home Assistant when you're ready."</span>
                 </div>
             </div>
 
             <div class="setup-needs">
-                <p class="setup-needs__title">"Setup takes about five minutes. Helpful to have:"</p>
+                <p class="setup-needs__title">"What you'll need"</p>
                 <ul class="setup-needs__list">
-                    <li>"Your address (or coordinates); weather and sun math start there"</li>
-                    <li>"Optional: a weather or soil-sensor device on your network (Tempest, Ecowitt, Davis...). Some do both."</li>
-                    <li>"Optional: your sprinkler controller (it can be found by a network scan)"</li>
+                    <li>"Your address or coordinates"</li>
+                    <li>"Optional: a weather station or soil sensors"</li>
+                    <li>"Optional: your sprinkler controller's connection details"</li>
                 </ul>
             </div>
 
-            <p class="setup-step__hint" style="opacity:0.8">
-                "LocalSky is free and open source under the Apache 2.0 license; "
-                "continuing means you are fine with that. No telemetry, no "
-                "analytics, no account, no email signup. If that ever changes "
-                "it will be opt-in and disclosed right here."
+            <p class="setup-license">
+                "Free and open source under Apache 2.0. No account or email signup required."
             </p>
 
             <SetupFooter prev={None::<String>} next=Signal::derive(next_href)/>

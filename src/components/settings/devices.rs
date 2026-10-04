@@ -1195,6 +1195,7 @@ fn discovered_card(gw: DiscoveredGateway, on_adopt: Callback<String>) -> impl In
         <li class="settings-card-list__item">
             <SettingsCard
                 icon="sources".to_string()
+                details_are_key_values=false
                 title=title
                 subtitle=subtitle
                 entity=Some(EntityKind::Source)
@@ -1556,6 +1557,7 @@ fn device_card(
                 subtitle=subtitle
                 entity=entity_kind
                 editable=editable
+                details_are_key_values=false
                 badges=Box::new(move || {
                     // STATUS BY EXCEPTION (persona F): the common, expected states
                     // are silent. A native, online device carries NO badge (that is

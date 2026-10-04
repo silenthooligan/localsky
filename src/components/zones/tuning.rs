@@ -1,8 +1,7 @@
 // Results-based tuning surfaces: the per-zone Tuning panel on the zone
 // detail (a lead cadence line, secondary notes behind one disclosure,
 // and at most one recommendation card with an Apply action) and the
-// irrigation-page strip (attention-dotted recommendation count + the
-// install-wide forecast-skip scorecard lines). The panel fetches
+// irrigation-page suggestion strip and History rain-decision review. The panel fetches
 // GET /api/v1/irrigation/tuning on demand, exactly like the zone
 // detail's history Effect (hydrate-gated gloo_net into an RwSignal;
 // try_* accessors in detached continuations per the disposed-signal
@@ -254,12 +253,10 @@ pub fn recommendation_count(rep: &TuningReport) -> usize {
         .count()
 }
 
-/// Whether the irrigation strip has anything worth a row: a
-/// recommendation, or a scored/reactive scorecard line.
+/// The irrigation overview surfaces actionable suggestions only. Historical
+/// rain decisions belong in History, not in a current-status banner.
 pub fn strip_visible(rep: &TuningReport) -> bool {
     recommendation_count(rep) > 0
-        || rep.scorecard.scored_days.is_some()
-        || rep.scorecard.reactive_days.is_some()
 }
 
 /// The recommendation's current -> suggested summary for the card's mono
@@ -821,21 +818,14 @@ fn TuningRecommendationCard(
     }
 }
 
-/// Irrigation-page strip: the attention-dotted recommendation count
-/// (linked to the zones view) plus the install-wide forecast-skip
-/// scorecard lines. The report signal comes from the page
-/// (use_tuning_report), so the desktop and mobile branches share one
-/// fetch and the page can place the strip above the data columns when a
-/// suggestion exists. Hidden entirely until the report loads AND has
-/// something worth a row, so fresh installs see nothing extra.
+/// Actionable zone suggestions on Irrigation. Historical rain decisions are
+/// presented separately in the expandable History review.
 #[component]
 pub fn TuningStrip(report: RwSignal<Option<TuningReport>>) -> impl IntoView {
     move || {
         report.get().and_then(|rep| {
             strip_visible(&rep).then(|| {
                 let count = recommendation_count(&rep);
-                let scored = rep.scorecard.scored_days.is_some();
-                let reactive = rep.scorecard.reactive_days.is_some();
                 let count_line = (count > 0).then(|| {
                     let label = if count == 1 {
                         "1 zone has a tuning suggestion".to_string()
@@ -848,20 +838,31 @@ pub fn TuningStrip(report: RwSignal<Option<TuningReport>>) -> impl IntoView {
                         </span>
                     }
                 });
-                let scorecard_line = scored.then(|| {
-                    view! { <span class="tuning-strip__scorecard">{rep.scorecard.line.clone()}</span> }
-                });
-                // Reactive rain skips carry their own counted line (no
-                // confirmation math; they confirm themselves).
-                let reactive_line = reactive.then(|| {
-                    view! { <span class="tuning-strip__scorecard">{rep.scorecard.reactive_line.clone()}</span> }
-                });
                 view! {
                     <div class="tuning-strip is-static">
                         {count_line}
-                        {scorecard_line}
-                        {reactive_line}
                     </div>
+                }
+            })
+        })
+    }
+}
+
+/// Counts of rain-rule recommendations, not records of valve activity.
+#[component]
+pub fn RainDecisionSummary() -> impl IntoView {
+    let report = use_tuning_report();
+    move || {
+        report.get().and_then(|rep| {
+            let card = rep.scorecard;
+            (card.scored_days.is_some() || card.reactive_days.is_some()).then(|| {
+                view! {
+                    <section class="hist-rain-decisions" aria-label="Rain skip decisions">
+                        <h3 class="hist-panel__title">"Rain skip decisions"</h3>
+                        <p class="hist-panel__sub">{format!("Past {} days · rule recommendations, not completed runs", card.window_days)}</p>
+                        {card.scored_days.map(|_| view! { <p>{card.line}</p> })}
+                        {card.reactive_days.map(|_| view! { <p>{card.reactive_line}</p> })}
+                    </section>
                 }
             })
         })
@@ -1052,11 +1053,11 @@ mod tests {
     }
 
     #[test]
-    fn strip_visibility_needs_a_recommendation_or_a_scorecard() {
+    fn irrigation_strip_only_shows_actionable_suggestions() {
         assert!(!strip_visible(&report(vec![("a", false)], None, None)));
         assert!(strip_visible(&report(vec![("a", true)], None, None)));
-        assert!(strip_visible(&report(vec![("a", false)], Some(4), None)));
-        assert!(strip_visible(&report(vec![("a", false)], None, Some(2))));
+        assert!(!strip_visible(&report(vec![("a", false)], Some(4), None)));
+        assert!(!strip_visible(&report(vec![("a", false)], None, Some(2))));
     }
 
     #[test]

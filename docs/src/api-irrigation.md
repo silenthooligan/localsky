@@ -16,9 +16,40 @@ Use snapshots for current state and projections. Use history for recorded outcom
 | `decision_trace` | Compared rules, reasons, and evidence |
 | `water_budgets` | Zone allocation and soil-model details |
 | `water_plan` | Progressive daily projections |
-| `restart_required`, `restart_reasons` | Saved changes that hold watering until restart |
+| `restart_required`, `restart_reasons` | Saved changes that pause watering until restart |
 
 A zone's `running` value must be read with `running_known`. `ledger_running` records LocalSky's outstanding run tracking; it is not a substitute for controller confirmation. Nullable flow and soil fields remain unknown when unavailable.
+
+## One-time Quick Run
+
+**GET /quick-run** returns availability, configured zones with `max_seconds`,
+and the latest run's status. **POST /quick-run** starts a sequential manual run:
+
+```json
+{"request_id":"unique-client-request-id","zones":[{"zone":"front_yard","seconds":300},{"zone":"back_yard","seconds":600}]}
+```
+
+Reuse the request ID only to retry the same request after a lost response.
+An existing ID returns its saved run, including after restart; a different
+selection with that ID is rejected. Every zone is validated before starting.
+Requests allow 1 to 128 distinct configured zones, up to six hours total, subject
+to per-zone limits and controller duration precision. A running session rejects
+other run commands. Weather skips and rain delays do not block this explicit
+manual action; daily watering caps and restart requirements still apply.
+
+**POST /quick-run/stop** with `{"id":"run-session-id"}` cancels remaining zones
+and asks the server to stop the current zone. Poll status until `stopped` or
+`failed`; accepting the stop request does not prove the controller stopped.
+Controllers with device-wide stop support stop their whole device.
+When `stop_unconfirmed` is true, another stop request retries **all-controller
+Stop** and only clears the flag once every controller acknowledges it.
+
+Phases are `starting`, `running`, `finishing`, `stopping`, `finished`, `stopped`,
+`failed`, and `interrupted`. The first four are active. Restarted queues are
+`interrupted` and never resume automatically. Status and requested durations
+describe commands, not measured water. Existing controller observations supply
+History. Both POST routes require the same authorization and Origin checks as
+`/action`; the public demo denies them.
 
 ## Future plan
 
@@ -97,6 +128,17 @@ Threshold writes accept `max_wind_mph` (0 to 50), `min_temp_f` (20 to 70), and `
 
 Successful dispatch responses include `ok`, the dispatch target, and, where available, `confirm_within_s`. Check subsequent reported state. If a request times out, inspect state before retrying a run.
 
+## Notification Stop
+
+`POST /notification-stop` accepts the `zone` and `run_id` included in a watering
+notification. Normal authentication and Origin checks apply; the run ID is not
+an access token. The server rejects expired or replaced runs with `409` and does
+not change current watering. A valid Stop also cancels the remaining queue.
+
+A `200` response with `ok: true` means the controller accepted Stop. `scope`
+reports `zone` or `device`; controllers without individual zone stops stop the
+whole device. `502` means Stop was not confirmed and can be retried from the app.
+
 ## Command failures
 
 | Code | Meaning |
@@ -107,7 +149,7 @@ Successful dispatch responses include `ok`, the dispatch target, and, where avai
 | `controller_unsupported` | Operation unsupported |
 | `controller_unreachable` | Controller connection or upstream operation failed |
 
-Preserve the response status, code, diagnostic, and request ID. Additional policy failures can hold a run. Do not translate every refusal into a retry.
+Preserve the response status, code, diagnostic, and request ID. Additional policy failures can prevent a run. Do not translate every refusal into a retry.
 
 **POST /simulate** evaluates a what-if scenario without dispatch. Tuning dismissals use **POST /tuning/dismiss** and **POST /tuning/undismiss**. The retired shadow routes report disabled; `run_sequence_now` is no longer an accepted action.
 

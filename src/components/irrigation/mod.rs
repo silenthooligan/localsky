@@ -17,6 +17,8 @@ pub mod hero;
 pub mod mobile;
 pub mod overview;
 pub mod plan;
+pub mod quick_run;
+pub mod quick_run_client;
 pub mod running_banner;
 pub mod verdict_strip;
 
@@ -31,7 +33,6 @@ use controls::{OverrideControl, RainDelayPanel, StopAllPanel};
 use forecast::ForecastPanel;
 use hero::NextRunHero;
 use mobile::MobileIrrigation;
-use running_banner::RunningBanner;
 use verdict_strip::VerdictStrip;
 
 #[component]
@@ -100,9 +101,8 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         if !has_zones.get() {
             return view! { <NoZonesEmpty/> }.into_any();
         }
-        // Attention precedes data: with a recommendation pending the strip
-        // renders ABOVE the data columns; a scorecard-only strip keeps the
-        // quiet bottom slot.
+        // Actionable suggestions precede the data. Rain-decision history
+        // lives in History rather than a current-status footer.
         let has_suggestions = has_suggestions.get();
         let mobile = is_mobile.map(|s| s.get()).unwrap_or(false);
         if mobile {
@@ -132,9 +132,6 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         // Right column: the wider data surface.
                         <ForecastPanel snap/>
                     </div>
-                    {(!has_suggestions).then(|| view! {
-                        <crate::components::zones::tuning::TuningStrip report=tuning_report/>
-                    })}
                 </div>
             }
             .into_any()
@@ -146,12 +143,12 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // and one tap from being stopped, regardless of scroll position.
         // Hidden when no zone is active. Renders identically on mobile and
         // desktop; SCSS handles position differences.
-        <RunningBanner snap/>
         <AnomalyBanner snap/>
         // The one-time notices (the soil opt-in offer, the Home Assistant
         // migration, the inferred-target warning) pop once from the
         // centralized popup and leave the page clear; nothing sits here.
         <NoticeCenter snap/>
+        <quick_run::QuickRun snap/>
         {body}
         {override_confirmation}
     }

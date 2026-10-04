@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::Icon;
+use crate::components::ui::{ChartKey, Icon, Panel};
 use crate::docs::{doc_url, ISSUES_URL, REPO_URL};
 
 #[component]
@@ -18,6 +18,22 @@ pub fn SettingsHelp() -> impl IntoView {
                     "Guides for every stage, from first install to deep tuning."
                 </p>
             </header>
+            <Panel title="Reading your dashboard">
+                <p>"The key beside each plot names its measurement and units. Trend charts keep the same colors across screens."</p>
+                <div class="chart-key">
+                    <ChartKey label="Watering" color="var(--chart-water)"/>
+                    <ChartKey label="Rain" color="var(--chart-rain)"/>
+                    <ChartKey label="Temperature" color="var(--chart-temperature)"/>
+                    <ChartKey label="Soil moisture" color="var(--chart-soil)"/>
+                    <ChartKey label="Wind speed" color="var(--chart-wind)"/>
+                    <ChartKey label="Pressure" color="var(--chart-pressure)"/>
+                    <ChartKey label="Plant water use (ET)" color="var(--chart-et)"/>
+                </div>
+                <p>"Rain is teal before the threshold and amber beyond it. Rain beyond the ET goal is green. The watering status explains the final decision."</p>
+                <p>"Blue: watering. Green: completed. Amber: skipped or paused. Gray: off or unknown. Red: a device fault. Card header colors identify sections."</p>
+                <p>"Forecasts and projections are estimates. A missing reading is not zero. Radar and UV use their own labeled weather scales."</p>
+                <p>"Explore History charts with a pointer or focus the plot and use the arrow keys. Home and End jump to the first and last day."</p>
+            </Panel>
             <div class="about-links">
                 <a class="about-link" href=doc_url("getting-started") target="_blank" rel="noopener">
                     <Icon name="download" size=18/>

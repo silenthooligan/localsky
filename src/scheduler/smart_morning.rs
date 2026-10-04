@@ -658,7 +658,7 @@ async fn dispatch_today(
         let rows = match rs.window(start.timestamp(), end.timestamp()).await {
             Ok(rows) => rows,
             Err(error) => {
-                warn!(%error, "smart morning: cannot verify restart holds; watering held");
+                warn!(%error, "smart morning: cannot verify restart holds; watering skipped");
                 return;
             }
         };
@@ -2464,7 +2464,7 @@ mod tests {
         let registry = registry_with(&rec);
         let (runs, active_runs) = stores();
         let exempt = crate::model::ZoneVerdict {
-            reason: "Exempt from the restriction holding the yard. (No watering on Tuesday)".into(),
+            reason: "Exempt from the watering restriction. (No watering on Tuesday)".into(),
             ..verdict("drip_bed", "run", "exempt")
         };
         let bound = crate::model::ZoneVerdict {
@@ -2614,13 +2614,13 @@ mod tests {
         let registry = registry_with(&rec);
         let (runs, active_runs) = stores();
         let exempt = crate::model::ZoneVerdict {
-            reason: "Exempt from the restriction holding the yard. (No watering on Tuesday)".into(),
+            reason: "Exempt from the watering restriction. (No watering on Tuesday)".into(),
             ..verdict("drip_bed", "run", "exempt")
         };
         let mut snap = snap_with(vec![zone_secs("drip_bed", 1, Some(exempt))]);
         snap.skip_check.decide(
             "skip",
-            "All watering is on hold".to_string(),
+            "Skip all watering is enabled".to_string(),
             "paused".to_string(),
         );
         run_dispatch(&snap, &registry, &runs, &active_runs, at(NO_STOP_EPOCH)).await;
@@ -2632,7 +2632,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].skip_reason.as_deref(),
-            Some("All watering is on hold")
+            Some("Skip all watering is enabled")
         );
     }
 

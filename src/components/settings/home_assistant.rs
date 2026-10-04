@@ -135,7 +135,7 @@ fn HaEntityPrefix() -> impl IntoView {
 
     view! {
         <HaCard icon="controllers" title="HA controller entity names"
-            meaning="Used when LocalSky reads irrigation state from Home Assistant. Match the controller's entity names in HA. The existing opensprinkler default is kept until you change it. Saving a different prefix holds watering until LocalSky restarts."
+            meaning="Used when LocalSky reads irrigation state from Home Assistant. Match the controller's entity names in HA. The existing opensprinkler default is kept until you change it. After changing the prefix, restart LocalSky before watering can resume."
             chip="HA mode only" tone="off"
         >
             <div>

@@ -2,6 +2,17 @@
   "description": "Synthetic-only data from the isolated 0.9.0 demo; rain-held visual scenario, fixed clock and real seeded history/tuning shapes. Fixed demo posture (no extra host dry-run banner). No owner configuration or credentials.",
   "now": "2026-09-11T01:16:40+00:00",
   "responses": {
+    "/api/irrigation/quick-run": {
+      "available": true,
+      "reason": null,
+      "run": null,
+      "zones": [
+        { "zone": "back_yard", "name": "Back Yard", "max_seconds": 3600 },
+        { "zone": "front_yard", "name": "Front Yard", "max_seconds": 3600 },
+        { "zone": "side_yard", "name": "Side Yard", "max_seconds": 3600 },
+        { "zone": "back_yard_shrubs", "name": "Back Yard Shrubs", "max_seconds": 3600 }
+      ]
+    },
     "/api/snapshot": {
       "last_packet_epoch": 1789089400,
       "air_temp_f": 89.06058632963193,
@@ -3149,7 +3160,7 @@
       "generated_epoch": 1789089401,
       "scorecard": {
         "confirmed_days": 2,
-        "line": "Forecast rain prompted hold verdicts on 5 days in the last 30; rain followed on 2 of 5.",
+        "line": "Forecast rain prompted skip decisions on 5 days in the last 30; rain followed on 2 of 5.",
         "min_scored_days": 3,
         "reactive_days": null,
         "reactive_line": "",
@@ -3199,7 +3210,7 @@
             "Observed rain: 0.00 in over the last 7 days (gauge).",
             "Irrigation applied: 0.61 in over the last 7 days; 1 of 1 session(s) remain.",
             "Forecast credit: -0.00 in until the next session (no bias correction: need 5 rain days this month, have 0).",
-            "The soil model and the weekly plan both hold today."
+            "Neither the soil model nor the weekly plan calls for watering today."
           ],
           "recommendation": null,
           "slug": "back_yard_shrubs",

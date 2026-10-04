@@ -107,6 +107,7 @@ pub fn WindPanel(
     view! {
         <section class="panel wind">
             <h2 class="panel-title">"Wind"</h2>
+            <p class="wind-update-note">"Updates automatically as sources report. Station samples and cloud averages can update at different rates."</p>
             <Show when=move || evidence.get().is_some()>
                 <details class="wind-evidence">
                     <summary>{move || evidence.get().map(|sample| format!("Average: {}", sample.summary_at(irrigation.get().last_refresh_epoch)))}</summary>
@@ -183,8 +184,8 @@ pub fn WindPanel(
                     </div>
                 </div>
                 <div class="wind-bars">
-                    <WindBar label="lull" mph=move || value("wind_lull_mph", snap.get().wind_lull_mph) scale=scale color="cool" prefs=prefs/>
-                    <WindBar label="avg"  mph=move || value("wind_mph", snap.get().wind_avg_mph)  scale=scale color="mid" prefs=prefs/>
+                    <WindBar label="low" mph=move || value("wind_lull_mph", snap.get().wind_lull_mph) scale=scale color="cool" prefs=prefs/>
+                    <WindBar label="average"  mph=move || value("wind_mph", snap.get().wind_avg_mph)  scale=scale color="mid" prefs=prefs/>
                     <WindBar label="gust" mph=move || value("wind_gust_mph", snap.get().wind_gust_mph) scale=scale color="hot" prefs=prefs/>
                     // Show rapid wind only while that field has a usable report.
                     // HA average wind alone does not establish a native now value.
@@ -193,6 +194,7 @@ pub fn WindPanel(
                     </Show>
                 </div>
             </div>
+            <p class="chart-note">"Low, average, gust, and Now share one speed scale. Source details above show where each reading came from and its age."</p>
         </section>
     }
 }

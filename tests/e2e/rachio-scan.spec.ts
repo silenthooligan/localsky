@@ -112,7 +112,7 @@ test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async
   const fold = page.locator("details#controller-advanced-fold");
   await expect(fold).not.toHaveAttribute("open", "");
   await page.getByText("Advanced: raw config JSON").click();
-  const textarea = page.locator("textarea");
+  const textarea = fold.locator("textarea");
   await expect(textarea).toBeVisible();
   await expect(textarea).toHaveValue(/zone_uuid_map/);
   await expect(textarea).toHaveValue(/"front_lawn": "1f00aa00-0000-4000-8000-000000000001"/);
@@ -141,7 +141,7 @@ test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async
   await page.locator(".settings-card").filter({ hasText: "rachio_main" })
     .getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByText("Advanced: raw config JSON").click();
-  const reopened = page.locator("textarea");
+  const reopened = page.locator("#controller-advanced-fold textarea");
   await expect(reopened).toBeVisible();
   await expect(reopened).toHaveValue(/zone_uuid_map/);
   await expect(reopened).toHaveValue(/"garden": "1f00aa00-0000-4000-8000-000000000004"/);

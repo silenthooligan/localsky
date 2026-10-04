@@ -192,10 +192,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Advanced"<HelpHint topic="advanced"/></h1>
                 <p class="settings-page__subtitle">
-                    "Per-device preferences and deployment maintenance. The "
-                    <strong>"This device"</strong>" options are local and harmless; the "
-                    <strong>"Maintenance & danger"</strong>" tools below change server-side "
-                    "config and can affect your whole deployment."
+                    "Device preferences, source status, and maintenance."
                 </p>
             </header>
 
@@ -203,15 +200,15 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <header class="settings-band__head">
                     <h2 class="settings-band__title">"This device"</h2>
                     <p class="settings-band__sub">
-                        "Per-browser preferences, stored locally. Safe to toggle."
+                        "Preferences saved on this browser."
                     </p>
                 </header>
 
             <Panel title="Nerd mode".to_string()>
                 <Toggle
                     checked=nerd_mode
-                    label="Show raw engine math everywhere".to_string()
-                    helptext="Shows the numbers behind the verdict: ET0, rain, the heat multiplier, the soil model and the whole skip check. This device only.".to_string()
+                    label="Show detailed readings and watering math".to_string()
+                    helptext="Adds soil estimates, water-use calculations, and rule checks.".to_string()
                 />
             </Panel>
 
@@ -219,13 +216,13 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <Toggle
                     checked=readonly
                     label="Hide destructive controls on this device".to_string()
-                    helptext="This device can watch but not act: no runs, no stops, no edits. History stays visible. For shared screens. This device only.".to_string()
+                    helptext="For shared screens. Hides watering and editing controls.".to_string()
                 />
             </Panel>
 
-            <Panel title="Source freshness".to_string()>
+            <div id="source-freshness"><Panel title="Source freshness".to_string()>
                 <SourceStatusList/>
-            </Panel>
+            </Panel></div>
 
             <Panel title="Update check".to_string()>
                 <Toggle
@@ -239,10 +236,9 @@ pub fn SettingsAdvanced() -> impl IntoView {
 
             <section class="settings-band settings-band--danger">
                 <header class="settings-band__head">
-                    <h2 class="settings-band__title">"Maintenance & danger"</h2>
+                    <h2 class="settings-band__title">"Maintenance"</h2>
                     <p class="settings-band__sub">
-                        "These change server-side config. Backup, restore, raw editing, and "
-                        "rollback affect the whole deployment, not just this device."
+                        "Backups and configuration for this LocalSky instance."
                     </p>
                 </header>
 
@@ -258,8 +254,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
 
             <Panel title="Configuration history".to_string()>
                 <p class="settings-page__subtitle" class:u-mb4=true>
-                    "Every saved change snapshots the previous config first. "
-                    "Roll back to any of the last 20 versions using the list below."
+                    "The last 20 saved configurations."
                 </p>
                 <Show
                     when=move || !snapshots.get().is_empty()
@@ -282,13 +277,9 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 </Show>
             </Panel>
 
-            <Panel title="Backup and restore".to_string()>
+            <div id="backup"><Panel title="Backup and restore".to_string()>
                 <p class="settings-page__subtitle" class:u-mb3=true>
-                    "One bundle holds the config and the full history database "
-                    "(runs, sensor readings, decisions). The VAPID push key and "
-                    "instance identity stay out of it on purpose. Restoring a "
-                    "database requires a container restart; a config restore "
-                    "applies on the next engine tick."
+                    "Download your configuration and history. Restoring replaces existing data and requires a restart. Instance identity and push keys are not included."
                 </p>
                 <div class="settings-form-actions" style="justify-content:flex-start; gap: var(--space-2)">
                     <crate::components::ui::Button variant="primary" size="sm"  class="setup-footer__btn setup-footer__btn--primary" href="/api/v1/backup" download=true>
@@ -311,14 +302,10 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 }}
             </Panel>
 
+            </div>
             <Panel title="Raw TOML editor".to_string()>
                 <p class="settings-page__subtitle" class:u-mb3=true>
-                    "Direct edit of "
-                    <code>"/data/localsky.toml"</code>
-                    ". Validates on save (TOML parse + schema invariants). "
-                    "Skips the wizard entirely; useful when adding sources / "
-                    "controllers / zones from a template you already have. "
-                    "Secrets are visible here, unlike "<code>"GET /api/config"</code>"."
+                    "Edit the complete configuration. Changes are validated on save. This editor displays stored secrets."
                 </p>
                 <RawTomlEditor/>
             </Panel>
@@ -357,19 +344,14 @@ fn format_epoch(epoch: i64) -> String {
     }
 }
 
-/// One freshness row, now driven off the CONFIGURED sources reported by
-/// /api/v1/health rather than three hardcoded names. `label` is the source's
-/// own id + a friendly kind label, so a Davis / NWS / Open-Meteo-only user sees
-/// their actual sources instead of a phantom "Tempest weather station" row.
-/// `status` is the server-computed classification ("fresh" | "stale" |
-/// "offline"); `last_epoch` is its last-seen epoch (0 = never) for the age text.
+/// A configured source reported by the health API.
 #[derive(Clone, Default)]
 struct SourceStatusRow {
     label: String,
     diagnostic: Option<serde_json::Value>,
     last_epoch: i64,
-    /// Server-computed freshness: "fresh" | "stale" | "offline". Empty before
-    /// the first health fetch lands (the loading state).
+    enabled: bool,
+    unlocated: bool,
     status: String,
 }
 
@@ -379,25 +361,31 @@ fn SourceStatusList() -> impl IntoView {
     // the "loading" caption so the DOM matches before hydration.
     let rows: RwSignal<Vec<SourceStatusRow>> = RwSignal::new(Vec::new());
     let loaded = RwSignal::new(false);
-
+    let failed = RwSignal::new(false);
     #[cfg(feature = "hydrate")]
-    {
-        Effect::new(move |_| {
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(fresh) = fetch_source_status().await {
-                    rows.set(fresh);
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            while !rows.is_disposed() {
+                let next = fetch_source_status().await;
+                if rows.is_disposed() {
+                    break;
                 }
+                failed.set(next.is_err());
+                rows.set(next.unwrap_or_default());
                 loaded.set(true);
-            });
+                gloo_timers::future::TimeoutFuture::new(30_000).await;
+            }
         });
-    }
+    });
 
     view! {
         <Show
             when=move || !rows.get().is_empty()
             fallback=move || {
-                let msg = if loaded.get() {
-                    "No weather sources are configured yet. Add one under Devices."
+                let msg = if failed.get() {
+                    "Source status is unavailable. Retrying automatically…"
+                } else if loaded.get() {
+                    "No source status available. Review sources under Devices."
                 } else {
                     "Loading source freshness…"
                 };
@@ -420,15 +408,12 @@ fn SourceStatusRowView(row: SourceStatusRow) -> impl IntoView {
     } else {
         i64::MAX
     };
-    // Trust the server's classification (it knows each kind's expected cadence)
-    // rather than re-deriving a stale threshold client-side. A never-seen source
-    // reads as "waiting" instead of the raw "offline" so a just-added source
-    // does not look broken before its first reading.
-    let (status_text, status_class) = match row.status.as_str() {
-        "fresh" => ("fresh", "source-status-pill source-status-pill-fresh"),
-        "stale" => ("stale", "source-status-pill source-status-pill-stale"),
-        _ if age_s == i64::MAX => ("waiting", "source-status-pill source-status-pill-waiting"),
-        _ => ("offline", "source-status-pill source-status-pill-offline"),
+    let state = super::source_status::presentation(&row.status, row.enabled, row.unlocated);
+    let status_class = match state.tone {
+        "fresh" => "source-status-pill source-status-pill-fresh",
+        "stale" => "source-status-pill source-status-pill-stale",
+        "offline" => "source-status-pill source-status-pill-offline",
+        _ => "source-status-pill source-status-pill-waiting",
     };
     let age_text = if age_s == i64::MAX {
         "no data yet".to_string()
@@ -441,9 +426,9 @@ fn SourceStatusRowView(row: SourceStatusRow) -> impl IntoView {
     };
     view! {
         <li class="source-status-row">
-            <span class="source-status-label">{label}</span>
-            <span class=status_class>{status_text}</span>
-            <span class="source-status-age">{age_text}</span>
+            <span class="source-status-label">{label}<small>{state.meaning}</small></span>
+            <span class=status_class>{state.label}</span>
+            <span class="source-status-age" title="Last observation">{age_text}</span>
             {row.diagnostic.map(|record| view! { <DiagnosticDetails record=record/> })}
         </li>
     }
@@ -695,17 +680,24 @@ impl CachedUpdate {
 /// plus a friendly kind label. Returns None on a transport failure (the panel
 /// keeps its loading/empty state); Some(empty) when health reports no sources.
 #[cfg(feature = "hydrate")]
-async fn fetch_source_status() -> Option<Vec<SourceStatusRow>> {
+async fn fetch_source_status() -> Result<Vec<SourceStatusRow>, ()> {
     use gloo_net::http::Request;
     use serde_json::Value;
-    let health = Request::get("/api/v1/health")
+    let response = Request::get("/api/v1/health")
         .send()
         .await
-        .ok()?
-        .json::<Value>()
-        .await
-        .ok()?;
-    let sources = health.get("sources").and_then(Value::as_array)?;
+        .map_err(|_| ())?;
+    if !response.ok() {
+        return Err(());
+    }
+    let health = response.json::<Value>().await.map_err(|_| ())?;
+    if !health["status"].is_string() {
+        return Err(());
+    }
+    let sources = health.get("sources").and_then(Value::as_array);
+    let Some(sources) = sources else {
+        return Ok(Vec::new());
+    };
     let rows = sources
         .iter()
         .map(|s| {
@@ -730,6 +722,10 @@ async fn fetch_source_status() -> Option<Vec<SourceStatusRow>> {
             };
             SourceStatusRow {
                 label,
+                enabled: s["enabled"].as_bool().unwrap_or(true),
+                unlocated: s["note"]
+                    .as_str()
+                    .is_some_and(|n| n.contains("no location")),
                 diagnostic: s.get("error").filter(|value| !value.is_null()).cloned(),
                 last_epoch: s
                     .get("last_seen_epoch")
@@ -743,7 +739,7 @@ async fn fetch_source_status() -> Option<Vec<SourceStatusRow>> {
             }
         })
         .collect();
-    Some(rows)
+    Ok(rows)
 }
 
 /// Read `features.demo_mode` off the shared config client. A non-2xx

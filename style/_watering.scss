@@ -5,32 +5,24 @@
   display: flex; flex-direction: column; align-items: stretch; gap: var(--space-5);
   min-height: 0; padding: var(--space-6);
   &.hero-run { --hero-verdict: var(--accent-water); }
+  &.hero-complete { --hero-verdict: var(--status-online); }
   &.hero-skip { --hero-verdict: var(--accent-warm); }
   &.hero-off { --hero-verdict: var(--text-faint); }
-  background:
-    radial-gradient(ellipse at 0 0, color-mix(in oklab, var(--hero-verdict) 38%, transparent), transparent 75%),
-    linear-gradient(145deg, color-mix(in oklab, var(--hero-verdict) 16%, var(--elev-1)), var(--elev-1) 85%);
+  background: linear-gradient(120deg, color-mix(in oklab, var(--hero-verdict) 15%, var(--elev-1)), var(--elev-1));
   border-color: color-mix(in oklab, var(--hero-verdict) 55%, var(--elev-border));
-  box-shadow: 0 12px 36px -16px color-mix(in oklab, var(--hero-verdict) 48%, transparent), var(--shadow-2), var(--specular);
-  &::before { height: 5px; }
-  &::after {
-    content: ""; position: absolute; width: 22rem; height: 22rem;
-    top: -9rem; right: -11rem; border-radius: 50%; pointer-events: none;
-    border: 1px solid color-mix(in oklab, var(--hero-verdict) 24%, transparent);
-    box-shadow: 0 0 0 36px color-mix(in oklab, var(--hero-verdict) 6%, transparent),
-      0 0 0 72px color-mix(in oklab, var(--hero-verdict) 4%, transparent);
-    z-index: -1;
-  }
+  box-shadow: var(--shadow-1);
+  &::before { height: 3px; }
+  &::after { content: none; }
   .next-run-glyph {
     display: grid; place-items: center; width: 76px; height: 76px;
-    border-radius: 24px; margin-bottom: var(--space-5); color: var(--hero-verdict);
-    background: var(--elev-1);
+    border-radius: var(--radius-md); margin-bottom: var(--space-5); color: var(--hero-verdict);
+    background: color-mix(in oklab, var(--hero-verdict) 18%, var(--elev-1));
     border: 1px solid color-mix(in oklab, var(--hero-verdict) 60%, transparent);
-    box-shadow: 0 8px 24px -8px color-mix(in oklab, var(--hero-verdict) 50%, transparent), var(--specular);
+    box-shadow: none;
     svg { width: 44px; height: 44px; }
   }
   .next-run-eyebrow { color: var(--text); font-family: var(--font-mono); font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow); font-weight: 700; }
-  .next-run-headline { font-family: var(--font-mono); font-size: var(--text-h1); font-weight: 700; line-height: 1.2; letter-spacing: var(--tracking-tight); margin: var(--space-2) 0 var(--space-3); color: var(--text-bright); text-wrap: balance; }
+  .next-run-headline { font-family: var(--font-editorial); font-size: var(--text-h1); font-weight: 400; line-height: 1.2; letter-spacing: var(--tracking-tight); margin: var(--space-2) 0 var(--space-3); color: var(--text-bright); text-wrap: balance; }
   .next-run-tag { margin: 0; font-size: var(--text-body); line-height: 1.5; color: var(--text); }
 }
 .irrigation-overview__today { min-width: 0; }
@@ -65,7 +57,7 @@
 [data-watering="run"] { --watering-color: var(--accent-text); }
 [data-watering="skip"] { --watering-color: var(--accent-warm); }
 [data-watering="off"] { --watering-color: var(--text-faint); }
-.watering-decisions-heading h1 { margin: var(--space-3) 0 0; font-size: var(--text-h1); }
+.watering-decisions-heading h1 { margin: var(--space-3) 0 0; font-family: var(--font-editorial); font-weight: 400; font-size: var(--text-h1); }
 .watering-decisions, .water-plan { display: grid; gap: var(--space-6); min-width: 0; }
 .water-plan__overview, .decision-live {
   padding: var(--space-6); background: var(--elev-1); border: 1px solid var(--elev-border);

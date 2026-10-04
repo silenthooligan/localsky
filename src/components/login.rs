@@ -111,7 +111,7 @@ pub fn LoginPage() -> impl IntoView {
         <div class="login-page">
             <div class="login-card" on:keydown=on_keydown>
                 <div class="login-card__brand" aria-hidden="true">
-                    <img src="/brand-mark.svg" alt="" width="44" height="44"/>
+                    <img src=crate::base::url("/brand-mark.svg") alt="" width="44" height="44"/>
                     <span>
                         <span class="header-brand__local">"LOCAL"</span>
                         <span class="header-brand__sky">"SKY"</span>

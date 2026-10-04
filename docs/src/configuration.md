@@ -433,7 +433,13 @@ Off by default; nothing phones home. When enabled (restart required), LocalSky p
 
 ## `[persistence]`
 
-Local-history retention knobs for the SQLite database. Both default to sensible values; set them only if disk is tight.
+Open **Settings → History retention**, or search Settings for “retention”. Sensor
+readings default to 90 days; watering records default to forever. Enter 0 to keep
+either forever. Shortening a limit asks for confirmation because cleanup permanently
+deletes older records. Download a backup first if you need to keep them.
+
+Saved limits apply without restarting: sensor cleanup runs hourly as readings
+arrive, and watering cleanup runs daily. The equivalent configuration is:
 
 ```toml
 [persistence]

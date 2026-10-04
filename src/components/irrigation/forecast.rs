@@ -58,11 +58,12 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let et_known = move || et_mm_opt().is_some();
     let net = move || rain_budget_balance_mm(&snap.get().forecast);
     let drying = move || net().is_some_and(|n| n < -0.05);
-    let rain_pct = move || {
-        et_mm_opt().and_then(|et| {
-            let total = rain_mm() + et;
-            (total > 0.0).then(|| (rain_mm() / total * 100.0).clamp(0.0, 100.0))
-        })
+    let rain_geometry =
+        move || et_mm_opt().and_then(|et| rain_bar_geometry(Some(rain_mm()), 0.0, et));
+    let goal_pct = move || {
+        et_mm_opt()
+            .map(|et| et / (et * 1.2).max(0.01) * 100.0)
+            .unwrap_or(0.0)
     };
     let status = move || {
         let Some(n) = net() else {
@@ -133,12 +134,21 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     </span>
                 </div>
             </div>
-            {move || rain_pct().map(|pct| view! {
-                <div class="balance-bar" role="img" aria-label=status>
-                    <div class="balance-bar__rain" style=format!("width: {pct}%")></div>
-                    <div class="balance-bar__et"></div>
+            {move || rain_geometry().map(|(pct, goal_share, _)| view! {
+                <div class=move || if net().is_some_and(|n| n >= 0.0) { "balance-bar is-covered" } else { "balance-bar" } role="img" aria-label=status>
+                    <div class="balance-bar__rain" style=format!("width: {pct}%")>
+                        <span class="balance-bar__within" style=format!("width: {goal_share}%")></span>
+                        <span class="balance-bar__surplus"></span>
+                    </div>
+                    <span class="balance-bar__goal" style=move || format!("left: {}%", goal_pct())></span>
                 </div>
             })}
+            <div class="chart-key">
+                <crate::components::ui::ChartKey label="Rain toward budget" color="var(--chart-rain)" bars=true/>
+                <crate::components::ui::ChartKey label="Rain beyond budget" color="var(--status-online)" bars=true/>
+                <crate::components::ui::ChartKey label="ET budget marker" color="var(--chart-et)"/>
+            </div>
+            <p class="chart-note">"Teal fills toward the day's estimated water use. Green starts beyond the ET marker: rain has covered that budget. Empty track before the marker shows the remaining budget."</p>
             <div class=move || if drying() { "balance-status is-drying" } else { "balance-status" }>
                 {status}
             </div>
@@ -325,6 +335,11 @@ fn RainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
         <div class="forecast-block">
             <div class="forecast-block-title">"Rain outlook"</div>
+            <div class="chart-key">
+                <crate::components::ui::ChartKey label="Rain up to threshold" color="var(--chart-rain)" bars=true/>
+                <crate::components::ui::ChartKey label="Rain beyond threshold" color="var(--verdict-skip)" bars=true/>
+            </div>
+            <p class="chart-note">"Teal shows rain up to the line; amber shows only the amount beyond it. An amber marker means the threshold is met. Stripes are measured rain carried forward. These are decision inputs, not a final watering verdict."</p>
             <div class="rain-today">
                 <div class="rain-card">
                     <div class="rain-card-label">{station_label}</div>
@@ -392,7 +407,7 @@ fn rain_bar_geometry(value: Option<f64>, carry: f64, threshold: f64) -> Option<(
     let amount = value.filter(|v| v.is_finite() && *v >= 0.0)?;
     let total = amount + carry;
     let max = (threshold * 1.2).max(0.01);
-    let pct = ((total / max).clamp(0.0, 1.0) * 100.0).round();
+    let pct = (total / max).clamp(0.0, 1.0) * 100.0;
     let denom = total.min(max);
     let threshold_share = if denom > 0.0 {
         (threshold / denom * 100.0).clamp(0.0, 100.0)
@@ -427,9 +442,10 @@ fn RainBar(
             .map(|v| v + carry_in())
     };
     let geometry = move || rain_bar_geometry(value.get(), carry_in(), threshold.get());
+    let reached = move || total().is_some_and(|v| v >= threshold.get());
     let threshold_pct = move || {
         let max = (threshold.get() * 1.2).max(0.01);
-        ((threshold.get() / max).clamp(0.0, 1.0) * 100.0).round()
+        (threshold.get() / max).clamp(0.0, 1.0) * 100.0
     };
     let has_carry = move || carry_in() > 0.005;
     let carry_title = move || {
@@ -440,7 +456,7 @@ fn RainBar(
     };
     view! {
         <div class=move || {
-            if total().is_some_and(|v| v >= threshold.get()) { "rain-bar rain-bar-above" } else { "rain-bar" }
+            if reached() { "rain-bar rain-bar-above" } else { "rain-bar" }
         }>
             <div class="rain-bar-head">
                 <span class="rain-bar-label">{label}</span>
@@ -459,13 +475,17 @@ fn RainBar(
                 {move || geometry().map(|(pct, threshold_share, carry_share)| view! {
                     <div class="rain-bar-fill" style=format!(
                         "width:{pct}%; --thr-pct:{threshold_share}%; --carry-pct:{carry_share}%"
-                    )></div>
+                    )>
+                        <span class="rain-bar-before" style=format!("width:{threshold_share}%")></span>
+                        <span class="rain-bar-excess"></span>
+                    </div>
                 })}
                 <div class="rain-bar-threshold"
                     style=move || format!("left: {}%", threshold_pct())
                     title=threshold_label></div>
             </div>
             <div class="rain-bar-foot">
+                <span class="rain-bar-state">{move || if total().is_none() { "Unknown · " } else if reached() { "Threshold met · " } else { "Below threshold · " }}</span>
                 {threshold_label} ": " {move || fmt_rain_amount(threshold.get(), prefs)}
                 {move || total().filter(|_| has_carry()).map(|known| view! {
                     <span class="rain-bar-foot-carry" title=carry_title>
@@ -480,9 +500,8 @@ fn RainBar(
 /// Multi-day forecast intelligence (Phase A). Shows the four rules
 /// the engine added on top of the legacy 1-day check: next-4h hourly
 /// rollup, probability-weighted tomorrow, 3-day weighted, 7-day
-/// weighted. Each bar fills against its own threshold; bars that
-/// have crossed brighten (the "outlook met" state) -- still blue, since
-/// crossing means enough rain is expected, which is the water family.
+/// weighted. Each bar fills against its own threshold; reached thresholds
+/// use amber and an explicit state label, as in the main rain outlook.
 #[component]
 fn MultiDayRainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let prefs = use_unit_prefs();

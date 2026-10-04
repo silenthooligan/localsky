@@ -22,7 +22,7 @@ use crate::components::units_fmt::{use_unit_prefs, UnitPrefs};
 use crate::components::verdict::{verdict_label, verdict_token};
 use crate::history::types::DecisionRecord;
 use crate::model::{DecisionTrace, IrrigationSnapshot, RuleEval};
-use crate::reason_render::{render_rule_detail, render_rule_margin, render_trace_reason};
+use crate::reason_render::{plain_watering_reason, render_rule_detail, render_trace_reason};
 
 fn fmt_day(epoch: i64) -> String {
     Local
@@ -67,6 +67,9 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // Past decisions (newest first). None selected = show today's live trace.
     let decisions = RwSignal::new(Vec::<DecisionRecord>::new());
     let selected: RwSignal<Option<i64>> = RwSignal::new(None);
+    let history_error = RwSignal::new(false);
+    let history_loading = RwSignal::new(true);
+    let history_retry = RwSignal::new(0_u32);
     // Per-device unit preference; the ladder's per-rule detail + margin re-render
     // unit-aware from the structured RuleEval (P2 units architecture).
     let prefs = use_unit_prefs();
@@ -74,18 +77,34 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            history_retry.get();
+            history_loading.set(true);
+            history_error.set(false);
             leptos::task::spawn_local(async move {
-                if let Ok(resp) =
-                    gloo_net::http::Request::get("/api/v1/irrigation/decisions?days=30")
-                        .send()
+                let loaded = async {
+                    let resp = gloo_net::http::Request::get(&crate::base::url(
+                        "/api/v1/irrigation/decisions?days=30",
+                    ))
+                    .send()
+                    .await
+                    .ok()?;
+                    if !resp.ok() {
+                        return None;
+                    }
+                    resp.json::<crate::history::types::DecisionWindow>()
                         .await
-                {
-                    if let Ok(w) = resp.json::<crate::history::types::DecisionWindow>().await {
+                        .ok()
+                }
+                .await;
+                match loaded {
+                    Some(w) => {
                         let mut d = w.decisions;
                         d.reverse(); // newest first
                         decisions.set(d);
                     }
+                    None => history_error.set(true),
                 }
+                history_loading.set(false);
             });
         });
     }
@@ -113,15 +132,15 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <p class="page-eyebrow">"Irrigation logic"</p>
                 <h1 class="page-title">"Rule Lab"<HelpHint topic="skip-rules"/></h1>
                 <p class="rulelab-page__sub">
-                    "Configure your watering rules, and see exactly why each day was decided."
+                    "Set watering rules and review how a decision was made."
                 </p>
             </header>
 
-            <div class="rulelab-tabs" role="tablist">
+            <div class="rulelab-tabs" role="group" aria-label="Rule Lab view">
                 <button type="button" class="rulelab-tab" class:is-active=move || tab.get() == "rules"
-                    role="tab" on:click=go_rules>"Rules"</button>
+                    aria-pressed=move || (tab.get() == "rules").to_string() on:click=go_rules>"Rules"</button>
                 <button type="button" class="rulelab-tab" class:is-active=move || tab.get() == "decisions"
-                    role="tab" on:click=go_dec>"Decisions"</button>
+                    aria-pressed=move || (tab.get() == "decisions").to_string() on:click=go_dec>"Decisions"</button>
             </div>
 
             {move || if tab.get() == "decisions" {
@@ -132,29 +151,41 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                 type="button"
                                 class="rulelab-history__item"
                                 class:is-active=move || selected.get().is_none()
+                                aria-pressed=move || selected.get().is_none().to_string()
                                 on:click=move |_| selected.set(None)
                             >
-                                <span class="rulelab-history__day">"Today"</span>
-                                <span class="rulelab-history__reason">"Live decision"</span>
+                                <span class="rulelab-history__day">"Live decision"</span>
+                                <span class="rulelab-history__reason">"Current conditions"</span>
                             </button>
+                            <Show when=move || history_loading.get()><p role="status">"Loading recorded decisions…"</p></Show>
+                            <Show when=move || history_error.get()>
+                                <div class="rulelab-load-error" role="alert">
+                                    <p>"Recorded decisions could not be loaded."</p>
+                                    <button type="button" class="btn btn--ghost" on:click=move |_| history_retry.update(|n| *n += 1)>"Retry decisions"</button>
+                                </div>
+                            </Show>
+                            <Show when=move || !history_loading.get() && !history_error.get() && decisions.get().is_empty()>
+                                <p>"No recorded decisions in the last 30 days."</p>
+                            </Show>
                             {move || {
                                 group_by_day(decisions.get()).into_iter().map(|(d, n)| {
                                     let ep = d.epoch;
                                     let tok = verdict_token(&d.verdict);
                                     let lab = verdict_label(&d.verdict);
                                     let day = fmt_day(d.epoch);
-                                    let reason = if d.reason.is_empty() { "All clear".to_string() } else { d.reason.clone() };
+                                    let reason = if d.reason.is_empty() { "No reason recorded".to_string() } else { plain_watering_reason(&d.reason) };
                                     view! {
                                         <button
                                             type="button"
                                             class="rulelab-history__item"
                                             class:is-active=move || selected.get() == Some(ep)
+                                            aria-pressed=move || (selected.get() == Some(ep)).to_string()
                                             on:click=move |_| selected.set(Some(ep))
                                         >
                                             <span class="rulelab-history__day">
                                                 {day}
                                                 {(n > 1).then(|| view! {
-                                                    <span class="rulelab-history__count" title="evaluations that day">{n}" evals"</span>
+                                                    <span class="rulelab-history__count" title="Decisions recorded that day">{n}" checks"</span>
                                                 })}
                                             </span>
                                             <span class="rulelab-history__pill" style=format!("--v:{tok}")>{lab}</span>
@@ -169,14 +200,14 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             {move || {
                                 match selected.get() {
                                     None => match snap.get().decision_trace {
-                                        Some(trace) => view! { <TraceView trace prefs/> }.into_any(),
-                                        None => view! { <div class="rulelab-empty">"Waiting for the first decision of the day…"</div> }.into_any(),
+                                        Some(trace) => view! { <TraceView trace prefs heading="Live decision".to_string()/> }.into_any(),
+                                        None => view! { <div class="rulelab-empty">"No live decision is available yet."</div> }.into_any(),
                                     },
                                     Some(ep) => {
                                         let rec = decisions.get().into_iter().find(|d| d.epoch == ep);
                                         match rec.and_then(|d| d.trace) {
-                                            Some(trace) => view! { <TraceView trace prefs/> }.into_any(),
-                                            None => view! { <div class="rulelab-empty">"No stored trace for this decision (recorded before trace capture)."</div> }.into_any(),
+                                            Some(trace) => view! { <TraceView trace prefs heading=format!("Recorded decision · {}", fmt_day(ep))/> }.into_any(),
+                                            None => view! { <div class="rulelab-empty">"Rule details were not recorded for this decision."</div> }.into_any(),
                                         }
                                     }
                                 }
@@ -201,13 +232,13 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 fn SafetyGates() -> impl IntoView {
     view! {
         <details class="rulelab-gates" open>
-            <summary>"Built-in skip rules, run before your rules"</summary>
+            <summary>"Built-in watering rules"</summary>
             <div class="rulelab-gates__body">
                 <p class="sensors-section__hint">
-                    "These gates decide first, in this order. A weather gate can be turned off; control and legal gates cannot. Turning one off is reversible in a click."
+                    "Protected rules stay on. Open Decisions to see which checks affected watering."
                 </p>
                 <Button variant="primary" href="/settings/skip-rules" class="rulelab-gates__cta">
-                    "Configure thresholds (rain inches, wind mph, freeze temperature)"
+                    "Edit weather thresholds"
                 </Button>
                 <BuiltinGateManager/>
             </div>
@@ -216,47 +247,87 @@ fn SafetyGates() -> impl IntoView {
 }
 
 #[component]
-fn TraceView(trace: DecisionTrace, prefs: Signal<UnitPrefs>) -> impl IntoView {
+fn TraceView(trace: DecisionTrace, prefs: Signal<UnitPrefs>, heading: String) -> impl IntoView {
     let vtoken = verdict_token(&trace.verdict);
-    let vlabel = verdict_label(&trace.verdict);
+    let vlabel = match trace.verdict.as_str() {
+        "run" => "Watering allowed",
+        "run_extended" => "Extended watering allowed",
+        "skip" => "Watering skipped",
+        _ => "Decision unavailable",
+    };
+    let deciding = trace
+        .rules
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.decided())
+        .map(|(i, r)| {
+            format!(
+                "Check {} · {}",
+                i + 1,
+                r.label.replace("Hold all watering", "Skip all watering")
+            )
+        });
+    let (checked, unchecked): (Vec<_>, Vec<_>) = trace
+        .rules
+        .iter()
+        .cloned()
+        .enumerate()
+        .partition(|(_, r)| r.outcome != "not_reached");
+    let unchecked_count = unchecked.len();
     // P2 units architecture: re-render the trace's top-level reason unit-aware
     // from the deciding rule's structured operands; fall back to the baked reason
     // for codes whose operands aren't carried (control gates, etc.).
-    let reason = if trace.reason.is_empty() {
-        "All clear, no skip rule fired.".to_string()
-    } else {
-        render_trace_reason(&trace, prefs.get_untracked())
-    };
+    let reason_trace = trace.clone();
     view! {
         <div class="rulelab">
             <div class="rulelab-verdict" style=format!("--v:{vtoken}")>
-                <span class="rulelab-verdict__eyebrow">"Today's decision"</span>
+                <span class="rulelab-verdict__eyebrow">{heading}</span>
                 <div class="rulelab-verdict__row">
                     <span class="rulelab-verdict__pill">{vlabel}</span>
                     {trace.degraded.then(|| view! {
                         <span class="ha-chip ha-chip--warn">
                             <span class="ha-chip__dot" aria-hidden="true"></span>
-                            "ran on backup readings"
+                            "Limited weather data"
                         </span>
                     })}
                 </div>
-                <span class="rulelab-verdict__reason">{reason}</span>
+                <span class="rulelab-verdict__reason">{move || if reason_trace.reason.is_empty() {
+                    if matches!(reason_trace.verdict.as_str(), "run" | "run_extended") {
+                        "No rule blocks watering.".to_string()
+                    } else { "No reason was recorded.".to_string() }
+                } else { plain_watering_reason(&render_trace_reason(&reason_trace, prefs.get())) }}</span>
+                {deciding.map(|label| view! { <span class="rulelab-verdict__source">{label}</span> })}
             </div>
-            <ol class="rulelab-ladder">
-                {trace.rules.into_iter().map(|r| view! { <RuleRow r prefs/> }).collect_view()}
-            </ol>
+            <section class="rulelab-path" aria-label="Decision path">
+                <header class="rulelab-path__head">
+                    <h2>"Decision path"</h2>
+                    <p>"Checks in order. Green passed; the highlighted rule decided."</p>
+                </header>
+                <ol class="rulelab-ladder">
+                    {checked.into_iter().map(|(i, r)| view! { <RuleRow r prefs step={i+1}/> }).collect_view()}
+                </ol>
+                { (unchecked_count > 0).then(|| view! {
+                    <details class="rulelab-unchecked">
+                        <summary>{format!("Not evaluated · {unchecked_count} {}", if unchecked_count == 1 { "check" } else { "checks" })}</summary>
+                        <p>"These checks did not run. They did not affect this decision."</p>
+                        <ol class="rulelab-ladder">
+                            {unchecked.into_iter().map(|(i, r)| view! { <RuleRow r prefs step={i+1}/> }).collect_view()}
+                        </ol>
+                    </details>
+                })}
+            </section>
         </div>
     }
 }
 
 #[component]
-fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
+fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>, step: usize) -> impl IntoView {
     // An overridden row keeps outcome "fired" -- the gate really did trip --
     // so it must be matched BEFORE the plain "fired" arm, or it renders as
     // the deciding rule it is not.
     let (badge_label, badge_class, accent) = if r.overridden() {
         (
-            "OVERRIDDEN".to_string(),
+            "Overridden".to_string(),
             "rule-row__badge rule-row__badge--overridden",
             "var(--accent-warn)",
         )
@@ -265,23 +336,33 @@ fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
             "fired" => {
                 let v = r.verdict.clone().unwrap_or_default();
                 (
-                    verdict_label(&v).to_string(),
+                    "Deciding rule".to_string(),
                     "rule-row__badge rule-row__badge--fired",
                     verdict_token(&v),
                 )
             }
             "passed" => (
-                "PASS".to_string(),
+                "Passed".to_string(),
                 "rule-row__badge rule-row__badge--passed",
                 "var(--accent-good)",
             ),
             "skipped" => (
-                "N/A".to_string(),
+                if r.detail == "disabled by operator" {
+                    "Off"
+                } else {
+                    "Not applicable"
+                }
+                .to_string(),
+                "rule-row__badge rule-row__badge--skipped",
+                "var(--text-faint)",
+            ),
+            "not_reached" => (
+                "Not evaluated".to_string(),
                 "rule-row__badge rule-row__badge--skipped",
                 "var(--text-faint)",
             ),
             _ => (
-                "-".to_string(),
+                "Unknown".to_string(),
                 "rule-row__badge rule-row__badge--skipped",
                 "var(--text-faint)",
             ),
@@ -296,14 +377,10 @@ fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
     } else {
         "rule-row"
     };
-    let cat_attr = r.category.clone();
-    // P2 units architecture: re-render the per-rule detail + margin unit-aware
-    // from the structured RuleEval operands. Both read prefs.get() inside the
-    // closures so a units toggle re-renders; threshold gates with no operands
-    // fall back to the baked detail / margin_label inside the renderer.
-    let has_margin = r.margin_label.is_some() || (r.value.is_some() && r.threshold.is_some());
+    // Keep numeric evidence unit-aware and clarify older control-rule wording.
+    let show_detail =
+        r.outcome != "not_reached" && !r.detail.is_empty() && r.detail != "disabled by operator";
     let r_detail = r.clone();
-    let r_margin = r.clone();
     // Name what set this gate aside, so the row explains itself without the
     // reader having to compare value against threshold by hand.
     let overridden_note = r.overridden_detail.clone().or_else(|| {
@@ -312,26 +389,41 @@ fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
             .map(|by| format!("set aside by {by}"))
     });
     view! {
-        <li class=row_class style=format!("--accent-row:{accent}")>
-            <span class="rule-row__cat" data-cat=cat_attr>{r.category}</span>
+        <li class=row_class value=step style=format!("--accent-row:{accent}")>
+            <span class="rule-row__step" aria-label=format!("Check {step}")>{step}</span>
             <div class="rule-row__body">
-                <span class="rule-row__label">{r.label}</span>
-                <span class="rule-row__detail">
-                    {move || render_rule_detail(&r_detail, prefs.get())}
-                </span>
-                {has_margin.then(|| view! {
-                    <span class="rule-row__margin" aria-label="margin" title="how close this gate was to flipping">
-                        {move || render_rule_margin(&r_margin, prefs.get()).unwrap_or_default()}
+                <div class="rule-row__head">
+                    <span class="rule-row__label">{r.label.replace("Hold all watering", "Skip all watering")}</span>
+                    <span class=badge_class>{badge_label}</span>
+                </div>
+                {show_detail.then(|| view! {
+                    <span class="rule-row__detail">
+                        {move || readable_rule_detail(&r_detail, prefs.get())}
                     </span>
                 })}
                 {overridden_note.map(|note| view! {
                     <span class="rule-row__overridden" aria-label="overridden">
-                        {"This gate tripped and was set aside: "}{note}
+                        {"Did not decide: "}{plain_watering_reason(&note)}
                     </span>
                 })}
             </div>
-            <span class=badge_class>{badge_label}</span>
         </li>
+    }
+}
+
+fn readable_rule_detail(rule: &RuleEval, prefs: UnitPrefs) -> String {
+    let detail = render_rule_detail(rule, prefs);
+    match (rule.id.as_str(), detail.as_str()) {
+        ("paused", "paused = false") => "Vacation pause is off".into(),
+        ("paused", "paused = true") => "Vacation pause is on".into(),
+        ("pause_until", "no timed pause set") => "No timed pause is set".into(),
+        ("restart_required", "startup configuration is active") => {
+            "Current settings are active".into()
+        }
+        ("override", "no global override; tomorrow override only applies to the tomorrow cell") => {
+            "No manual override applies to this decision".into()
+        }
+        _ => plain_watering_reason(&detail),
     }
 }
 
@@ -342,12 +434,21 @@ fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
 #[component]
 fn BuiltinGateManager() -> impl IntoView {
     let config = RwSignal::new(serde_json::Value::Null);
+    let loading = RwSignal::new(true);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(0_u32);
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
+        retry.get();
+        loading.set(true);
+        error.set(None);
         leptos::task::spawn_local(async move {
-            if let Ok(v) = crate::components::config_client::get_config().await {
-                config.set(v);
+            match crate::components::config_client::get_config().await {
+                Ok(v) => config.set(v),
+                Err(e) => error.set(Some(format!("Rules could not be loaded. {e}"))),
             }
+            loading.set(false);
         });
     });
     #[cfg(not(feature = "hydrate"))]
@@ -380,30 +481,49 @@ fn BuiltinGateManager() -> impl IntoView {
     let set_disabled = move |id: String, disable: bool| {
         #[cfg(feature = "hydrate")]
         {
-            config.update(|cfg| {
-                let Some(sr) = cfg.pointer_mut("/engine/skip_rules") else {
-                    return;
-                };
-                let arr = sr
-                    .as_object_mut()
-                    .map(|o| o.entry("disabled_rules").or_insert(serde_json::json!([])));
-                if let Some(serde_json::Value::Array(arr)) = arr {
+            if busy.get_untracked() || loading.get_untracked() || config.get_untracked().is_null() {
+                return;
+            }
+            busy.set(true);
+            error.set(None);
+            let toast = crate::components::ui::use_toast();
+            leptos::task::spawn_local(async move {
+                // Read current configuration before changing this one field. Do
+                // not display success or flip the switch before the save replies.
+                let result = async {
+                    let mut candidate = crate::components::config_client::get_config().await?;
+                    let sr = candidate
+                        .pointer_mut("/engine/skip_rules")
+                        .and_then(|v| v.as_object_mut())
+                        .ok_or_else(|| {
+                            "Watering rules are unavailable in this configuration.".to_string()
+                        })?;
+                    let arr = sr
+                        .entry("disabled_rules")
+                        .or_insert(serde_json::json!([]))
+                        .as_array_mut()
+                        .ok_or_else(|| "The disabled-rule list could not be read.".to_string())?;
                     arr.retain(|x| x.as_str() != Some(id.as_str()));
                     if disable {
-                        arr.push(serde_json::Value::String(id.clone()));
+                        arr.push(serde_json::Value::String(id));
+                    }
+                    let outcome = crate::components::config_client::put_config(&candidate).await?;
+                    config.set(candidate);
+                    Ok::<_, String>(outcome)
+                }
+                .await;
+                match result {
+                    Ok(outcome) => toast.success(outcome.save_confirmation()),
+                    Err(e) => {
+                        // A response can fail after the server saved; reconcile
+                        // with the server rather than inventing a rollback.
+                        if let Ok(current) = crate::components::config_client::get_config().await {
+                            config.set(current);
+                        }
+                        error.set(Some(format!("Could not confirm the rule change. {e}")));
                     }
                 }
-            });
-            let candidate = config.get_untracked();
-            leptos::task::spawn_local(async move {
-                match crate::components::config_client::put_config(&candidate).await {
-                    Ok(_) => crate::components::ui::use_toast().success(if disable {
-                        "Gate disabled. The trace will show it as disabled by operator."
-                    } else {
-                        "Gate re-enabled."
-                    }),
-                    Err(e) => crate::components::ui::use_toast().error(format!("Save failed: {e}")),
-                }
+                busy.set(false);
             });
         }
         #[cfg(not(feature = "hydrate"))]
@@ -419,7 +539,20 @@ fn BuiltinGateManager() -> impl IntoView {
 
     view! {
         <div class="gate-list">
-            {crate::gates_catalog::builtin_rule_catalog().iter().map(|(id, label, meaning, protected)| {
+            <Show when=move || loading.get()><p role="status">"Loading watering rules…"</p></Show>
+            <Show when=move || busy.get()><p role="status">"Saving rule…"</p></Show>
+            <Show when=move || error.get().is_some()>
+                <div class="rulelab-load-error" role="alert">
+                    <p>{move || error.get().unwrap_or_default()}</p>
+                    <button type="button" class="btn btn--ghost" disabled=move || loading.get() || busy.get()
+                        on:click=move |_| retry.update(|n| *n += 1)>"Reload rules"</button>
+                </div>
+            </Show>
+            <Show when=move || !loading.get() && !config.get().is_null()>
+            {[("Safety and controls", true), ("Weather and soil", false)].into_iter().map(|(title, protected_group)| view! {
+            <section class="gate-group">
+            <h3>{title}</h3>
+            {crate::gates_catalog::builtin_rule_catalog().iter().filter(|g| g.3 == protected_group).map(|(id, label, meaning, protected)| {
                 let id_s = id.to_string();
                 let on_click = {
                     let id_c = id_s.clone();
@@ -445,10 +578,13 @@ fn BuiltinGateManager() -> impl IntoView {
                     >
                         <div class="gate-row__text">
                             <span class="gate-row__label">{label.to_string()}</span>
-                            <span class="gate-row__meaning">{meaning.to_string()}</span>
+                            <details class="gate-row__details">
+                                <summary>{if *protected { "Why it stays on" } else { "What turning it off allows" }}</summary>
+                                <span class="gate-row__meaning">{meaning.to_string()}</span>
+                            </details>
                         </div>
                         {if *protected {
-                            view! { <span class="gate-row__lock" title="Control and legal gates stay on">"always on"</span> }.into_any()
+                            view! { <span class="gate-row__lock">"Always on"</span> }.into_any()
                         } else {
                             let id_sw = id_s.clone();
                             let id_on = id_s.clone();
@@ -458,7 +594,9 @@ fn BuiltinGateManager() -> impl IntoView {
                                     type="button"
                                     class="toggle-pill"
                                     role="switch"
+                                    aria-label=format!("{label} rule")
                                     aria-checked=move || (!disabled_now().contains(&id_sw)).to_string()
+                                    disabled=move || busy.get()
                                     on:click=on_click
                                 >
                                     <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=move || !disabled_now().contains(&id_on)>"On"</span>
@@ -469,25 +607,30 @@ fn BuiltinGateManager() -> impl IntoView {
                     </div>
                 }
             }).collect_view()}
+            </section>
+            }).collect_view()}
+            </Show>
 
             // Always mounted, outside the row map: a row's Off opens it,
             // it hides itself, and the disable writes from its on_confirm.
             <ConfirmSheet
                 visible=confirm_open
                 title=Signal::derive(move || match pending_gate.get() {
-                    Some((id, _)) => format!("Disable the {id} gate?"),
-                    None => "Disable this gate?".to_string(),
+                    Some((id, _)) => {
+                        let label = crate::gates_catalog::builtin_rule_catalog().iter().find(|(key, _, _, _)| *key == id).map(|(_, label, _, _)| *label).unwrap_or("watering");
+                        format!("Turn off {label}?")
+                    },
+                    None => "Turn off this rule?".to_string(),
                 })
                 body=Signal::derive(move || {
                     let Some((_, meaning)) = pending_gate.get() else {
                         return String::new();
                     };
                     format!(
-                        "{meaning} Watering will no longer be held for this on its \
-                         own. You can re-enable it here at any time."
+                        "{meaning} You can turn this rule back on here."
                     )
                 })
-                confirm_label=Signal::derive(|| "Disable gate".to_string())
+                confirm_label=Signal::derive(|| "Turn off rule".to_string())
                 on_confirm=do_disable
             />
         </div>

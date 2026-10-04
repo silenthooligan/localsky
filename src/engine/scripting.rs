@@ -66,7 +66,7 @@ impl CompiledScripts {
             let ast = match engine.compile(&r.script) {
                 Ok(ast) => Some(ast),
                 Err(e) => {
-                    tracing::warn!(rule = %r.id, error = %e, "skip-rule script failed to compile; watering held");
+                    tracing::warn!(rule = %r.id, error = %e, "skip-rule script failed to compile; watering skipped");
                     None
                 }
             };
@@ -123,7 +123,7 @@ impl CompiledScripts {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(rule = %rule.id, error = %e, "skip-rule script errored; watering held");
+                    tracing::warn!(rule = %rule.id, error = %e, "skip-rule script errored; watering skipped");
                     return Some(rule.unavailable());
                 }
             }
@@ -138,7 +138,7 @@ impl CompiledRule {
             id: self.id.clone(),
             name: self.name.clone(),
             reason: format!(
-                "Watering held: rule '{}' could not be evaluated; fix or disable it",
+                "Watering cannot start: rule '{}' could not be evaluated; fix or disable it",
                 self.name
             ),
         }

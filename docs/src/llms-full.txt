@@ -1,6 +1,6 @@
 # LocalSky guide
 
-Service 0.9.3; API 2.4.0.
+Service 0.9.4; API 2.4.0.
 
 
 ---
@@ -10,7 +10,7 @@ Source: https://localsky.io/docs/introduction.html
 # The LocalSky guide
 
 <div class="ls-doc-hero">
-<p class="ls-eyebrow">THE LOCALSKY GUIDE · v0.9.3</p>
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v0.9.4</p>
 <p class="ls-doc-tagline">Know your weather.<br><em>Understand your watering.</em></p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
@@ -80,6 +80,17 @@ docker run -d \
 ```
 
 Open **http://localhost:8090** on the host, or **http://YOUR_SERVER:8090** from another device. The setup wizard opens on a fresh installation.
+
+Choose a **Theme** (Field Green, Slate, or Classic Blue) and **Display mode** (light, dark, auto, or
+high contrast) at the top of any setup step.
+These choices stay with this browser and carry through to the app. Use **Next**
+and **Back**, or **Jump to step** to revisit a section. Your draft is saved as
+you go; **Save and finish** on the review step applies it.
+
+On a configured instance, **Edit current setup** loads your running settings
+into a new draft. **Resume saved draft** continues unfinished changes instead.
+Opening the wizard does not change either. Starting from scratch is a separate
+choice; your running setup changes only when you apply the draft.
 
 The named volume `localsky-data` survives container replacement. A writable bind mount also works; the image initializes ownership for its application user. Keep this volume when upgrading.
 
@@ -720,16 +731,54 @@ Source: https://localsky.io/docs/theme.html
 
 # Appearance
 
-Open **Settings > Theme** and choose a preset. The change applies immediately to this browser.
+**Settings → Theme** offers **Field Green**, the new default with paper and forest
+surfaces and serif headings; **Slate**, cool blue/teal surfaces and sans-serif
+headings; and **Classic Blue**, the familiar navy and blue palette from earlier
+releases. All three use the same chart colors and status meanings.
+Choose light, dark, or automatic color mode separately. High contrast preserves
+its accessibility palette with every theme. Settings search finds “theme”,
+“appearance”, or “dark”.
 
-| Theme | Appearance |
+Use **Display mode** beside **Simple / Nerd** at the top of any screen, or open
+**Settings → Theme**. Choices stay in sync with setup and apply immediately.
+
+On an existing installation without an explicit theme choice, an upgrade offers
+**Keep Classic Blue** or **Use Field Green**. Classic Blue stays active until you choose;
+**Decide later** dismisses the prompt for this visit. Your display mode is preserved.
+Previously selected themes are kept, and new installations start with Field Green.
+
+| Display mode | Appearance |
 |---|---|
-| Dark | Deep blue panels and the standard LocalSky palette. |
-| Light | Bright surfaces with the same app layout. |
+| Dark | Dark surfaces and bright text in the selected theme. |
+| Light | Light surfaces, dark text, and clear borders. |
 | Auto | Follows the operating system's light or dark preference. |
 | High contrast | Black and white with reduced visual effects. |
 
-The preference is stored in the browser. It does not change other devices or travel in a server backup. Clearing site data resets it to Dark.
+Preferences are stored in this browser, independently of watering settings and
+server backups. Another browser can make its own choice. Clearing site data
+resets display mode to Dark and may show the theme choice again on an existing
+installation. If browser storage is blocked, choices last only for the current visit.
+
+## Read chart colors
+
+The key beside a chart names each measurement and its unit. Blue represents
+watering, teal rain, ochre temperature, green soil moisture, and violet pressure
+or estimated plant water use (ET), each identified by its own label. Hourly rain
+bars show **probability**, not accumulated rain. Irrigation rain bars show amounts;
+a vertical mark shows the hold threshold and stripes show measured carryover.
+Rain remains **teal before the line**; only the amount beyond it is **amber**.
+The marker and **Threshold met** label identify a reached threshold, including
+an exact match with no excess. The ET balance uses teal toward the budget and
+**green beyond its marker**. These are
+individual inputs; the watering verdict still explains the final decision.
+
+In watering decisions, blue means watering, green means confirmed completion, amber means skipped or paused, and gray means off
+or unknown. Device health uses green for healthy and red for a fault. The words
+and reason carry the meaning alongside the color. Radar and UV retain their own
+labeled scales.
+
+Forecasts and soil projections are estimates. Missing data is not zero. In History,
+focus a line chart and use Left/Right, Home/End, or a pointer to inspect its values.
 
 
 ---
@@ -1839,7 +1888,7 @@ Open a zone's detail view to see its governing model, water need, planned minute
 At its simplest:
 
 ```text
-runtime in minutes = required gross depth in mm Ã· application rate in mm/hour × 60
+runtime in minutes = required gross depth in mm / application rate in mm/hour × 60
 ```
 
 The gross depth accounts for the applicable capture efficiency. The final runtime also reflects configured adjustments, zone caps, restrictions, and scheduling capacity.
@@ -1857,6 +1906,33 @@ Measure the rate with catch cups where practical. A catalog head rate is a start
 | Explicit manual run | Requested duration, subject to the manual dispatch policy |
 
 Check the model on the zone. Sessions per week affects weekly scheduling; it is not the soil model's primary trigger.
+
+## Without a soil sensor
+
+The deficit is modeled water missing from the root zone, not a measured moisture
+percentage. LocalSky replays recent weather and watering history:
+
+```text
+deficit = previous deficit + plant water use - effective rain - retained irrigation
+plant water use = reference ET × the plant's seasonal crop coefficient
+retained irrigation = valve-open hours × application rate × retained fraction
+```
+
+The result stays between zero and the soil's available storage. Soil texture
+and root depth set that storage; the plant's allowed depletion sets the watering
+trigger. Uncertain starting conditions remain a range until the evidence resolves
+them. Forecast rain and the next permitted watering opportunity shape the refill.
+
+**Area does not multiply runtime.** Application rate is already a water depth
+across the zone. **Sun/shade is saved but does not currently apply a separate
+soil-demand adjustment.** A sensor can supply moisture checks; the modeled
+deficit should still be read as an estimate.
+
+A 10 mm/hour rotor with 70% retained water supplies only 7 mm to the roots in an
+hour. A 38 mm/hour spray with the same setting supplies 26.6 mm in an hour.
+A long capped run can therefore leave a rotor zone with a remaining deficit.
+Check actual application rate with catch cups and verify soil and plant settings
+before treating a modeled deficit as proof that the yard needs more water.
 
 ## Why minutes can be capped
 
@@ -2620,7 +2696,7 @@ Back up, update the server, then update the Home Assistant companion if you use 
 
 Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v0.9.3`.
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v0.9.4`.
 
 ## Docker Compose
 
@@ -3103,9 +3179,13 @@ The public website and documentation have their own site analytics. They are sep
 
 Use a separate data directory and port. For testing, isolate it from real controllers. Two independent schedulers pointed at the same valves can conflict; LocalSky is not an active-active controller cluster.
 
-## What does beta mean?
+## How do upgrades affect my setup?
 
-LocalSky is in its 0.x release series. Behavior and API contracts can change between releases. Read release notes, back up before updating, and verify a new controller configuration under supervision.
+Read the release notes and back up before updating. The app and API have separate
+version numbers; API compatibility follows the [API contract](api.md). Review
+zone bindings, application rates and run limits when adding or changing a controller.
+An appearance upgrade lets existing installations keep Classic Blue or choose
+Field Green. Changing a theme does not change watering settings.
 
 ## Can an AI assistant use the API?
 
@@ -4661,7 +4741,13 @@ Off by default; nothing phones home. When enabled (restart required), LocalSky p
 
 ## `[persistence]`
 
-Local-history retention knobs for the SQLite database. Both default to sensible values; set them only if disk is tight.
+Open **Settings → History retention**, or search Settings for “retention”. Sensor
+readings default to 90 days; watering records default to forever. Enter 0 to keep
+either forever. Shortening a limit asks for confirmation because cleanup permanently
+deletes older records. Download a backup first if you need to keep them.
+
+Saved limits apply without restarting: sensor cleanup runs hourly as readings
+arrive, and watering cleanup runs daily. The equivalent configuration is:
 
 ```toml
 [persistence]

@@ -132,6 +132,17 @@ fn devices_redirect() -> String {
     }
 }
 
+fn setup_redirect() -> String {
+    #[cfg(feature = "ssr")]
+    {
+        crate::base::url("/setup/welcome")
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        "/setup/welcome".to_string()
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
@@ -189,6 +200,11 @@ pub fn App() -> impl IntoView {
     #[allow(unused_variables)]
     let nerd_loaded = RwSignal::new(false);
     provide_context(NerdMode(nerd_mode));
+    crate::components::settings::theme::provide_theme();
+    #[cfg(feature = "hydrate")]
+    let upgrade_theme = expect_context::<crate::components::settings::theme::ThemeUpgrade>();
+    #[cfg(feature = "hydrate")]
+    let style_preference = expect_context::<crate::components::settings::theme::StylePreference>();
 
     // Irrigation-presence flag. Starts `true` so a full install never flashes a
     // stripped nav before /api/v1/info resolves; the deferred info fetch below
@@ -197,6 +213,7 @@ pub fn App() -> impl IntoView {
     // client-only fetch lands. See `HasIrrigation` for the SSR-match rationale.
     let has_irrigation: RwSignal<bool> = RwSignal::new(true);
     provide_context(HasIrrigation(has_irrigation));
+    crate::components::irrigation::quick_run_client::provide_quick_run_client(has_irrigation);
     let located: RwSignal<Option<bool>> = RwSignal::new(None);
     provide_context(Located(located));
     #[cfg(feature = "hydrate")]
@@ -340,6 +357,7 @@ pub fn App() -> impl IntoView {
 
             has_irrigation.set(irrigation);
             located.set(Some(location_configured));
+            upgrade_theme.resolve(style_preference, location_configured, demo);
             // Seed nerd mode from the server default ONLY for a device with no
             // explicit prior choice. The localStorage read above has already run
             // (both are spawn_local'd after the same 0ms defer, and this one then
@@ -430,8 +448,10 @@ pub fn App() -> impl IntoView {
                 <main class="page" id="main-content" tabindex="-1">
                     <InstallPrompt/>
                     <PageHeader/>
+                    <crate::components::settings::theme::ThemeUpgradeChoice/>
                     <crate::components::health_banner::HealthBanner/>
                     <crate::components::settings::data_sources::RuntimeRestartBanner snap=irrigation/>
+                    <crate::components::irrigation::running_banner::RunningBanner snap=irrigation/>
                 <Routes fallback=|| view! { <NotFound/> }>
                     <Route path=path!("/")
                         view=move || view! {
@@ -602,6 +622,8 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Radar"/>
                             <crate::components::settings::SettingsRadar/>
                         }/>
+                    <Route path=path!("/settings/history")
+                        view=move || view! { <crate::components::settings::SettingsHistory/> }/>
                     <Route path=path!("/settings/advanced")
                         view=|| view! {
                             <Title text="LocalSky · Advanced"/>
@@ -609,8 +631,7 @@ pub fn App() -> impl IntoView {
                         }/>
                     <Route path=path!("/setup")
                         view=|| view! {
-                            <Title text="LocalSky · Setup"/>
-                            <crate::components::setup::SetupShell/>
+                            <leptos_router::components::Redirect path=setup_redirect()/>
                         }/>
                     <Route path=path!("/setup/:step")
                         view=|| view! {
@@ -633,10 +654,10 @@ pub fn App() -> impl IntoView {
                 // transitions and never unmounts/remounts (which would lose
                 // the active highlight animation).
                     <MobileNav/>
-                // Beta feedback pill: fixed chrome like the nav, outside
+                // Feedback pill: fixed chrome like the nav, outside
                 // <Routes> so it persists across navigation. CSS hides it
                 // in kiosk/readonly modes and on the login gate.
-                <crate::components::feedback::BetaFeedback/>
+                <crate::components::feedback::Feedback/>
                 </main>
                 <crate::components::ui::ToastViewport/>
             </div>
@@ -670,7 +691,13 @@ fn RouteFocus() -> impl IntoView {
                     .and_then(|d| d.get_element_by_id("main-content"))
                     .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
                 {
-                    let _ = el.focus();
+                    // The router owns scrolling (including hash/history
+                    // navigation). Focusing the full page with implicit
+                    // scrolling can cancel its smooth scroll-to-top while a
+                    // shorter route mounts, leaving About at the bottom.
+                    let options = web_sys::FocusOptions::new();
+                    options.set_prevent_scroll(true);
+                    let _ = el.focus_with_options(&options);
                 }
             }
             path
@@ -689,15 +716,9 @@ fn WeatherHome(
     // monomorphized type. Without the erasure, rustc walks every nested
     // HtmlElement+ attrs tuple and overflows its query depth at the grid.
     //
-    // Layout (.weather-grid, see SCSS): on wide screens the hero + wind +
-    // lightning share the top row, the four compact metric cards (rain /
-    // humidity / pressure / sun) share the second row, and the radar spans the
-    // bottom. On a true ultrawide the grid locks to the viewport so the whole
-    // dashboard fits the viewport without scrolling. Each panel is placed by its
-    // own root class (.wind, .rain, ...) via grid-template-areas, so the order
-    // here is just DOM order: hero+wind+lightning, the four metric cards, the
-    // radar (which spans the full height on the right), then the forecast strips
-    // tucked under the metric cards.    // Nothing configured: one setup card instead of a dashboard of
+    // Desktop: current conditions and compact observation stacks on the left,
+    // radar spanning their height on the right. Phones see conditions then radar.
+    // Nothing configured: one setup card instead of a dashboard of
     // skeletons for nowhere. SSR never lands here (the setup gate sends
     // an unconfigured install to /setup); this is the client's answer
     // once /api/v1/info says the config has no place in it.
@@ -724,13 +745,15 @@ fn WeatherHome(
         {view! { <HomeWateringVerdict snap=irrigation/> }.into_any()}
         <div class="weather-grid">
             {render_hero(snap, forecast).into_any()}
-            {view! { <WindPanel snap irrigation/> }.into_any()}
-            {view! { <LightningPanel snap/> }.into_any()}
-            {view! { <RainPanel snap/> }.into_any()}
-            {view! { <HumidityPanel snap/> }.into_any()}
-            {view! { <PressurePanel snap/> }.into_any()}
-            {view! { <SolarPanel snap/> }.into_any()}
             {render_radar().into_any()}
+            <div class="weather-observations">
+                    {view! { <WindPanel snap irrigation/> }.into_any()}
+                    {view! { <LightningPanel snap/> }.into_any()}
+                    {view! { <RainPanel snap/> }.into_any()}
+                    {view! { <HumidityPanel snap/> }.into_any()}
+                    {view! { <SolarPanel snap/> }.into_any()}
+                    {view! { <PressurePanel snap/> }.into_any()}
+            </div>
             <div class="weather-extra">
                 // Condition-aware cards: render only while a winter / fog /
                 // storm / heat condition actually holds at this location, so
@@ -793,8 +816,8 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // One coarse state, mirroring the irrigation hero's phase ladder so the two
     // surfaces never disagree: offline / running / paused / skip / run. This
     // strip is a thin PRESENTER over the hero's honest resolver, not a second
-    // decision: a scheduled slot the engine predicts will SKIP must theme blue
-    // (skip) and say so, NEVER a green "WATER / Next run HH:MM" (the W6
+    // decision: a scheduled slot the engine predicts will SKIP must theme amber
+    // (skip) and say so, NEVER a blue "WATER / Next run HH:MM" (the W6
     // regression: the old ladder returned "run" for any next_run_epoch > 0,
     // even when resolve_next_run says the slot skips).
     let state = move || {
@@ -823,20 +846,17 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // A skip state reads SKIP regardless of the morning skip_check.verdict
         // (which may say WATER for a slot that already ran this morning while
         // the NEXT slot skips); the state() ladder already decided this is a
-        // skip, so word it as one. The run branch keeps the engine verdict so a
-        // run_extended slot can read "WATER +".
+        // skip, so word it as one. A future run must not inherit today's skip.
         "skip" => verdict_label("skip").to_string(),
         "none" => crate::components::irrigation::hero::no_run_eyebrow(snap.get().next_run_state)
             .to_string(),
-        // verdict_label maps the engine verdict string to WATER / WATER + / SKIP.
-        _ => verdict_label(&snap.get().skip_check.verdict).to_string(),
+        _ => verdict_label("run").to_string(),
     };
     let word_color = move || match state() {
         "off" => "var(--text-faint)".to_string(),
         "paused" => "var(--verdict-wind)".to_string(),
         "run-now" | "run" => verdict_token("run").to_string(),
-        // Blue skip token, matching the honest skip word above and the hero's
-        // blue skip theming, instead of coloring off the morning verdict.
+        // Hold color follows the same slot as the word, not the morning verdict.
         "skip" => verdict_token("skip").to_string(),
         "none" => "var(--text-faint)".to_string(),
         _ => verdict_token(&snap.get().skip_check.verdict).to_string(),
@@ -903,15 +923,11 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     // The whole strip is an anchor into /irrigation (the full hero). Plain <a> so
     // default navigation works if the WASM intercept misses; the global click
-    // shim + leptos router handle the in-app transition. Inline-styled (this
-    // shell work is scoped to .rs) so it needs no new stylesheet rule: a quiet
-    // claymorphic surface with a left verdict stripe. Each `style` attribute is a
-    // dynamic closure so the verdict color tracks the SSE snapshot without a CSS
-    // custom-property dance (the color is interpolated straight into the string).
+    // shim + leptos router handle the in-app transition. The responsive grid
+    // gives the explanation its own row on phones. Dynamic colors track SSE.
     let wrap_style = move || {
         format!(
-            "display:flex;align-items:center;gap:var(--space-3);\
-             padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);\
+            "padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);\
              background:var(--elev-1);border:1px solid var(--elev-border-strong);\
              border-left:3px solid {c};border-radius:var(--radius-lg);\
              box-shadow:var(--shadow-1);text-decoration:none;color:inherit;",
@@ -950,8 +966,7 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         {word}
                     </span>
                     <span style="flex:1;min-width:0;color:var(--text-soft);\
-                                 font-size:var(--text-body-sm);overflow:hidden;\
-                                 text-overflow:ellipsis;white-space:nowrap;">
+                                 font-size:var(--text-body-sm);line-height:1.45;">
                         {reason}
                     </span>
                     <span aria-hidden="true" style="flex:none;display:flex;color:var(--text-faint);">
@@ -1098,7 +1113,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="icon" type="image/svg+xml" href=crate::base::url("/favicon.svg")/>
                 <link rel="apple-touch-icon" href=crate::base::url("/icons/apple-touch-180.png")/>
                 {manifest_link}
-                <meta name="theme-color" content="#0b1220"/>
+                <meta name="theme-color" content="#091a17"/>
                 <meta name="apple-mobile-web-app-capable" content="yes"/>
                 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
                 <meta name="apple-mobile-web-app-title" content="LocalSky"/>
@@ -1151,6 +1166,14 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <script>{r#"
                     try {
                         var t = localStorage.getItem('theme');
+                        var style = localStorage.getItem('style');
+                        if (['slate','field','classic'].indexOf(style) >= 0) {
+                            document.documentElement.setAttribute('data-style', style);
+                        } else if (t || localStorage.getItem('nerd_mode') !== null) {
+                            // Returning browsers retain blue before hydration decides
+                            // whether this installation needs the upgrade choice.
+                            document.documentElement.setAttribute('data-style', 'classic');
+                        }
                         if (t && ['light','hc','auto','dark'].indexOf(t) >= 0) {
                             if (t !== 'dark') document.documentElement.setAttribute('data-theme', t);
                         }
@@ -1159,6 +1182,15 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                             document.documentElement.setAttribute('data-readonly', 'true');
                         }
                     } catch (e) { /* localStorage blocked in private mode */ }
+                    function syncBrowserTheme() {
+                        var meta = document.querySelector('meta[name="theme-color"]');
+                        var color = getComputedStyle(document.documentElement).getPropertyValue('--bg-deep').trim();
+                        if (meta && color) meta.setAttribute('content', color);
+                    }
+                    syncBrowserTheme();
+                    new MutationObserver(syncBrowserTheme).observe(document.documentElement,
+                        { attributes: true, attributeFilter: ['data-theme', 'data-style'] });
+                    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', syncBrowserTheme);
                     window.addEventListener('beforeinstallprompt', function (e) {
                         e.preventDefault();
                         window.__lsBipEvent = e;

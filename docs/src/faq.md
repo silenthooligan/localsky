@@ -40,9 +40,13 @@ The public website and documentation have their own site analytics. They are sep
 
 Use a separate data directory and port. For testing, isolate it from real controllers. Two independent schedulers pointed at the same valves can conflict; LocalSky is not an active-active controller cluster.
 
-## What does beta mean?
+## How do upgrades affect my setup?
 
-LocalSky is in its 0.x release series. Behavior and API contracts can change between releases. Read release notes, back up before updating, and verify a new controller configuration under supervision.
+Read the release notes and back up before updating. The app and API have separate
+version numbers; API compatibility follows the [API contract](api.md). Review
+zone bindings, application rates and run limits when adding or changing a controller.
+An appearance upgrade lets existing installations keep Classic Blue or choose
+Field Green. Changing a theme does not change watering settings.
 
 ## Can an AI assistant use the API?
 

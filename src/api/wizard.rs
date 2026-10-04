@@ -1700,6 +1700,9 @@ mod first_apply_restart_tests {
             auth_rt: None,
             tempest_store: None,
             runtime: Some(crate::runtime::RuntimeHandles {
+                retention: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                    crate::config::schema::PersistenceConfig::default(),
+                )),
                 dispatch_context: crate::controllers::ZoneLocks::default(),
                 tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
                 forecast_priority: Arc::new(arc_swap::ArcSwap::from_pointee(

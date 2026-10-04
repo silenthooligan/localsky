@@ -211,6 +211,29 @@ fn check(theme: &str, tokens: &[&BTreeMap<String, String>]) -> Vec<String> {
         border_pairs >= 12,
         "{theme}: only {border_pairs} field-border pairs resolved to a color"
     );
+    // Chart marks convey data, so WCAG non-text contrast must hold in every
+    // theme. Require every token to resolve rather than skipping missing ones.
+    for series in [
+        "--chart-water",
+        "--chart-rain",
+        "--chart-soil",
+        "--chart-temperature",
+        "--chart-pressure",
+        "--chart-et",
+        "--chart-wind",
+    ] {
+        let fg =
+            resolve(tokens, series, 0).unwrap_or_else(|| panic!("missing series color: {series}"));
+        for surface in SURFACES {
+            let bg = resolve(tokens, surface, 0).expect("chart surface color");
+            let ratio = contrast(fg, bg);
+            if ratio < 3.0 {
+                failures.push(format!(
+                    "{theme}: {series} on {surface} = {ratio:.2}:1 (< 3:1)"
+                ));
+            }
+        }
+    }
     failures
 }
 

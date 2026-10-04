@@ -186,7 +186,7 @@ mod fanout {
             ),
             NotificationEvent::ControllerOffline { controller_id, .. } => (
                 format!("{controller_id} is not answering"),
-                "Watering that needs it is on hold until it answers.".into(),
+                "Watering that needs this source cannot start until it responds.".into(),
             ),
             NotificationEvent::AnomalyDetected {
                 severity,

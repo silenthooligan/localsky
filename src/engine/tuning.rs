@@ -1236,7 +1236,7 @@ pub fn score_forecast_skips(
         (
             Some(reactive),
             format!(
-                "Hold verdicts for rain already falling or on the ground: \
+                "Recent rain prompted skip decisions on \
                  {reactive} days in the last {window_days}."
             ),
         )
@@ -1250,7 +1250,7 @@ pub fn score_forecast_skips(
             confirmed_days: Some(confirmed),
             min_scored_days: SCORECARD_MIN_SCORED,
             line: format!(
-                "Forecast rain prompted hold verdicts on {scored} days in the last \
+                "Forecast rain prompted skip decisions on {scored} days in the last \
                  {window_days}; rain followed on {confirmed} of {scored}."
             ),
             reactive_days,
@@ -1491,16 +1491,16 @@ pub fn soil_comparison_line(
         (true, false) => (
             format!(
                 "{p}water {soil_min} min this morning; the weekly plan \
-                 holds today. {ACTION}"
+                 skips watering today. {ACTION}"
             ),
             true,
         ),
         (false, true) => (
-            format!("{p}hold today; the weekly plan waters {weekly_min} min. {ACTION}"),
+            format!("{p}skip watering today; the weekly plan waters {weekly_min} min. {ACTION}"),
             true,
         ),
         (false, false) => (
-            "The soil model and the weekly plan both hold today.".to_string(),
+            "Neither the soil model nor the weekly plan calls for watering today.".to_string(),
             false,
         ),
     }
@@ -2133,7 +2133,7 @@ mod tests {
         assert_eq!(
             soil_comparison_line(1560, 0),
             (
-                "The soil model would water 26 min this morning; the weekly plan holds \
+                "The soil model would water 26 min this morning; the weekly plan skips watering \
                  today. Switch models under Settings, then Engine, or pin this zone in \
                  the zone editor."
                     .to_string(),
@@ -2143,7 +2143,7 @@ mod tests {
         assert_eq!(
             soil_comparison_line(0, 900),
             (
-                "The soil model would hold today; the weekly plan waters 15 min. Switch \
+                "The soil model would skip watering today; the weekly plan waters 15 min. Switch \
                  models under Settings, then Engine, or pin this zone in the zone editor."
                     .to_string(),
                 true
@@ -2154,7 +2154,7 @@ mod tests {
         assert_eq!(
             soil_comparison_line(0, 0),
             (
-                "The soil model and the weekly plan both hold today.".to_string(),
+                "Neither the soil model nor the weekly plan calls for watering today.".to_string(),
                 false
             )
         );
@@ -2681,7 +2681,7 @@ mod tests {
         assert_eq!(card.reactive_days, Some(3));
         assert!(
             card.reactive_line
-                .contains("rain already falling or on the ground"),
+                .contains("Recent rain prompted skip decisions"),
             "{}",
             card.reactive_line
         );

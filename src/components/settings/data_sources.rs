@@ -1288,7 +1288,7 @@ pub fn RestartBanner(
                 </span>
                 <div class="health-banner__text">
                     <strong>"Restart required to apply."</strong>
-                    " Your configuration is saved. New watering is on hold until LocalSky restarts to apply the pending changes."
+                    " Your configuration is saved. Restart LocalSky to apply the changes before watering can resume."
                     // One line per server reason; plain divs keep the banner
                     // tight (no default list margins to fight).
                     {move || reasons.get()

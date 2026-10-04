@@ -186,6 +186,12 @@ impl<'a> Dispatcher<'a> {
         let _command = command_order.read().await;
         let lock = self.locks.lock_for(zone);
         let _serialize = lock.lock().await;
+        if let Some(reason) = self.locks.manual_session.refusal(&req.session_id) {
+            return RunOutcome::Failed {
+                error: ControllerError::Held(reason.into()),
+                deadline_armed: false,
+            };
+        }
         if self.locks.restart_hold().is_pending() {
             return RunOutcome::Failed {
                 error: ControllerError::Held(
@@ -317,6 +323,33 @@ impl<'a> Dispatcher<'a> {
             }
         }
 
+        // A Quick Run requires a durable backstop BEFORE contacting hardware.
+        // Its cancellation can arrive while the journal write is in flight.
+        if self.locks.manual_session.owns(&req.session_id) && !deadline_armed {
+            if let (Some(id), Some(rs)) = (command_id, self.runs) {
+                let _ = rs.commands().finish(id, None).await;
+            }
+            return RunOutcome::Failed {
+                error: ControllerError::Held(
+                    "Could not save the shutoff backstop. Quick Run was not started.".into(),
+                ),
+                deadline_armed: false,
+            };
+        }
+        if let Some(reason) = self.locks.manual_session.refusal(&req.session_id) {
+            if let (Some(id), Some(rs)) = (command_id, self.runs) {
+                let _ = rs.commands().finish(id, None).await;
+            }
+            return RunOutcome::Failed {
+                error: ControllerError::Held(reason.into()),
+                deadline_armed,
+            };
+        }
+        // Old notification actions must never stop a newly commanded run,
+        // including a sibling on a controller with device-wide Stop.
+        self.locks
+            .notification_runs
+            .clear_controller(controller.id());
         let result = controller.run_zone(zone, seconds).await;
         if let (Some(id), Some(rs)) = (command_id, self.runs) {
             let confirmed = result
@@ -440,6 +473,17 @@ impl<'a> Dispatcher<'a> {
     ) -> Result<StopScope, ControllerError> {
         let command_order = self.locks.command_order();
         let _command = command_order.write().await;
+        self.stop_locked(controller, zone, now_epoch).await
+    }
+
+    /// Caller owns the command-order write barrier, including any conditional
+    /// notification identity check. Keeps validation and actuation indivisible.
+    pub(crate) async fn stop_locked(
+        &self,
+        controller: &Arc<dyn IrrigationController>,
+        zone: &str,
+        now_epoch: i64,
+    ) -> Result<StopScope, ControllerError> {
         let scope = if controller.supports().per_zone_stop {
             StopScope::Zone
         } else {
@@ -467,6 +511,10 @@ impl<'a> Dispatcher<'a> {
         scope: StopScope,
         now_epoch: i64,
     ) {
+        match scope {
+            StopScope::Zone => self.locks.notification_runs.clear_zone(zone),
+            StopScope::Device => self.locks.notification_runs.clear_controller(controller_id),
+        }
         if let Some(ar) = self.active_runs {
             match scope {
                 StopScope::Device => {
@@ -504,6 +552,9 @@ impl<'a> Dispatcher<'a> {
         let command_order = self.locks.command_order();
         let _command = command_order.write().await;
         let report = registry.stop_everything().await;
+        for id in &report.confirmed {
+            self.locks.notification_runs.clear_controller(id);
+        }
         if let Some(ar) = self.active_runs {
             if !report.confirmed.is_empty() {
                 if let Err(e) = ar.clear_for_controllers(&report.confirmed_ids()).await {
@@ -686,6 +737,7 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for f in [
             "src/api/irrigation.rs",
+            "src/api/quick_run.rs",
             "src/scheduler/manual.rs",
             "src/scheduler/smart_morning.rs",
         ] {
@@ -913,6 +965,37 @@ mod tests {
         let d = Dispatcher::new(ZoneLocks::default(), Some(&broken), Some(&ar));
         assert!(d.stop(&controller, "front", 1100).await.is_ok());
         assert_eq!(probe.stops.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quick_run_cannot_open_a_valve_without_its_durable_deadline() {
+        let (runs, _) = stores().await;
+        let broken = ActiveRunsStore::new(Arc::new(tokio::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let locks = ZoneLocks::default();
+        let _reservation = locks.manual_session.reserve("quick".into()).unwrap();
+        let probe = Arc::new(Probe::new("os"));
+        let controller: Arc<dyn IrrigationController> = probe.clone();
+        let d = Dispatcher::new(locks, Some(&runs), Some(&broken));
+        let mut request = req(
+            "front",
+            &controller,
+            60,
+            Arm::BeforeDispatch {
+                deadline: Some(1100),
+                disarm_on_failure: false,
+            },
+        );
+        request.session_id = "quick".into();
+        assert!(matches!(
+            d.run(request).await,
+            RunOutcome::Failed {
+                deadline_armed: false,
+                ..
+            }
+        ));
+        assert!(probe.runs.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

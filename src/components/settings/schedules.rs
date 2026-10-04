@@ -97,7 +97,7 @@ fn waiver_effect_line(waived: bool) -> &'static str {
     if waived {
         "WAIVED - fires in freeze, wind, rain, and with no live weather data"
     } else {
-        "Freeze, wind, rain and missing-data holds all stop this schedule"
+        "Freeze, wind, rain and missing data can stop this schedule"
     }
 }
 
@@ -643,7 +643,7 @@ fn ScheduleForm(
             // control on this page that can open a valve into a freeze,
             // so it is the only one with a confirmation in front of it.
             <FormField
-                label="Weather holds".to_string()
+                label="Weather checks".to_string()
                 helptext="Weather normally stops this schedule. Check the box only if it must run regardless.".to_string()
                 error=Signal::derive(|| None::<String>)
             >

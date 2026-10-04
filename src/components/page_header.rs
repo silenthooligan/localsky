@@ -1,6 +1,5 @@
 // Global page header. Rendered once in app.rs above <Routes/>, so it
-// appears on every route. Currently a single right-aligned segmented
-// control: the Simple/Nerd mode toggle.
+// appears on every route. Appearance and detail level stay within reach.
 //
 // v2: dual segments instead of a flip-toggle. A single pill that
 // flipped between "Simple" and "Nerd" hid the fact that there were
@@ -13,6 +12,7 @@ use leptos::prelude::*;
 
 #[component]
 pub fn PageHeader() -> impl IntoView {
+    let theme = crate::components::settings::theme::use_theme();
     let nerd_mode = use_context::<NerdMode>()
         .map(|n| n.0)
         .unwrap_or_else(|| RwSignal::new(false));
@@ -38,8 +38,18 @@ pub fn PageHeader() -> impl IntoView {
     view! {
         <div class="page-header" aria-label="Page header">
             <crate::components::connection::ConnPill/>
-            <div class="mode-toggle" role="group" aria-label="Display mode">
-                <span class="mode-toggle__label">"Mode"</span>
+            <label class="appearance-control">
+                <span class="sr-only">"Display mode"</span>
+                {move || view! { <crate::components::ui::Icon name={match theme.0.get().as_str() { "light" => "sun", "dark" => "moon", _ => "theme" }} size=16u32/> }}
+                <select aria-label="Display mode" prop:value=move || theme.0.get()
+                    on:change=move |ev| theme.pick(event_target_value(&ev))>
+                    <option value="light">"Light"</option>
+                    <option value="dark">"Dark"</option>
+                    <option value="auto">"Auto"</option>
+                    <option value="hc">"High contrast"</option>
+                </select>
+            </label>
+            <div class="mode-toggle" role="group" aria-label="Detail level">
                 <button
                     type="button"
                     class=simple_class

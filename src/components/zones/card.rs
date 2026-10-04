@@ -23,7 +23,7 @@ use crate::model::{SmartSuppression, WaterBudget, ZoneState};
 /// say "today".
 ///
 /// A zone the weekly budget zeroed is NOT idle: the engine made a decision
-/// about it and can say which one. It reads "ON HOLD", and the caller pairs
+/// about it and can say which one. It reads "SKIPPED", and the caller pairs
 /// that with the reason line, which is either the budget's own sentence or
 /// the Override schedule covering today. Idle is reserved for a zone
 /// nothing decided anything about (no budget row, no schedule).
@@ -38,7 +38,7 @@ pub fn zone_status(z: &ZoneState, budget_held: bool) -> (&'static str, &'static 
     } else if z.planned_run_seconds > 0 {
         ("scheduled", "SCHEDULED", "var(--accent)")
     } else if budget_held {
-        ("held", "ON HOLD", "var(--accent-cool)")
+        ("held", "SKIPPED", "var(--verdict-skip)")
     } else {
         ("idle", "IDLE", "var(--verdict-off)")
     }
@@ -151,9 +151,9 @@ pub fn hold_reason_text(
             };
             if let Some(r) = budget_reason {
                 let model = if soil_governed {
-                    "The soil model also held it"
+                    "Soil-based watering is also skipped"
                 } else {
-                    "The weekly budget also held it"
+                    "Weekly watering is also skipped"
                 };
                 body.push_str(&format!(" {model}: {r}"));
             }
@@ -190,6 +190,12 @@ pub fn ceiling_note_text(b: &WaterBudget, p: UnitPrefs) -> Option<String> {
 /// body rides behind the capitalized lead unchanged rather than
 /// dropping the clamp on the one day it applies.
 pub(crate) fn ceiling_sentence(wire: &str, p: UnitPrefs) -> String {
+    if matches!(
+        wire,
+        "held to the weekly ceiling" | "limited by the weekly target"
+    ) {
+        return "Today's run is limited by the weekly target.".into();
+    }
     let toks: Vec<&str> = wire.split_whitespace().collect();
     let mut vals: Vec<f64> = Vec::new();
     for w in toks.windows(2) {
@@ -201,7 +207,7 @@ pub(crate) fn ceiling_sentence(wire: &str, p: UnitPrefs) -> String {
     }
     if let [delivered, target, headroom] = vals[..] {
         return format!(
-            "Today's run is held to the weekly target: sprinklers delivered {} of the {} \
+            "Today's run is limited by the weekly target: sprinklers delivered {} of the {} \
              target in the last 7 days, and today waters the remaining {}.",
             depth_phrase_in(delivered, p),
             depth_phrase_in(target, p),
@@ -209,9 +215,10 @@ pub(crate) fn ceiling_sentence(wire: &str, p: UnitPrefs) -> String {
         );
     }
     let body = wire
-        .strip_prefix("held to the weekly ceiling: ")
+        .strip_prefix("limited by the weekly target: ")
+        .or_else(|| wire.strip_prefix("held to the weekly ceiling: "))
         .unwrap_or(wire);
-    format!("Today's run is held to the weekly target: {body}")
+    format!("Today's run is limited by the weekly target: {body}")
 }
 
 /// The Override frequency line: HOW OFTEN smart watering is off for this zone.
@@ -610,7 +617,7 @@ mod tests {
         assert_eq!(
             ceiling_note_text(&b, p).as_deref(),
             Some(
-                "Today's run is held to the weekly target: sprinklers delivered 1.10\" of \
+                "Today's run is limited by the weekly target: sprinklers delivered 1.10\" of \
                  the 1.30\" target in the last 7 days, and today waters the remaining 0.20\"."
             )
         );
@@ -641,7 +648,7 @@ mod tests {
         let p = UnitPrefs::default();
         assert_eq!(
             ceiling_sentence("held to the weekly ceiling", p),
-            "Today's run is held to the weekly target: held to the weekly ceiling"
+            "Today's run is limited by the weekly target."
         );
     }
 
@@ -738,7 +745,7 @@ mod tests {
             "{both}"
         );
         assert!(
-            both.contains("The weekly budget also held it: spaced 1 day(s)"),
+            both.contains("Weekly watering is also skipped: spaced 1 day(s)"),
             "{both}"
         );
 
@@ -749,7 +756,7 @@ mod tests {
             true,
         );
         assert!(
-            soil_both.contains("The soil model also held it: the soil model expects"),
+            soil_both.contains("Soil-based watering is also skipped: the soil model expects"),
             "{soil_both}"
         );
 
@@ -777,7 +784,7 @@ mod tests {
             "{unnamed}"
         );
         assert!(
-            unnamed.ends_with("The weekly budget also held it: budget mode off"),
+            unnamed.ends_with("Weekly watering is also skipped: budget mode off"),
             "{unnamed}"
         );
     }

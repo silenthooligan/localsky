@@ -572,6 +572,8 @@ pub struct RuntimeHandles {
     /// (the dispatcher is spawned unconditionally at boot; see main.rs). Mirrors
     /// the watering_policy / forecast_priority ArcSwap pattern above.
     pub manual_schedules: Arc<ArcSwap<Vec<crate::config::schema::ManualSchedule>>>,
+    /// Shared by both cleanup loops; every successful config save updates it.
+    pub retention: Arc<ArcSwap<crate::config::schema::PersistenceConfig>>,
     /// Live per-source last-REACHABLE map (the same handle the bus recorder
     /// records into and /api/health reads). Threaded here so
     /// /api/config/source_catalog computes the honest source-status taxonomy from
@@ -824,6 +826,10 @@ fn apply_runtime_config_locked(
     handles
         .manual_schedules
         .store(Arc::new(new_cfg.manual_schedules.clone()));
+
+    handles
+        .retention
+        .store(Arc::new(new_cfg.persistence.clone()));
 
     ConfigApplyOutcome {
         restart_required: !reasons.is_empty(),
@@ -1742,6 +1748,7 @@ mod tests {
 
     fn handles_with(cfg: &Config) -> RuntimeHandles {
         let h = RuntimeHandles {
+            retention: Arc::new(ArcSwap::from_pointee(cfg.persistence.clone())),
             dispatch_context: crate::controllers::ZoneLocks::default(),
             tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
             forecast_priority: Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new())),
@@ -1757,6 +1764,24 @@ mod tests {
         // realistic "booted" baseline before the hot-reload.
         apply_runtime_config(&h, Some(cfg), cfg);
         h
+    }
+
+    #[test]
+    fn retention_changes_reach_both_cleanup_policies_without_holding_watering() {
+        let cfg = cfg_two_live_sources(60, 90, &[]);
+        let handles = handles_with(&cfg);
+        let cleanup_policy = handles.retention.clone();
+        let mut next = cfg.clone();
+        next.persistence.retention_days = 30;
+        next.persistence.runs_retention_days = 365;
+        let outcome = apply_runtime_config(&handles, Some(&cfg), &next);
+        assert!(!outcome.restart_required);
+        assert_eq!(cleanup_policy.load().retention_days, 30);
+        assert_eq!(cleanup_policy.load().runs_retention_days, 365);
+        let outcome = apply_runtime_config(&handles, Some(&next), &cfg);
+        assert!(!outcome.restart_required);
+        assert_eq!(cleanup_policy.load().runs_retention_days, 0);
+        assert_eq!(cleanup_policy.load().retention_days, 90);
     }
 
     #[test]

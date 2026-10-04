@@ -161,6 +161,8 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <p class="zones-page__sub">"Every zone at a glance, click one for full detail and control."</p>
             </header>
 
+            <crate::components::irrigation::quick_run::QuickRun snap/>
+
             // KPI summary strip. The Suggestions tile joins the page-level
             // tuning report, so the weekly push's "N zones" lands on a page
             // whose first visible number matches; a dash until the report
@@ -200,7 +202,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         <StatTile label="Running" value=running.to_string() icon="play" accent="var(--verdict-run)".to_string()/>
                         <StatTile label="Due this morning" value=due.to_string() icon="droplet" accent="var(--accent)".to_string()/>
                         <StatTile label="Skipping" value=skipping.to_string() icon="ban" accent="var(--verdict-skip)".to_string()/>
-                        <StatTile label="Planned" value=planned_min.to_string() unit="min" icon="gauge" accent="var(--accent-warm)".to_string()/>
+                        <StatTile label="Planned" value=planned_min.to_string() unit="min" icon="gauge" accent="var(--chart-water)".to_string()/>
                         <StatTile label="Suggestions" value=suggestions icon="zap" accent="var(--attention)".to_string()/>
                     </div>
                 }

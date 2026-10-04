@@ -12,8 +12,11 @@ pub fn StatTile(
     #[prop(into)]
     label: String,
     /// The primary value already formatted (e.g. "72").
-    #[prop(into)]
+    #[prop(into, optional)]
     value: Signal<String>,
+    /// Temperature uses the shared degree/scale anatomy and unit preference.
+    #[prop(into, optional)]
+    temperature_f: Option<Signal<f64>>,
     /// Trailing unit (e.g. "%", "°F", "mph"). Optional.
     #[prop(into, optional)]
     unit: Signal<String>,
@@ -54,8 +57,11 @@ pub fn StatTile(
                 <span class="stat-tile__label">{label}</span>
             </div>
             <div class="stat-tile__value-row">
-                <span class=value_class>{move || value.get()}</span>
-                <Show when=move || !unit.get().is_empty()><span class="stat-tile__unit">{move || unit.get()}</span></Show>
+                <span class=value_class>{match temperature_f {
+                    Some(reading) => view! { <super::TemperatureValue value=reading/> }.into_any(),
+                    None => view! { {move || value.get()} }.into_any(),
+                }}</span>
+                <Show when=move || temperature_f.is_none() && !unit.get().is_empty()><span class="stat-tile__unit">{move || unit.get()}</span></Show>
             </div>
             {(!detail.is_empty()).then(|| view! { <span class=detail_class>{detail}</span> })}
             {spark.map(|pts| view! {

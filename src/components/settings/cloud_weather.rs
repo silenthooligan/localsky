@@ -1536,6 +1536,7 @@ fn CapabilityMatrix(catalog: RwSignal<CloudCatalog>) -> impl IntoView {
                             let color = nature_color_token(nature);
                             view! {
                                 <span
+                                    role="img"
                                     aria-label=format!("{label}: covered")
                                     style=format!("display:inline-block;width:0.5rem;height:0.5rem;border-radius:50%;background:{color}")
                                 ></span>
@@ -1543,7 +1544,7 @@ fn CapabilityMatrix(catalog: RwSignal<CloudCatalog>) -> impl IntoView {
                             .into_any()
                         } else {
                             view! {
-                                <span aria-label=format!("{label}: not covered") class:u-faint=true>"\u{2013}"</span>
+                                <span role="img" aria-label=format!("{label}: not covered") class:u-faint=true>"\u{2013}"</span>
                             }
                             .into_any()
                         };

@@ -726,9 +726,9 @@ async fn commit_restore(s: BackupApiState, accepted: AcceptedRestore) -> Respons
     }
     let restart_required = staged_db || !restart_reasons.is_empty();
     let note = if staged_db {
-        "backup staged; new watering is held until restart applies the restore"
+        "backup staged; restart LocalSky to apply the restore before watering can resume"
     } else if restart_required {
-        "config restored and hot-applied; new watering is held until restart applies pending connections"
+        "config restored and hot-applied; restart LocalSky to apply pending connections before watering can resume"
     } else {
         "config restored and hot-applied to the running engine"
     };
@@ -1007,6 +1007,7 @@ mod tests {
     fn runtime_for(cfg: &crate::config::schema::Config) -> crate::runtime::RuntimeHandles {
         use arc_swap::ArcSwap;
         crate::runtime::RuntimeHandles {
+            retention: Arc::new(ArcSwap::from_pointee(cfg.persistence.clone())),
             dispatch_context: crate::controllers::ZoneLocks::default(),
             tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
             forecast_priority: Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new())),

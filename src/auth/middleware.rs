@@ -90,6 +90,8 @@ pub struct AuthPolicy {
 
 pub struct AuthRuntime {
     pub store: AuthStore,
+    /// Supervisor capability is process-local, never inferred from a request.
+    supervised: bool,
     pub policy: arc_swap::ArcSwap<AuthPolicy>,
     /// users-exist flag, cached; refreshed alongside policy + flipped
     /// true immediately by the setup handler.
@@ -102,6 +104,7 @@ impl AuthRuntime {
     pub fn new(store: AuthStore) -> Self {
         Self {
             store,
+            supervised: supervisor_present(),
             policy: arc_swap::ArcSwap::from_pointee(AuthPolicy::default()),
             setup_complete: std::sync::atomic::AtomicBool::new(false),
             login_attempts: Mutex::new(std::collections::HashMap::new()),
@@ -442,6 +445,31 @@ fn proxied_but_unconfigured(headers: &header::HeaderMap, policy: &AuthPolicy) ->
         && (headers.contains_key("x-forwarded-for") || headers.contains_key("forwarded"))
 }
 
+fn supervisor_present() -> bool {
+    std::env::var("SUPERVISOR_TOKEN").is_ok_and(|token| !token.trim().is_empty())
+}
+
+/// Supervisor already authenticates its ingress session. Accept its config
+/// writes in the default mode only, on an actual supervised installation and
+/// from its documented socket address. A forged ingress header or forwarded IP
+/// never grants trust. Explicit LocalSky Required mode still needs its login.
+/// https://developers.home-assistant.io/docs/apps/presentation/
+fn supervisor_ingress_vouched(req: &Request<Body>, policy: &AuthPolicy, supervised: bool) -> bool {
+    if !supervised || policy.required {
+        return false;
+    }
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    if peer != Some(IpAddr::V4(std::net::Ipv4Addr::new(172, 30, 32, 2))) {
+        return false;
+    }
+    crate::base::from_headers(req.headers())
+        .strip_prefix("/api/hassio_ingress/")
+        .is_some_and(|token| !token.is_empty() && !token.contains('/'))
+}
+
 /// Reverse-proxy identity vouching (auth.proxy_auth_header). True only when
 /// ALL of:
 ///   - `proxy_auth_header` is configured, AND
@@ -557,8 +585,13 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
     // skips physical valves. It clears the same anonymous-internet bar as a config
     // write; an unauthenticated caller in disabled mode must never open a valve.
     // /simulate is a read-only dry-run preview and intentionally stays open.
-    if path == "/api/irrigation/action"
-        && !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET)
+    if matches!(
+        path,
+        "/api/irrigation/action"
+            | "/api/irrigation/quick-run"
+            | "/api/irrigation/quick-run/stop"
+            | "/api/irrigation/notification-stop"
+    ) && !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET)
     {
         return true;
     }
@@ -783,12 +816,14 @@ static EXPOSED_WHILE_OPEN_WARNED: std::sync::atomic::AtomicBool =
 /// always Anonymous here (there is no store to attribute a User to).
 pub struct NoStoreGate {
     pub policy: arc_swap::ArcSwap<AuthPolicy>,
+    supervised: bool,
 }
 
 impl NoStoreGate {
     pub fn new() -> Self {
         Self {
             policy: arc_swap::ArcSwap::from_pointee(AuthPolicy::default()),
+            supervised: supervisor_present(),
         }
     }
 
@@ -901,7 +936,9 @@ pub async fn enforce_no_store(
         // BEFORE any X-Forwarded-For resolution (spoof-proof; see
         // proxy_identity_vouched). An authenticating proxy the operator
         // declared vouches the caller as an operator here.
-        if proxy_identity_vouched(req.extensions(), req.headers(), &policy) {
+        if supervisor_ingress_vouched(&req, &policy, gate.supervised)
+            || proxy_identity_vouched(req.extensions(), req.headers(), &policy)
+        {
             req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
             return next.run(req).await;
         }
@@ -944,7 +981,10 @@ pub async fn enforce(
     // it without spamming a line per request. After it fires, the steady-state
     // cost is a single relaxed atomic load. Required mode is already protected,
     // so it is exempt.
-    if !policy.required && !EXPOSED_WHILE_OPEN_WARNED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !policy.required
+        && !supervisor_ingress_vouched(&req, &policy, rt.supervised)
+        && !EXPOSED_WHILE_OPEN_WARNED.load(std::sync::atomic::Ordering::Relaxed)
+    {
         // client_ip resolves the real client only when the socket peer is a
         // configured trusted_proxy; otherwise it returns the peer itself. Two
         // exposure shapes to catch:
@@ -1087,7 +1127,9 @@ pub async fn enforce(
         // stamps its identity header. Checked against the raw socket peer
         // BEFORE any X-Forwarded-For resolution (spoof-proof; see
         // proxy_identity_vouched), and honored in BOTH auth modes.
-        if proxy_identity_vouched(req.extensions(), req.headers(), &policy) {
+        if supervisor_ingress_vouched(&req, &policy, rt.supervised)
+            || proxy_identity_vouched(req.extensions(), req.headers(), &policy)
+        {
             req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
             return next.run(req).await;
         }
@@ -1414,6 +1456,21 @@ mod tests {
         // A lookalike path is not the wizard config-write surface.
         assert!(!is_privileged_path(&Method::POST, "/api/wizard/applyx"));
         assert!(!is_privileged_path(&Method::POST, "/api/wizardly/apply"));
+    }
+
+    #[test]
+    fn quick_run_actuation_is_privileged_on_both_api_prefixes() {
+        for prefix in ["/api", "/api/v1"] {
+            for suffix in [
+                "/irrigation/quick-run",
+                "/irrigation/quick-run/stop",
+                "/irrigation/notification-stop",
+            ] {
+                let path = format!("{prefix}{suffix}");
+                assert!(is_privileged_path(&Method::POST, &path));
+                assert!(!is_privileged_path(&Method::GET, &path));
+            }
+        }
     }
 
     #[test]
@@ -1899,6 +1956,67 @@ mod tests {
                 40000,
             )));
         req
+    }
+
+    #[tokio::test]
+    async fn supervisor_ingress_admits_setup_without_trusting_spoofed_headers() {
+        for with_store in [true, false] {
+            for required in [false, true] {
+                for supervised in [false, true] {
+                    let app = if with_store {
+                        let (mut rt, _db) = auth_runtime(required);
+                        Arc::get_mut(&mut rt).unwrap().supervised = supervised;
+                        gated_app(rt)
+                    } else {
+                        let mut gate = NoStoreGate::new();
+                        gate.supervised = supervised;
+                        gate.policy.store(Arc::new(AuthPolicy {
+                            required,
+                            ..Default::default()
+                        }));
+                        axum::Router::new().fallback(|| async { "ok" }).layer(
+                            axum::middleware::from_fn_with_state(Arc::new(gate), enforce_no_store),
+                        )
+                    };
+                    for peer in ["172.30.32.2", "172.30.33.5", "203.0.113.5"] {
+                        for prefix in [
+                            "/api/hassio_ingress/lab_token",
+                            "",
+                            "/unrelated",
+                            "/api/hassio_ingress/../spoof",
+                        ] {
+                            let req = gated_req(
+                                Method::PUT,
+                                "/api/wizard/draft",
+                                peer,
+                                &[
+                                    ("x-forwarded-for", "172.30.32.2"),
+                                    ("x-ingress-path", prefix),
+                                ],
+                            );
+                            let allowed = supervised
+                                && !required
+                                && peer == "172.30.32.2"
+                                && prefix == "/api/hassio_ingress/lab_token";
+                            let response = app.clone().oneshot(req).await.unwrap();
+                            assert_eq!(response.status(), if allowed { StatusCode::OK } else { StatusCode::UNAUTHORIZED },
+                                "store={with_store}, required={required}, supervised={supervised}, peer={peer}, prefix={prefix}");
+                        }
+                    }
+                    // Supervisor admission never creates a LocalSky owner identity.
+                    let response = app
+                        .oneshot(gated_req(
+                            Method::POST,
+                            "/api/auth/tokens",
+                            "172.30.32.2",
+                            &[("x-ingress-path", "/api/hassio_ingress/lab_token")],
+                        ))
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                }
+            }
+        }
     }
 
     #[tokio::test]

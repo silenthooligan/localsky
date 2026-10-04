@@ -176,7 +176,7 @@ pub fn WateringPlan(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <p>"Runs finish 15 minutes before sunrise. Start time subtracts watering, cycles, soak waits and transitions. A zero-minute plan has no watering start."</p>
                     <p>"Rain and irrigation refill the root zone; plant water use draws it down. Soil, roots, planting, season and local weather set its capacity and watering trigger."</p>
                     <p>"Watering waits while the soil can last until rain. A smaller run can bridge a dry gap. Expected rain accounts for probability, local forecast bias and soil storage. It is never measured rain."</p>
-                    <p>"Live conditions refresh every 10 seconds. Restrictions, sensor readings and safety holds determine the final run."</p>
+                    <p>"Live conditions refresh every 10 seconds. Restrictions, sensor readings and safety checks determine the final run."</p>
                 </div>
             </details>
         </div>

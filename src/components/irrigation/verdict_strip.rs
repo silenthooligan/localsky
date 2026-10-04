@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(verdict_short_label(&mixed), "PARTIAL");
         mixed.verdict = "run".into();
         mixed.reason_code = "run".into();
-        mixed.reason = "1 of 2 zones can water; 1 remains on hold".into();
+        mixed.reason = "1 of 2 zones can water; 1 will be skipped".into();
         assert_eq!(verdict_short_label(&mixed), "PARTIAL");
         assert!(cell_tooltip(&mixed, "Today").starts_with("Today: PARTIAL"));
         // The note alone no longer makes the tag: without the flag this
@@ -406,7 +406,7 @@ mod tests {
             "rain_3day",
             "planning_forecast",
         ] {
-            let mut unknown = cell("skip", code, "Rain forecast unavailable; watering held");
+            let mut unknown = cell("skip", code, "Rain forecast unavailable; watering skipped");
             unknown.precip_in = None;
             assert_eq!(verdict_short_label(&unknown), "NO DATA", "{code}");
             assert_eq!(verdict_skip_class(&unknown), "verdict-cell-skip", "{code}");

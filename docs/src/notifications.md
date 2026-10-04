@@ -21,7 +21,15 @@ Subscribe each browser or installed web app that should receive notifications. D
 
 Web Push needs a VAPID keypair so the push service can verify that notifications are signed by your LocalSky instance. The keypair is generated once and reused for the life of the deployment.
 
-LocalSky loads the keypair from environment variables at startup:
+Enable Web Push in **Settings → Notifications**, save, then select **Subscribe this device** on each phone or browser. Setup generates the keypair. Allow notifications when the browser asks.
+
+Watering notifications offer **Stop watering** on supported browsers. This stops the current run and cancels the remaining Quick Run queue. An ordinary tap opens the app. If the alert is old, the connection is lost, or sign-in has expired, LocalSky reports that Stop was not confirmed and opens the watering controls. The phone must be able to reach your instance; a notification is not an offline remote control.
+
+While the app is open, a watering strip stays available across pages with the current zone and **Stop**. Quick Run also shows approximate time remaining and queue progress. The strip stays visible when a stop needs attention.
+
+### Manual key configuration
+
+For deployments managed through environment variables, LocalSky supports the following fallback when no Web Push keypair is saved in configuration:
 
 | Variable | What it is |
 |---|---|
@@ -29,7 +37,7 @@ LocalSky loads the keypair from environment variables at startup:
 | `VAPID_PUBLIC_KEY` | The matching public key as **unpadded base64url** (87 characters): the raw 65-byte uncompressed P-256 point, the same `applicationServerKey` format browsers use. Padded or standard base64 is rejected at startup with a log warning |
 | `VAPID_SUBJECT` | Optional contact URI (`mailto:` or `https:`) the push service can use to reach you. Defaults to the LocalSky project URL |
 
-If the variables are missing or the key file is unreadable, the dispatcher logs one warning at startup and silently drops every event; the rest of the app keeps running.
+If neither configuration nor environment provides a readable keypair, Web Push is unavailable; other notification channels continue working.
 
 ### 1. Generate the keypair
 
@@ -73,7 +81,7 @@ chmod 440 ./localsky-keys/vapid-private.pem
 
 Restart the container after setting the variables; the keypair is read once at startup.
 
-The `[notifications.web_push]` block you may see in `localsky.toml` or `GET /api/v1/config` (`vapid_public`, `vapid_private_path`, `vapid_subject`) mirrors these env vars so the settings UI can display them. Setting the TOML block alone does not enable push; the environment variables are the live configuration path.
+The `[notifications.web_push]` block in `localsky.toml` (`vapid_public`, `vapid_private_path`, `vapid_subject`) takes precedence over these environment variables.
 
 ### 3. Verify the server side
 

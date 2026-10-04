@@ -1698,7 +1698,8 @@ mod seed_config_tests {
             "the explicit weekly target clamps delivery"
         );
         assert!(
-            side.today_reason.starts_with("held to the weekly ceiling"),
+            side.today_reason
+                .starts_with("limited by the weekly target"),
             "{}",
             side.today_reason
         );

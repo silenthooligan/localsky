@@ -157,7 +157,7 @@ fn hold_lines(recs: &[HaAdoptedHelper], now: i64, tz: &str) -> Vec<String> {
             "adopted" => {
                 if let Some(epoch) = live_epoch(rec.adopted_value.as_deref()) {
                     out.push(format!(
-                        "Watering is held: the Rain delay you had set in {PAUSE_UNTIL} came \
+                        "Watering is paused: the Rain delay you had set in {PAUSE_UNTIL} came \
                          across with it, {}. Release it under Rain delay on this page. Clearing \
                          the helper in Home Assistant will not release it.",
                         render_value(PAUSE_UNTIL, &epoch.to_string(), tz)
@@ -167,7 +167,7 @@ fn hold_lines(recs: &[HaAdoptedHelper], now: i64, tz: &str) -> Vec<String> {
             "kept_local" => {
                 if let Some(epoch) = live_epoch(rec.previous_value.as_deref()) {
                     out.push(format!(
-                        "Watering is held by a Rain delay set here before this install talked to Home Assistant, {}. It was ignored then and decides now. Release it under Rain delay.",
+                        "Watering is paused by a Rain delay set here before this install talked to Home Assistant, {}. It was ignored then and decides now. Release it under Rain delay.",
                         render_value(PAUSE_UNTIL, &epoch.to_string(), tz)
                     ));
                 }
@@ -178,13 +178,13 @@ fn hold_lines(recs: &[HaAdoptedHelper], now: i64, tz: &str) -> Vec<String> {
     if let Some(rec) = recs.iter().find(|h| h.entity == PAUSE_TOGGLE) {
         out.push(match rec.outcome.as_str() {
             "adopted" if rec.adopted_value.as_deref() == Some("on") => {
-                "Watering is held: the pause you had set in input_boolean.irrigation_pause came \
+                "Watering is paused: the pause you had set in input_boolean.irrigation_pause came \
                  across with it. Clear it from the Vacation pause toggle on this page. Turning \
                  the helper back off in Home Assistant will not release it."
                     .to_string()
             }
             "kept_local" if rec.previous_value.as_deref() == Some("on") => {
-                "Watering is held by a pause set here before this install talked to Home Assistant. It was ignored then and decides now. Clear it under Vacation pause."
+                "Watering is paused by a pause set here before this install talked to Home Assistant. It was ignored then and decides now. Clear it under Vacation pause."
                     .to_string()
             }
             _ => {
@@ -693,7 +693,7 @@ mod tests {
         let lines = hold_lines(&recs, 1, "UTC");
         assert_eq!(lines.len(), 1, "{lines:?}");
         let line = &lines[0];
-        assert!(line.starts_with("Watering is held"), "{line}");
+        assert!(line.starts_with("Watering is paused"), "{line}");
         assert!(line.contains("Vacation pause toggle"), "{line}");
         assert!(
             line.contains("will not release it"),
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         let held = &lines[0];
         assert!(
-            held.starts_with("Watering is held: the Rain delay"),
+            held.starts_with("Watering is paused: the Rain delay"),
             "{held}"
         );
         assert!(held.contains("paused until"), "{held}");
@@ -776,7 +776,7 @@ mod tests {
         let lines = hold_lines(&recs, 1, "UTC");
         let line = &lines[0];
         assert!(
-            line.starts_with("Watering is held by a Rain delay"),
+            line.starts_with("Watering is paused by a Rain delay"),
             "{line}"
         );
         assert!(line.contains("Release it under Rain delay"), "{line}");
@@ -795,7 +795,7 @@ mod tests {
             .find(|l| l.contains("Vacation pause"))
             .expect("the switch hold is named");
         assert!(
-            line.starts_with("Watering is held by a pause set here"),
+            line.starts_with("Watering is paused by a pause set here"),
             "{line}"
         );
         assert!(line.contains("Clear it under Vacation pause"), "{line}");

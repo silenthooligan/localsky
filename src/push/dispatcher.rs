@@ -32,7 +32,11 @@ pub enum PushEvent {
     /// A zone just transitioned from idle to running. `name` is the
     /// human-friendly zone name (e.g. "Back yard"); `slug` matches the
     /// snapshot.
-    ZoneStarted { name: String, slug: String },
+    ZoneStarted {
+        name: String,
+        slug: String,
+        stop: Option<crate::controllers::notification_runs::NotificationRun>,
+    },
     /// A zone just transitioned from running to idle. `duration_min` is
     /// the run length in minutes (rounded).
     ZoneStopped {
@@ -205,7 +209,15 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
                     };
 
                     let payload = render_payload(&ev);
-                    let body = match serde_json::to_string(&payload) {
+                    let mut message =
+                        serde_json::to_value(&payload).expect("serializable push payload");
+                    if let PushEvent::ZoneStarted {
+                        stop: Some(stop), ..
+                    } = &ev
+                    {
+                        message["stop"] = serde_json::json!(stop);
+                    }
+                    let body = match serde_json::to_string(&message) {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::warn!("push: payload serialize failed: {e}");
@@ -293,7 +305,7 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             error,
         } => PushPayload {
             title: format!("{controller_id} is not answering"),
-            body: format!("{error}. Watering that needs it is on hold until it answers."),
+            body: format!("{error}. Watering that needs this source cannot start until it responds."),
             tag: format!("controller-{controller_id}"),
             url: "/settings/devices".to_string(),
         },
@@ -328,11 +340,11 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             tag: "flow-without-command".to_string(),
             url: "/".to_string(),
         },
-        PushEvent::ZoneStarted { name, slug } => PushPayload {
+        PushEvent::ZoneStarted { name, slug, .. } => PushPayload {
             title: format!("{name} started"),
             body: "Watering in progress.".to_string(),
             tag: format!("zone-{slug}"),
-            url: format!("/zones/{slug}"),
+            url: "/irrigation".to_string(),
         },
         PushEvent::ZoneStopped {
             name,

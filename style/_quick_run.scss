@@ -1,0 +1,127 @@
+@use "mixins" as *;
+
+// A shared, touch-friendly manual run surface. Theme tokens carry all colors.
+html { --watering-mode-offset: 0px; }
+html[data-demo="true"], html[data-dry-run="true"] { --watering-mode-offset: 2.2rem; }
+html[data-demo="true"][data-dry-run="true"] { --watering-mode-offset: 4.4rem; }
+.watering-strip {
+  position: sticky; top: calc(var(--watering-mode-offset) + var(--space-2)); z-index: var(--z-nav);
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3);
+  margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-strong); border-left: 5px solid var(--accent-water);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-2);
+  background: color-mix(in srgb, var(--accent-water) 13%, var(--elev-1));
+  &__icon { display: grid; place-items: center; color: var(--accent-water); }
+  &__copy { display: grid; gap: var(--space-1); flex: 1; min-width: 0;
+    strong { color: var(--text); font-size: var(--text-body); overflow-wrap: anywhere; }
+    span { color: var(--text-soft); font-size: var(--text-body-sm); font-variant-numeric: tabular-nums; }
+  }
+  &__actions { display: flex; gap: var(--space-2); .btn { min-height: 44px; } }
+  &--attention { border-left-color: var(--accent-warn); background: color-mix(in srgb, var(--accent-warn) 13%, var(--elev-1));
+    .watering-strip__icon { color: var(--accent-warn); }
+  }
+}
+@include phone {
+  html[data-demo="true"] { --watering-mode-offset: 2.8rem; }
+  html[data-dry-run="true"] { --watering-mode-offset: 4rem; }
+  html[data-demo="true"][data-dry-run="true"] { --watering-mode-offset: 6.8rem; }
+  html:has(.watering-strip) .mobile-app-bar { top: var(--watering-mode-offset); }
+  .watering-strip { top: calc(var(--watering-mode-offset) + 4.25rem + env(safe-area-inset-top) + var(--space-2)); padding: var(--space-3);
+    &__actions { flex-basis: 100%; .btn { flex: 1; } }
+  }
+}
+.quick-run-entry {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--accent-good);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(110deg, color-mix(in srgb, var(--accent-good) 12%, var(--elev-1)), var(--elev-1));
+  &--active { border-left-color: var(--accent-water); }
+  &--attention { border-left-color: var(--accent-warn); background: color-mix(in srgb, var(--accent-warn) 12%, var(--elev-1)); }
+  &__icon { color: var(--accent-good); display: grid; place-items: center; flex-shrink: 0; }
+  &__copy { flex: 1; min-width: 0; }
+  h2 { font: 700 1.05rem/1.3 var(--font-sans); margin: 0 0 .3rem; color: var(--text); }
+  p { color: var(--text-dim); font-size: .9rem; margin: 0; }
+  .btn { flex-shrink: 0; }
+}
+#quick-run-dialog { max-width: min(560px, calc(100vw - 24px)); }
+#quick-run-dialog .sheet__close { margin-left: auto; }
+.quick-run {
+  min-width: 0;
+  &__intro { color: var(--text-soft); margin: 0 0 1.25rem; line-height: 1.5; }
+  &__presets { border: 0; padding: 0; margin: 0 0 1.25rem; min-width: 0;
+    legend { font-size: .8rem; font-weight: 700; color: var(--text-dim); margin-bottom: .6rem; }
+    > div { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; }
+  }
+  &__preset {
+    display: flex; align-items: center; justify-content: center; gap: .2rem; white-space: nowrap; padding: .35rem .1rem; min-width: 0;
+    min-height: 44px; border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--elev-1); color: var(--text); font: 700 1rem var(--font-sans); cursor: pointer;
+    span { font-weight: 400; font-size: .8rem; }
+    &[aria-pressed="true"] { border: 2px solid var(--accent-good); background: color-mix(in srgb, var(--accent-good) 16%, var(--elev-1)); }
+  }
+  &__list-heading { display: flex; justify-content: space-between; align-items: center; gap: .75rem;
+    h3 { margin: 0; font-size: 1rem; }
+    .btn { min-height: 44px; }
+  }
+  &__zones { display: grid; gap: .6rem; margin: .5rem 0 1rem; }
+  &__zone {
+    display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1rem; padding: .75rem;
+    border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--elev-1);
+    &--selected { border-color: var(--accent-good); box-shadow: inset 3px 0 var(--accent-good); background: color-mix(in srgb, var(--accent-good) 9%, var(--elev-1)); }
+    > label { display: flex; align-items: center; gap: .65rem; flex: 1 1 150px; min-height: 44px; min-width: 0; cursor: pointer; font-weight: 700; line-height: 1.35;
+      input { width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--accent-good); }
+      span { overflow-wrap: anywhere; }
+    }
+  }
+  &__time {
+    display: flex; flex-shrink: 0; align-items: center; border: 1px solid var(--border); border-radius: var(--radius-md); margin-left: auto;
+    button { display: grid; place-items: center; width: 44px; min-height: 44px; background: transparent; border: 0; color: var(--text); cursor: pointer; }
+    label { display: flex; align-items: center; color: var(--text-dim); font-size: .75rem; }
+    input { width: 2.5rem; min-height: 44px; padding: 0 .15rem; text-align: center; border: 0; background: transparent; color: var(--text); font: 700 1rem var(--font-sans); font-variant-numeric: tabular-nums; appearance: textfield; }
+    input::-webkit-inner-spin-button, input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+  }
+  &__note { color: var(--text-dim); font-size: .85rem; line-height: 1.5; margin: 1rem 0; }
+  &__time-error { flex-basis: 100%; margin: .25rem 0 0; font-size: .85rem; color: var(--text); border-left: 3px solid var(--accent-danger); padding-left: .5rem; }
+  &__footer {
+    position: sticky; bottom: -.01rem; z-index: var(--z-base); background: var(--elev-2); border-top: 1px solid var(--border-strong);
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .9rem; padding: 1rem 0 .25rem;
+    > div { display: grid; gap: .25rem; }
+    strong { font-size: 1.15rem; color: var(--text); font-variant-numeric: tabular-nums; }
+    span { font-size: .8rem; color: var(--text-dim); }
+    .btn__label { color: inherit; font-size: inherit; }
+  }
+  &__progress { border-left: 4px solid var(--accent-water); background: color-mix(in srgb, var(--accent-water) 10%, var(--elev-1)); padding: 1rem; border-radius: var(--radius-md);
+    h3 { font-size: 1.2rem; margin: .3rem 0 .6rem; }
+    p { margin: .3rem 0; line-height: 1.5; }
+    &--attention { border-color: var(--accent-warn); background: color-mix(in srgb, var(--accent-warn) 10%, var(--elev-1)); }
+  }
+  &__eyebrow { font-size: .8rem; font-weight: 700; color: var(--text-dim); }
+  &__remaining { font-weight: 700; font-variant-numeric: tabular-nums; }
+  &__queue { list-style: none; padding: 0; display: grid; gap: .5rem; margin: 1rem 0;
+    li { display: flex; gap: .75rem; align-items: center; padding: .85rem .75rem; border: 1px solid var(--border); border-radius: var(--radius-md); }
+    li > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    strong, small { display: block; }
+    small { color: var(--text-dim); margin-top: .25rem; }
+    .quick-run__queue-current { border-color: var(--accent-water); background: color-mix(in srgb, var(--accent-water) 10%, var(--elev-1)); }
+  }
+  &__order { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  &__duration { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  &__actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: 1rem; }
+  &__error { color: var(--text); border-left: 3px solid var(--accent-danger); background: color-mix(in srgb, var(--accent-danger) 10%, var(--elev-1)); padding: .85rem; line-height: 1.5; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-water); outline-offset: 3px; }
+  button:disabled { cursor: default; opacity: .5; }
+}
+@media (max-width: 480px) {
+  .quick-run-entry { flex-wrap: wrap; gap: .65rem; padding: 1rem;
+    &__icon { display: none; }
+    &__copy { flex-basis: 100%; }
+    .btn { width: 100%; }
+  }
+  .quick-run__zone > label { flex-basis: 100%; }
+  .quick-run__footer .btn { width: 100%; }
+}

@@ -60,11 +60,15 @@ pub fn paths_for(name: &str) -> &'static str {
         // ── Primary nav ──────────────────────────────────────────────
         "weather" => r#"<path d="M17.5 19a4.5 4.5 0 1 0-1.7-8.66 7 7 0 1 0-11.6 6.66"/>"#,
         "droplet" => r#"<path d="M12 2.69 5.64 9.05a9 9 0 1 0 12.72 0Z"/>"#,
+        "check-circle" => r#"<circle cx="12" cy="12" r="9"/><path d="m7.5 12 3 3 6-6"/>"#,
+        "clock" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>"#,
         // Irrigation action glyphs: the same sprinkler, spraying or held.
         "sprinkler" => {
             r#"<path d="M3 21h18M10 21v-5h4v5M9 16h6M12 12V8M7 12 4 9M17 12l3-3M8 7 6 5M16 7l2-2M12 4V2"/>"#
         }
-        "sprinkler-off" => r#"<path d="M3 21h18M10 21v-5h4v5M9 16h6M12 12V8M3 3l18 18"/>"#,
+        "sprinkler-off" => {
+            r#"<path d="M3 21h18M10 21v-5h4v5M9 16h6M12 12V8M7 12 4 9M17 12l3-3M8 7 6 5M16 7l2-2M12 4V2"/><path d="M3 3l18 18" stroke="var(--bg-panel)" stroke-width="5"/><path class="sprinkler-off-slash" d="M3 3l18 18" stroke="var(--accent-hot)" stroke-width="2.5"/>"#
+        }
         "zones" => {
             r#"<path d="M12 21V8"/><path d="M7 21V11"/><path d="M17 21V11"/><path d="M12 8a4 4 0 0 0-4-4 4 4 0 0 0-4 4c0 2 1 4 4 4"/><path d="M12 8a4 4 0 0 1 4-4 4 4 0 0 1 4 4c0 2-1 4-4 4"/>"#
         }

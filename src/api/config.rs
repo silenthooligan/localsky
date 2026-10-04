@@ -3375,6 +3375,9 @@ mod tests {
         let source_reachable = crate::sources::SourceReachability::default();
         let source_last_seen = crate::sources::SourceLastSeen::default();
         let handles = crate::runtime::RuntimeHandles {
+            retention: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::config::schema::PersistenceConfig::default(),
+            )),
             dispatch_context: crate::controllers::ZoneLocks::default(),
             tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
             forecast_priority: Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new())),

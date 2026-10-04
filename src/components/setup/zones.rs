@@ -173,12 +173,7 @@ pub fn ZonesStep() -> impl IntoView {
         <div class="setup-step">
             <h2 class="setup-step__title">"Tell us about your yard"</h2>
             <p class="setup-step__body">
-                "A zone is one watering district: a chunk of yard tied to "
-                "one valve. LocalSky asks for grass species, soil texture, "
-                "area, sprinkler type and measured precipitation rate, then "
-                "computes ETc from local weather and sizes each session "
-                "from the zone's weekly target, firing on the "
-                "mornings the zone's session spacing allows."
+                "Each zone is an area watered by one valve. Add its grass, soil and sprinkler details to help LocalSky estimate how much water it needs."
             </p>
 
             // The actual zone-creation surface (reuses the settings form).
@@ -188,9 +183,7 @@ pub fn ZonesStep() -> impl IntoView {
                     if zones.is_empty() {
                         view! {
                             <p class="setup-step__body">
-                                "No zones yet. Add your first watering zone to get a real "
-                                "schedule; you can add more or edit them anytime under "
-                                "/settings/zones."
+                                "Add your first watering zone. You can add more or edit them later in Settings."
                             </p>
                         }
                         .into_any()
@@ -236,7 +229,7 @@ pub fn ZonesStep() -> impl IntoView {
                         ().into_any()
                     } else {
                         let color = if result_ok.get() {
-                            "var(--verdict-run)"
+                            "var(--status-online)"
                         } else {
                             "var(--accent-warm)"
                         };
@@ -342,14 +335,11 @@ pub fn ZonesStep() -> impl IntoView {
                 }}
             </Panel>
 
-            <Panel title="Grass species catalog".to_string()>
+            <details class="setup-reference">
+                <summary>"Grass and ground-cover guide"</summary>
+            <Panel title="".to_string()>
                 <p class="setup-step__body" class:u-mb3-only=true>
-                    "Each species has its own seasonal Kc curve, root depth, "
-                    "and management allowable depletion. Pick the closest "
-                    "match; per-zone overrides for root depth and MAD are "
-                    "available under "
-                    <a href="/settings/zones" class:u-accent=true>"/settings/zones"</a>
-                    "."
+                    "Compare species to find the closest match for your yard. You can adjust root depth and soil thresholds in Settings."
                 </p>
                 {species_groups().into_iter().map(|(title, hint, cards)| view! {
                     <section>
@@ -363,50 +353,33 @@ pub fn ZonesStep() -> impl IntoView {
                     </section>
                 }.into_any()).collect::<Vec<_>>()}
             </Panel>
+            </details>
 
-            <Panel title="What goes into a good zone definition".to_string()>
+            <details class="setup-reference">
+                <summary>"Help with zone details"</summary>
+            <Panel title="".to_string()>
                 <ul class="setup-source-list">
                     <li>
                         <strong>"Soil texture"</strong>
-                        " - USDA texture class (the internationally standard "
-                        "soil-texture taxonomy) drives field capacity, wilting "
-                        "point, available water per metre, and infiltration. Sand, "
-                        "Loamy Sand, Sandy Loam, Loam, Silt Loam, Clay Loam, Clay."
+                        ": how much water the soil holds and how quickly it absorbs it."
                     </li>
                     <li>
                         <strong>"Precipitation rate"</strong>
-                        " - measured via catch-cup (preferred) or estimated "
-                        "from sprinkler type. Drives runtime-to-depth math."
+                        ": how quickly your sprinklers apply water. A catch-cup measurement is more accurate than a sprinkler-type estimate."
                     </li>
                     <li>
                         <strong>"Controller station"</strong>
-                        " - which of your controller's own zones this one "
-                        "fires. Where the controller can be asked (OpenSprinkler, "
-                        "Rachio, a DIY HTTP board, simulated hardware) the field "
-                        "lists them by the controller's name for each and stores "
-                        "its id, so the two sides are free to be named "
-                        "differently. Hydrawise, B-hyve, Rain Bird and Home "
-                        "Assistant cannot be listed, so enter the id there: a "
-                        "relay id, a station number, or an entity_id."
+                        ": the valve this zone controls. Select a station when your controller supports listing, or enter its station identifier."
                     </li>
                     <li>
                         <strong>"Photo (optional)"</strong>
-                        " - drop an image URL under "
-                        <a href="/settings/zones" class:u-accent=true>"/settings/zones"</a>
-                        " and the zone card renders it. Useful when you have "
-                        "more than a handful of zones."
+                        ": add an image to make the zone easier to recognize."
                     </li>
                 </ul>
             </Panel>
+            </details>
 
-            <Panel title="What happens if I skip this".to_string()>
-                <p class="setup-step__body" class:u-mb0=true>
-                    "Zones can be added after the wizard via "
-                    <a href="/settings/zones" class:u-accent=true>"/settings/zones"</a>
-                    ". The dashboard renders empty until at least one zone is "
-                    "configured."
-                </p>
-            </Panel>
+            <p class="setup-step__body">"Weather only? Skip this step and add zones later in Settings."</p>
 
             <SetupFooter
                 prev=prev_step_href("zones")
@@ -443,7 +416,7 @@ fn supply_choice(
 
 #[component]
 fn SpeciesCard(species: SpeciesCardData) -> impl IntoView {
-    let img = format!("/grass-species/{}.jpg", species.slug);
+    let img = crate::base::url(&format!("/grass-species/{}.jpg", species.slug));
     view! {
         <article class="species-card">
             <div class="species-card__photo-wrap">

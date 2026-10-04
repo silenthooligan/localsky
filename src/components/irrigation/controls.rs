@@ -275,7 +275,7 @@ pub(crate) fn provide_override_actions() -> impl IntoView {
                 format!(
                     "Force scheduled watering for {scope} despite rain, soil, and condition-rule recommendations. \
                      This can overwater plants and waste water. Safety checks, watering restrictions, \
-                     active holds, and script rules still apply. It stays on until you choose Auto; no valve starts now."
+                     active pauses, and script rules still apply. It stays on until you choose Auto; no valve starts now."
                 )
             })
             confirm_label=Signal::derive(|| "Enable Force".to_string())
@@ -377,7 +377,7 @@ pub fn OverrideControl(
                 {seg}
                 {move || is("run").then(|| view! {
                     <p class="override-panel__help" role="status">
-                        "Force stays on until Auto. Safety checks and holds still apply."
+                        "Force stays on until Auto. Safety checks and pauses still apply."
                     </p>
                 })}
             </div>
@@ -389,7 +389,7 @@ pub fn OverrideControl(
         let status = move || {
             match mode.get().as_str() {
             "skip" => "Skipping every zone until you switch back to Auto.".to_string(),
-            "run" => "Force stays on until Auto, bypassing rain, soil, and condition-rule recommendations. Safety checks, restrictions, holds, and script rules still apply."
+            "run" => "Force stays on until Auto, bypassing rain, soil, and condition-rule recommendations. Safety checks, restrictions, pauses, and script rules still apply."
                 .to_string(),
             _ => "Following the schedule. Set Skip or Force to take manual control.".to_string(),
         }

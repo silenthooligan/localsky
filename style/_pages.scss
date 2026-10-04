@@ -218,26 +218,26 @@
 .zone-detail__back-icon { transform: rotate(180deg); }
 .zone-detail__empty { color: var(--text-faint); padding: var(--space-7); text-align: center; }
 .zone-detail__head { display: flex; align-items: center; gap: var(--space-3); }
-.zone-detail__name { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.zone-detail__name { font-family: var(--font-editorial); font-weight: 400; margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
 .zone-detail__verdict {
   font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
   color: var(--vc); padding: 3px 8px; border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--vc) 16%, transparent); white-space: nowrap;
+  background: color-mix(in oklab, var(--vc) 8%, var(--elev-1)); white-space: nowrap;
 }
 .zone-detail__verdict-reason { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-soft); font-size: var(--text-meta); }
 .zone-detail__status {
   font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700;
   letter-spacing: 0.08em; padding: 4px 9px; border-radius: var(--radius-sm); white-space: nowrap;
 }
-.zone-detail__status--running { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 16%, transparent); }
-.zone-detail__status--pending { color: var(--verdict-wind); background: color-mix(in oklab, var(--verdict-wind) 16%, transparent); animation: pulse-fade 1.2s ease-in-out infinite; }
+.zone-detail__status--running { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 8%, var(--elev-1)); }
+.zone-detail__status--pending { color: var(--verdict-wind); background: color-mix(in oklab, var(--verdict-wind) 8%, var(--elev-1)); animation: pulse-fade 1.2s ease-in-out infinite; }
 @include reduced-motion { .zone-detail__status--pending { animation: none; } }
-.zone-detail__status--scheduled { color: var(--accent); background: color-mix(in oklab, var(--accent) 16%, transparent); }
-.zone-detail__status--skipping { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 16%, transparent); }
+.zone-detail__status--scheduled { color: var(--accent); background: color-mix(in oklab, var(--accent) 8%, var(--elev-1)); }
+.zone-detail__status--skipping { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 8%, var(--elev-1)); }
 .zone-detail__status--idle { color: var(--text-faint); background: var(--surface-soft); }
 // A zone the weekly budget zeroed: the engine decided about it and names
 // the gate, which is not the same thing as idle.
-.zone-detail__status--held { color: var(--accent-cool); background: color-mix(in oklab, var(--accent-cool) 16%, transparent); }
+.zone-detail__status--held { color: var(--accent-cool); background: color-mix(in oklab, var(--accent-cool) 8%, var(--elev-1)); }
 // The allocator's own sentence, and the Override-schedule notice, shown
 // where the zero is.
 .zone-detail__reason {
@@ -292,14 +292,14 @@
   @include surface;
 
 }
-.ha-hero--ok { border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent); }
+.ha-hero--ok { border-color: color-mix(in oklab, var(--status-online) 35%, transparent); }
 .ha-hero__icon {
   display: flex; align-items: center; justify-content: center;
   width: 46px; height: 46px; flex: none;
   @include surface($background: (var(--elev-2)), $radius: (var(--radius-md)), $shadow: null);
   color: var(--text-faint);
 }
-.ha-hero--ok .ha-hero__icon { color: var(--verdict-run); border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent); }
+.ha-hero--ok .ha-hero__icon { color: var(--status-online); border-color: color-mix(in oklab, var(--status-online) 35%, transparent); }
 .ha-hero__text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .ha-hero__row { display: flex; align-items: center; gap: var(--space-3); }
 .ha-hero__row strong { font-size: var(--text-h3); color: var(--text-bright); }
@@ -313,8 +313,9 @@
   white-space: nowrap;
 }
 .ha-chip__dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.ha-chip--on { color: var(--verdict-run); border-color: color-mix(in oklab, var(--verdict-run) 40%, transparent); background: color-mix(in oklab, var(--verdict-run) 10%, var(--elev-2)); }
-.ha-chip--warn { color: var(--verdict-wind); border-color: color-mix(in oklab, var(--verdict-wind) 40%, transparent); background: color-mix(in oklab, var(--verdict-wind) 10%, var(--elev-2)); }
+.ha-chip--on { color: var(--status-online); border-color: color-mix(in oklab, var(--status-online) 40%, transparent); background: color-mix(in oklab, var(--status-online) 10%, var(--elev-2)); }
+.ha-chip--warn { color: var(--text-bright); border-color: color-mix(in oklab, var(--verdict-wind) 40%, transparent); background: color-mix(in oklab, var(--verdict-wind) 10%, var(--elev-2)); }
+.ha-chip--warn .ha-chip__dot { background: var(--verdict-wind); }
 .ha-chip--off { color: var(--text-faint); border-color: var(--elev-border-strong); background: var(--elev-2); }
 
 .ha-cards { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); }
@@ -332,7 +333,7 @@
   @include surface($background: (var(--elev-2)), $radius: (var(--radius-md)), $shadow: null);
   color: var(--text-faint);
 }
-.ha-card__icon--on { color: var(--verdict-run); }
+.ha-card__icon--on { color: var(--status-online); }
 .ha-card__icon--warn { color: var(--verdict-wind); }
 .ha-card__body { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; flex: 1; }
 .ha-card__top { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
@@ -378,7 +379,7 @@
   border-radius: var(--radius-lg);
 }
 .ha-flow-line { display: flex; align-items: flex-start; gap: var(--space-2); color: var(--text-dim); line-height: 1.5; }
-.ha-flow-line svg { color: var(--verdict-run); flex: none; margin-top: 3px; }
+.ha-flow-line svg { color: var(--status-online); flex: none; margin-top: 3px; }
 .ha-flow-line strong { color: var(--text); }
 
 .ha-advanced { margin-top: var(--space-4); }
@@ -406,16 +407,6 @@
 .setup-progress__name { font-weight: 700; color: var(--text); }
 .setup-progress__track { height: 6px; border-radius: 999px; background: var(--elev-2); overflow: hidden; }
 .setup-progress__fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-cool, var(--accent))); transition: width var(--motion-base) ease; }
-.setup-progress__dots { display: flex; gap: var(--space-2); list-style: none; margin: 0; padding: 0; }
-.setup-progress__dot {
-  display: block; width: 9px; height: 9px; border-radius: 50%;
-  background: var(--elev-2); border: 1px solid var(--elev-border-strong);
-  transition: background var(--motion-fast) ease, transform var(--motion-fast) ease;
-}
-.setup-progress__dot--optional { border-style: dashed; }
-.setup-progress__dot--done { background: var(--accent); border-color: var(--accent); opacity: 0.55; }
-.setup-progress__dot--current { background: var(--accent); border-color: var(--accent); transform: scale(1.35); }
-.setup-progress__dot:hover { transform: scale(1.35); }
 
 .setup-hero { text-align: center; padding: var(--space-4) 0 var(--space-2); }
 .setup-hero__icon {
@@ -424,7 +415,7 @@
   color: var(--accent);
 
 }
-.setup-hero__title { margin: 0 0 var(--space-2); font-size: var(--text-h1); color: var(--text-bright); }
+.setup-hero__title { font-family: var(--font-editorial); font-weight: 400; margin: 0 0 var(--space-2); font-size: var(--text-h1); color: var(--text-bright); }
 .setup-hero__sub { margin: 0 auto; color: var(--text-dim); max-width: 46ch; line-height: 1.55; }
 
 .setup-pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3); margin: var(--space-5) 0; }
@@ -539,12 +530,6 @@
 // The safety ceiling actually shortened the run: the Scheduled row is the
 // only place that says so, so it carries the warning tint.
 .zone-detail__math-final--capped dd { color: var(--accent-warn); }
-// Second group of the math panel: engine outputs that do NOT size the run.
-// Set apart so the panel cannot read as a formula whose operands they are.
-.zone-detail__panel-subtitle {
-  margin: var(--space-3) 0 0; font-size: var(--text-meta); font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
-}
 .zone-detail__panel-note { margin: 0; color: var(--text-faint); font-size: var(--text-meta); }
 
 // Tuning panel (results-based tuning report). Design-language v3: the
@@ -632,7 +617,6 @@
 }
 .tuning-strip__link { color: var(--attention); font-weight: 600; text-decoration: none; }
 .tuning-strip__link:hover { text-decoration: underline; }
-.tuning-strip__scorecard { color: var(--text-dim); font-size: var(--text-meta); }
 
 @media (max-width: 700px) {
   .zone-detail__stats { grid-template-columns: repeat(2, 1fr); }

@@ -1512,7 +1512,7 @@ pub(crate) fn prepare_soil_schedule(
                         b.today_reason = plan
                             .deferred_reason
                             .clone()
-                            .unwrap_or_else(|| "Planting is dormant; watering held".into());
+                            .unwrap_or_else(|| "Planting is dormant; watering skipped".into());
                         b.dormant = true;
                         b.soil_deferred_kind = plan.deferred_kind;
                         b.soil_deferred_reason = plan.deferred_reason.clone();

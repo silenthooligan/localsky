@@ -12,19 +12,28 @@
 // "zero looks alarming" (e.g. visibility 0 means "unknown", not "fog").
 // Advisory display only; nothing here feeds a skip decision.
 
+use crate::components::ui::TemperatureValue;
+use crate::components::units_fmt::{fmt_wind, use_unit_prefs, UnitPrefs};
 use crate::forecast::snapshot::ForecastSnapshot;
-use crate::timefmt::format_hm;
+use crate::timefmt::{format_hm, format_wday_short};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 /// Feet per statute mile, for the visibility card.
 const FT_PER_MI: f64 = 5280.0;
 
+#[derive(Default)]
 struct ConditionCard {
     icon: &'static str,
     title: &'static str,
     /// (key, value) rows.
     rows: Vec<(String, String)>,
+    summary: &'static str,
+    note: &'static str,
+    kind: &'static str,
+    /// Label, forecast window, stored Fahrenheit reading.
+    temperatures: Vec<(&'static str, &'static str, f64)>,
+    details: Vec<(String, String)>,
     /// Escalation styles the card border/title.
     alert: bool,
 }
@@ -62,6 +71,7 @@ fn winter_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
             format!("{:.1} kft", freezing_ft / 1000.0),
         ));
     }
+    let mut temperatures = Vec::new();
     if let Some(min) = s
         .daily
         .iter()
@@ -69,13 +79,15 @@ fn winter_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
         .filter_map(|d| d.temp_min_f)
         .min_by(|a, b| a.total_cmp(b))
     {
-        rows.push(("Coldest night".to_string(), format!("{min:.0}F")));
+        temperatures.push(("Coldest night", "Next two days", min));
     }
     Some(ConditionCard {
         icon: "snowflake",
         title: "Winter",
         rows,
+        temperatures,
         alert: snow_48h >= 3.0,
+        ..Default::default()
     })
 }
 
@@ -108,10 +120,11 @@ fn fog_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
             ),
         ],
         alert: worst.visibility_ft < 0.5 * FT_PER_MI,
+        ..Default::default()
     })
 }
 
-fn storm_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
+fn storm_card(s: &ForecastSnapshot, prefs: UnitPrefs) -> Option<ConditionCard> {
     let cape = s
         .daily
         .iter()
@@ -153,7 +166,7 @@ fn storm_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
     if !triggered {
         return None;
     }
-    let mut rows = Vec::new();
+    let mut details = Vec::new();
     if cape >= 500.0 {
         let tier = if cape >= 2500.0 {
             "strongly unstable"
@@ -162,28 +175,59 @@ fn storm_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
         } else {
             "marginal"
         };
-        rows.push((
-            "Storm fuel (CAPE)".to_string(),
-            format!("{cape:.0} J/kg, {tier}"),
-        ));
+        details.push(("CAPE".to_string(), format!("{cape:.0} J/kg, {tier}")));
     }
+    let mut rows = Vec::new();
     if gust >= 25.0 {
         rows.push((
-            "Peak gust (48h)".to_string(),
-            format!("{gust:.0} mph at {}", format_hm(gust_epoch, &s.timezone)),
+            "Peak gust · next 48h".to_string(),
+            format!(
+                "{} · {} {}",
+                fmt_wind(gust, prefs),
+                format_wday_short(gust_epoch, &s.timezone),
+                format_hm(gust_epoch, &s.timezone)
+            ),
         ));
     }
     if p_drop.abs() >= 1.0 {
-        rows.push((
+        details.push((
             "Pressure (6h)".to_string(),
             format!("{}{:.1} hPa", if p_drop >= 0.0 { "+" } else { "" }, p_drop),
         ));
     }
+    // Gusts or a pressure fall alone do not establish thunderstorm potential.
+    let (title, icon, summary, note) = if cape >= 1500.0 {
+        (
+            "Storm potential",
+            "cloud-lightning",
+            "Conditions favor thunderstorm growth.",
+            "Storms still need moisture and a trigger to develop.",
+        )
+    } else if gust >= 35.0 {
+        (
+            "Gusty weather",
+            "wind",
+            "Strong wind gusts are forecast.",
+            "",
+        )
+    } else {
+        (
+            "Changing weather",
+            "cloud",
+            "Pressure is falling quickly.",
+            "This can signal an approaching weather system.",
+        )
+    };
     Some(ConditionCard {
-        icon: "cloud-lightning",
-        title: "Storm potential",
+        icon,
+        title,
+        summary,
+        note,
+        kind: "storm",
         rows,
+        details,
         alert: cape >= 2500.0 || gust >= 50.0,
+        ..Default::default()
     })
 }
 
@@ -202,31 +246,29 @@ fn heat_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
     if wb < 78.0 && feels < 102.0 {
         return None;
     }
-    let mut rows = Vec::new();
+    let mut temperatures = Vec::new();
     if feels > 0.0 {
-        rows.push(("Feels like (peak)".to_string(), format!("{feels:.0}F")));
+        temperatures.push(("Feels like", "Today's peak", feels));
     }
     if wb > 0.0 {
-        rows.push((
-            "Wet bulb (peak)".to_string(),
-            format!(
-                "{wb:.0}F{}",
-                if wb >= 80.0 {
-                    ", evaporative cooling limit"
-                } else {
-                    ""
-                }
-            ),
-        ));
+        temperatures.push(("Wet bulb", "Peak in next 24h", wb));
     }
     Some(ConditionCard {
         icon: "thermometer",
         title: "Heat",
-        rows,
+        kind: "heat",
+        summary: "High heat in the forecast.",
+        note: if wb > 0.0 {
+            "Wet bulb reflects how much evaporation can cool the air. Higher values mean less cooling."
+        } else {
+            ""
+        },
+        temperatures,
         // Escalate on EITHER a dangerous wet bulb OR an extreme feels-like: a
         // dry-heat climate (very high apparent temp, low/absent wet bulb) is
         // still dangerous and would otherwise never leave the calm state.
         alert: wb >= 82.0 || feels >= 108.0,
+        ..Default::default()
     })
 }
 
@@ -234,13 +276,18 @@ fn heat_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
 /// their condition holds. Absent conditions render NOTHING (no header).
 #[component]
 pub fn ConditionCards(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
     move || {
         let s = snap.get();
-        let cards: Vec<ConditionCard> =
-            [winter_card(&s), fog_card(&s), storm_card(&s), heat_card(&s)]
-                .into_iter()
-                .flatten()
-                .collect();
+        let cards: Vec<ConditionCard> = [
+            winter_card(&s),
+            fog_card(&s),
+            storm_card(&s, prefs.get()),
+            heat_card(&s),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if cards.is_empty() {
             return ().into_any();
         }
@@ -248,14 +295,14 @@ pub fn ConditionCards(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
             <section class="condition-cards" aria-label="Active weather conditions">
                 <header class="forecast-section-head">
                     <h2 class="forecast-section-title">"Heads up"</h2>
-                    <span class="forecast-section-meta">"conditions worth knowing about"</span>
+                    <span class="forecast-section-meta">"Forecast outlook"</span>
                 </header>
                 <div class="condition-cards-row">
                     {cards
                         .into_iter()
                         .map(|c| {
                             view! {
-                                <article class=if c.alert {
+                                <article data-condition=c.kind class=if c.alert {
                                     "condition-card is-alert"
                                 } else {
                                     "condition-card"
@@ -264,6 +311,18 @@ pub fn ConditionCards(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                                         <crate::components::ui::Icon name=c.icon size=18/>
                                         <span class="condition-card__title">{c.title}</span>
                                     </header>
+                                    {(!c.summary.is_empty()).then(|| view! { <p class="condition-card__summary">{c.summary}</p> })}
+                                    {(!c.temperatures.is_empty()).then(|| view! {
+                                        <dl class="condition-card__temperatures">
+                                            {c.temperatures.into_iter().map(|(label, window, value)| view! {
+                                                <div class="condition-temperature">
+                                                    <dt>{label}<small>{window}</small></dt>
+                                                    <dd><TemperatureValue value=value/></dd>
+                                                </div>
+                                            }).collect::<Vec<_>>()}
+                                        </dl>
+                                    })}
+                                    {(!c.note.is_empty()).then(|| view! { <p class="condition-card__note">{c.note}</p> })}
                                     <dl class="condition-card__rows">
                                         {c.rows
                                             .into_iter()
@@ -277,6 +336,16 @@ pub fn ConditionCards(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                                             })
                                             .collect::<Vec<_>>()}
                                     </dl>
+                                    {(!c.details.is_empty()).then(|| view! {
+                                        <details class="condition-card__details">
+                                            <summary>"Forecast details"</summary>
+                                            <dl class="condition-card__rows">
+                                                {c.details.into_iter().map(|(k, v)| view! {
+                                                    <div class="kv"><dt class="k">{k}</dt><dd class="v">{v}</dd></div>
+                                                }).collect::<Vec<_>>()}
+                                            </dl>
+                                        </details>
+                                    })}
                                 </article>
                             }
                             .into_any()
@@ -318,7 +387,7 @@ mod tests {
             fog_card(&s).is_none(),
             "visibility 0 means unknown, not fog"
         );
-        assert!(storm_card(&s).is_none());
+        assert!(storm_card(&s, UnitPrefs::default()).is_none());
         assert!(heat_card(&s).is_none());
     }
 
@@ -356,22 +425,38 @@ mod tests {
     fn storm_triggers_on_cape_gusts_or_pressure_fall() {
         let mut s = base();
         s.daily[0].cape_max_jkg = 2000.0;
-        assert!(storm_card(&s).is_some());
+        let card = storm_card(&s, UnitPrefs::default()).unwrap();
+        assert_eq!(card.title, "Storm potential");
+        assert!(card.rows.is_empty(), "CAPE belongs in expandable details");
+        assert_eq!(card.details.len(), 1);
 
         let mut s2 = base();
         s2.hourly[5].wind_gusts_mph = 40.0;
-        assert!(storm_card(&s2).is_some());
+        let card = storm_card(&s2, UnitPrefs::default()).unwrap();
+        assert_eq!(
+            card.title, "Gusty weather",
+            "wind alone is not a thunderstorm forecast"
+        );
+        let metric = storm_card(&s2, crate::components::units_fmt::METRIC).unwrap();
+        assert!(metric.rows[0].1.contains("km/h"));
 
         let mut s3 = base();
         s3.hourly[0].pressure_msl_hpa = 1012.0;
         s3.hourly[6].pressure_msl_hpa = 1008.0;
-        assert!(storm_card(&s3).is_some(), "4 hPa fall in 6h triggers");
+        assert!(
+            storm_card(&s3, UnitPrefs::default()).is_some(),
+            "4 hPa fall in 6h triggers"
+        );
+        assert_eq!(
+            storm_card(&s3, UnitPrefs::default()).unwrap().title,
+            "Changing weather"
+        );
 
         // A pressure RISE of the same magnitude must not.
         let mut s4 = base();
         s4.hourly[0].pressure_msl_hpa = 1008.0;
         s4.hourly[6].pressure_msl_hpa = 1012.0;
-        assert!(storm_card(&s4).is_none());
+        assert!(storm_card(&s4, UnitPrefs::default()).is_none());
     }
 
     #[test]
@@ -387,6 +472,15 @@ mod tests {
 
         let mut s3 = base();
         s3.daily[0].apparent_temp_max_f = 104.0;
-        assert!(heat_card(&s3).is_some());
+        let card = heat_card(&s3).unwrap();
+        assert_eq!(
+            card.temperatures.len(),
+            1,
+            "unreported wet bulb must stay absent"
+        );
+        assert_eq!(
+            card.temperatures[0].2, 104.0,
+            "store Fahrenheit, convert at display"
+        );
     }
 }

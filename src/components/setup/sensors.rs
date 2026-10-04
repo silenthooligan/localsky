@@ -486,7 +486,7 @@ fn gateway_card(
                 <span class="source-health__kind">{kind}</span>
             </div>
             <div class="source-health__status" class:u-row=true>
-                <span class="source-health__dot" style="background: var(--verdict-run)"></span>
+                <span class="source-health__dot" style="background: var(--status-online)"></span>
                 <span>{host}</span>
                 <span class:u-faint=true>"·"</span>
                 <span>{count_label}</span>
@@ -527,7 +527,7 @@ fn soil_probe_row(
         let pill_style = if low {
             "--sc: var(--warn, #d9a200); display:inline-flex; align-items:center; gap:0.25rem"
         } else {
-            "--sc: var(--verdict-run); display:inline-flex; align-items:center; gap:0.25rem"
+            "--sc: var(--status-online); display:inline-flex; align-items:center; gap:0.25rem"
         };
         chips.push(view! {
             <span class="soil-card__pill" style=pill_style>

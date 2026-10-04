@@ -37,7 +37,7 @@ pub fn apply(
         if wet.planned_seconds == 0 && dry.planned_seconds > 0 {
             wet.planned_seconds = 0;
             wet.due = true;
-            wet.planning_reason = Some("The soil estimate spans the watering threshold; automatic watering is held until rain, water-use history or a calibrated reading resolves the need".into());
+            wet.planning_reason = Some("The soil estimate crosses the watering threshold. Automatic watering needs more evidence from rain, watering history or a calibrated reading.".into());
         }
         wet.initial_uncertainty_mm = uncertainty;
         wet.planning_reason = Some(format!("{} Estimated depletion is {:.1}–{:.1} mm; the starting soil state is not yet fully resolved.",
@@ -62,7 +62,7 @@ pub fn apply(
         .take(opportunity)
         .any(|day| day.rain_mm.is_none())
     {
-        let reason = "Rain coverage is incomplete before the next legal watering morning; automatic watering is held".to_string();
+        let reason = "Rain coverage is incomplete before the next permitted watering morning; automatic watering cannot start".to_string();
         plan.planned_seconds = 0;
         plan.deferred_kind = Some(super::soil_schedule::SoilDeferKind::ForecastUnavailable);
         plan.deferred_reason = Some(reason.clone());

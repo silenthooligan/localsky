@@ -18,6 +18,16 @@ use crate::config::schema::*;
 /// endpoint or a push keypair. The boot path synthesizes a config from it
 /// exactly once, when no config file exists yet.
 pub fn legacy_env_present() -> bool {
+    legacy_env_present_with(|key| env::var(key).ok())
+}
+
+fn legacy_env_present_with(read: impl Fn(&str) -> Option<String>) -> bool {
+    // Supervisor injects HA credentials, and the wrapper creates VAPID keys on
+    // every fresh install. Those are capabilities, not a configured legacy yard.
+    // Existing HAOS installs load their saved file before this check is called.
+    if read("SUPERVISOR_TOKEN").is_some_and(|v| !v.trim().is_empty()) {
+        return false;
+    }
     [
         "WEATHER_APP_LAT",
         "HA_URL",
@@ -28,7 +38,26 @@ pub fn legacy_env_present() -> bool {
         "VAPID_PUBLIC_KEY",
     ]
     .iter()
-    .any(|k| env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false))
+    .any(|k| read(k).is_some_and(|v| !v.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod environment_detection {
+    use super::legacy_env_present_with;
+
+    #[test]
+    fn supervisor_capabilities_do_not_invent_a_configured_yard() {
+        assert!(!legacy_env_present_with(|key| match key {
+            "SUPERVISOR_TOKEN" | "VAPID_PUBLIC_KEY" | "HA_TOKEN" => Some("test-only".into()),
+            "HA_URL" => Some("http://supervisor/core".into()),
+            _ => None,
+        }));
+        assert!(legacy_env_present_with(
+            |key| (key == "HA_URL").then(|| "http://legacy-ha".into())
+        ));
+        assert!(!legacy_env_present_with(|_| None));
+        assert!(!legacy_env_present_with(|_| Some("  ".into())));
+    }
 }
 
 /// Build a Config from process environment variables. The returned config

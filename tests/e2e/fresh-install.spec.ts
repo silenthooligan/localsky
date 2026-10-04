@@ -71,7 +71,7 @@ test("the wizard's happy path writes a config with a rule and a zone", async ({ 
   // Controller: no hardware, simulate.
   await expect(page).toHaveURL(/\/setup\/controllers/);
   await page.getByRole("button", { name: /simulate/i }).click();
-  await expect(page.getByText(/dry[- ]run|simulat/i).first()).toBeVisible();
+  await expect(page.locator('.setup-shell .cond-row__name').filter({hasText:/^simulated$/})).toBeVisible();
   await next(page);
 
   // Zones: one zone on the simulated controller.
@@ -168,4 +168,50 @@ test("a zone edit from settings persists", async ({ page, request }) => {
   });
   const cfg = await (await request.get("/api/v1/config")).json();
   expect(cfg.zones.front_lawn.display_name).toBe("Front Lawn (edited)");
+});
+
+test("re-entering setup explicitly chooses current settings, a saved draft, or a blank draft", async ({page,request})=>{
+  test.setTimeout(90_000);
+  const config=await (await request.get('/api/v1/config')).json();
+  expect((await (await request.get('/api/wizard/state')).json()).draft_present).toBe(false);
+  const writes:string[]=[];
+  page.on('request',r=>{if(r.method()!=='GET' && new URL(r.url()).pathname.includes('/wizard/')) writes.push(r.method());});
+  await open(page,'/setup');
+  await expect(page.getByRole('button',{name:'Edit current setup',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Resume saved draft',exact:true})).toHaveCount(0);
+  expect(writes).toEqual([]);
+  expect((await (await request.get('/api/wizard/state')).json()).draft_present).toBe(false);
+
+  await page.getByRole('button',{name:'Edit current setup',exact:true}).click();
+  await expect(page.getByPlaceholder('e.g. 40.7128')).toHaveValue(String(config.deployment.location.lat));
+  const seeded=await (await request.get('/api/wizard/draft')).json();
+  expect(seeded.config).toEqual(config);
+  await page.getByPlaceholder('e.g. 40.7128').fill('30.25');
+  await page.getByPlaceholder('e.g. 40.7128').blur();
+  await expect.poll(async()=> (await (await request.get('/api/wizard/draft')).json()).config.deployment.location.lat).toBe(30.25);
+
+  await open(page,'/setup');
+  await expect(page.getByRole('button',{name:'Resume saved draft',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Resume saved draft',exact:true}).click();
+  await expect(page.getByPlaceholder('e.g. 40.7128')).toHaveValue('30.25');
+  await expect(page.locator('.setup-live-intro')).toContainText('Your saved draft is loaded');
+  await page.getByRole('combobox',{name:'Jump to step',exact:true}).selectOption('zones');
+  await expect(page.locator('.setup-zone-list')).toContainText('Front Lawn (edited)');
+  await expect(page.getByRole('button',{name:'Edit current setup',exact:true})).toHaveCount(0);
+
+  await open(page,'/setup');
+  await page.getByRole('button',{name:'Edit current setup',exact:true}).click();
+  await expect(page.getByPlaceholder('e.g. 40.7128')).toHaveValue(String(config.deployment.location.lat));
+  await expect(page.locator('.setup-live-intro')).toContainText('Your current settings are loaded');
+  await open(page,'/setup');
+  await page.getByText('Start from scratch',{exact:true}).click();
+  await page.getByRole('button',{name:'Create blank draft',exact:true}).click();
+  await expect(page.locator('.setup-hero')).toBeVisible();
+  await expect(page.locator('.setup-live-intro')).toContainText("You're editing a blank draft");
+  await expect.poll(async()=> (await (await request.get('/api/wizard/draft')).json()).license_accepted).toBe(true);
+  const blank=await (await request.get('/api/wizard/draft')).json();
+  expect(blank.config.controllers).toEqual([]);
+  expect(blank.config.zones).toEqual({});
+  expect(await (await request.get('/api/v1/config')).json()).toEqual(config);
+  expect((await request.delete('/api/wizard/draft')).ok()).toBe(true);
 });

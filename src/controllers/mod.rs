@@ -77,6 +77,8 @@ pub use rachio::Rachio;
 pub use rainbird::Rainbird;
 pub use registry::ControllerRegistry;
 
+pub mod manual_session;
+pub mod notification_runs;
 pub mod restart;
 
 use std::collections::HashMap;
@@ -101,6 +103,8 @@ pub struct ZoneLocks {
     locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     command_order: Arc<tokio::sync::RwLock<()>>,
     restart_hold: restart::RestartHold,
+    pub manual_session: manual_session::ManualSession,
+    pub notification_runs: notification_runs::NotificationRuns,
 }
 
 impl ZoneLocks {

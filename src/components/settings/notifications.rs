@@ -196,9 +196,10 @@ pub fn SettingsNotifications() -> impl IntoView {
                 <Toggle
                     checked=web_push_enabled
                     label="Send push alerts".to_string()
-                    helptext="Needs a VAPID keypair (env vars or /data/keys/). Then each device subscribes below.".to_string()
+                    helptext="Save to enable alerts, then subscribe each device.".to_string()
                 />
                 <div class="push-device">
+                    <p class="settings-page__subtitle">"Get watering start and finish alerts. Use Stop from supported notifications, or tap the alert to open LocalSky."</p>
                     <div class="push-device__status">
                         <span class="push-device__label">"This device"</span>
                         <span class="push-device__state">{move || device_state.get().label()}</span>

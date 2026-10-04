@@ -3,9 +3,8 @@
 // today/tomorrow forecast, and a compact stop-all area. The persistent
 // running banner is at the top of IrrigationPage, so when something is
 // actively watering the user sees it before any of this. The tuning
-// strip mirrors the desktop placement rule: above the data when a
-// suggestion exists, in the quiet bottom slot when it only carries the
-// scorecard.
+// strip puts actionable suggestions above the data; historical rain
+// decisions live in History.
 
 use crate::components::irrigation::controls::{OverrideControl, StopAllPanel};
 use crate::components::irrigation::forecast::ForecastPanel;
@@ -36,7 +35,6 @@ pub fn MobileNow(
             }.into_any()}
             {view! { <ForecastPanel snap/> }.into_any()}
             {view! { <StopAllPanel snap/> }.into_any()}
-            {move || (!has_suggestions()).then(|| view! { <TuningStrip report/> }.into_any())}
         </div>
     }
 }

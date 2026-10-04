@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::{use_location, use_navigate};
 
 use crate::components::sources_form::SourceEditorPanel;
-use crate::components::ui::{Button, ConfirmSheet, HelpHint, Sparkline};
+use crate::components::ui::{Button, ConfirmSheet, HelpHint};
 use crate::components::units_fmt::{
     fmt_distance_mi, fmt_pressure, fmt_rain_amount, fmt_rain_rate, fmt_temp_short, fmt_wind,
     temp_unit, temp_value, use_unit_prefs, UnitPrefs,
@@ -106,8 +106,9 @@ fn parse_sel(search: &str) -> Sel {
 
 fn dot_color(status: &str) -> &'static str {
     match status {
-        "fresh" => "var(--verdict-run)",
+        "active" | "watching" | "fresh" => "var(--status-online)",
         "stale" => "var(--accent-warn)",
+        "offline" => "var(--accent-danger)",
         _ => "var(--verdict-off)",
     }
 }
@@ -118,20 +119,14 @@ fn dot_color(status: &str) -> &'static str {
 /// dot never carries health alone (the dot+text status-chip law); a
 /// deliberately-disabled source reads a calm "off", never the fault word.
 fn status_chip(status: &str, enabled: bool) -> (&'static str, &'static str) {
-    if !enabled {
-        return ("status-chip--unknown", "off");
-    }
-    match status {
-        "active" => ("status-chip--online", "active"),
-        "watching" => ("status-chip--unknown", "watching"),
-        "standby" => ("status-chip--unknown", "standby"),
-        "falling_through" => ("status-chip--stale", "falling through"),
-        "offline" => ("status-chip--offline", "offline"),
-        // Legacy freshness strings, congruent with dot_color above.
-        "fresh" => ("status-chip--online", "fresh"),
-        "stale" => ("status-chip--stale", "stale"),
-        _ => ("status-chip--unknown", "unknown"),
-    }
+    let state = crate::components::settings::source_status::presentation(status, enabled, false);
+    let class = match state.tone {
+        "fresh" => "status-chip--online",
+        "stale" => "status-chip--stale",
+        "offline" => "status-chip--offline",
+        _ => "status-chip--unknown",
+    };
+    (class, state.label)
 }
 
 fn dir_card(deg: f64) -> &'static str {
@@ -518,7 +513,7 @@ pub fn SensorsPage(
                     <SensorRow
                         active=Signal::derive(move || selected.get() == Sel::Tempest)
                         on_pick=Callback::new(move |()| nav_to.run(Sel::Tempest))
-                        dot=Signal::derive(move || if weather.get().last_packet_epoch > 0 { "var(--verdict-run)" } else { "var(--verdict-off)" })
+                        dot=Signal::derive(move || if weather.get().last_packet_epoch > 0 { "var(--status-online)" } else { "var(--verdict-off)" })
                         title="Tempest".to_string()
                         sub=Signal::derive(move || {
                             let p = prefs.get();
@@ -548,7 +543,7 @@ pub fn SensorsPage(
                                     <SensorRow
                                         active=Signal::derive(move || selected.get() == Sel::Soil(s_for_active.clone()))
                                         on_pick=Callback::new(move |()| nav_to.run(Sel::Soil(s_for_pick.clone())))
-                                        dot=Signal::derive(move || if cur.is_some() { "var(--verdict-run)" } else { "var(--verdict-off)" })
+                                        dot=Signal::derive(move || if cur.is_some() { "var(--status-online)" } else { "var(--verdict-off)" })
                                         title=name
                                         sub=Signal::derive(move || match cur { Some(c) => format!("{c:.0}% moisture"), None => "probe offline".into() })
                                     />
@@ -890,7 +885,7 @@ fn SoilDetail(
         }
         (SoilBand::Saturated, Some(c)) => (format!("{c:.0}%"), "SATURATED", "var(--verdict-skip)"),
         (SoilBand::Dry, Some(c)) => (format!("{c:.0}%"), "DRY", "var(--accent-warm)"),
-        (SoilBand::Healthy, Some(c)) => (format!("{c:.0}%"), "HEALTHY", "var(--verdict-run)"),
+        (SoilBand::Healthy, Some(c)) => (format!("{c:.0}%"), "HEALTHY", "var(--accent-good)"),
     };
     let proj = z.predicted_pct.clone();
     let uncalibrated = z.status == "uncalibrated";
@@ -918,8 +913,8 @@ fn SoilDetail(
             {uncalibrated.then(|| view! { <p class="muted">"This probe reports relative moisture. A water-volume calibration is needed for a percentage forecast."</p> })}
             {(proj.len() > 1).then(|| view! {
                 <section class="sensor-group">
-                    <h3 class="sensor-group__title">"7-day projection (rain + ET, no watering)"</h3>
-                    <Sparkline points=proj accent=color.to_string() height=48/>
+                    <h3 class="sensor-group__title">"Soil moisture outlook"</h3>
+                    <crate::components::ui::line_chart::SoilProjectionChart points=proj/>
                 </section>
             })}
             // Manage the probe where it is inspected: removing clears the

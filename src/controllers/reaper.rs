@@ -345,7 +345,7 @@ async fn record_marker(runs: &RunsStore, run: &ActiveRun, now: i64, reason: &str
 /// A durable per-zone hold, consumed by smart-morning catch-up. Unknown
 /// applied water must neither fill the balance nor invite a second full run.
 pub const RESTART_UNKNOWN_DURATION_REASON: &str =
-    "Watering held after restart: the previous run's watering duration could not be verified";
+    "Watering cannot start after restart: the previous run's watering duration could not be verified";
 
 /// An explicit dispatched segment spanning the stop instant. The safety
 /// ledger's deadline can cover several segments, soak gaps, and grace, so

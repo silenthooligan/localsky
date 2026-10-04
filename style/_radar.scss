@@ -395,21 +395,22 @@
 .condition-cards { margin-bottom: var(--space-4); }
 .condition-cards-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 0.6rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: var(--space-3);
 }
 .condition-card {
   @include surface($radius: (var(--radius-md)), $shadow: null);
 
-  padding: 0.7rem 0.85rem;
+  min-width: 0;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  gap: var(--space-3);
 }
 .condition-card__head {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: var(--space-2);
   color: var(--text);
   font-weight: 600;
 }
@@ -417,19 +418,54 @@
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-2);
   .kv {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     gap: var(--space-3);
     align-items: baseline;
   }
   .k { color: var(--text-dim); font-size: var(--text-body-sm); }
   .v {
+    margin: 0 0 0 auto;
     color: var(--text-bright);
     font-family: var(--font-mono);
     font-size: var(--text-body-sm);
     text-align: right;
+  }
+}
+.condition-card__summary { margin: 0; font-weight: 600; color: var(--text-bright); }
+.condition-card__note { margin: 0; font-size: var(--text-body-sm); color: var(--text-dim); line-height: 1.5; }
+.condition-card__temperatures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+.condition-temperature {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-3);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-sm);
+  dt { font-size: var(--text-body-sm); font-weight: 600; }
+  small { display: block; margin-top: var(--space-1); font-size: var(--text-meta); color: var(--text-dim); font-weight: 400; }
+  dd { margin: auto 0 0; padding-top: var(--space-3); font: 700 var(--text-stat)/1 var(--font-mono); color: var(--text-bright); }
+}
+.condition-card__details {
+  margin-top: auto;
+  border-top: 1px solid var(--elev-border);
+  summary {
+    padding: var(--space-3) 0;
+    min-height: 44px;
+    cursor: pointer;
+    font-size: var(--text-body-sm);
+    font-weight: 600;
+    color: var(--text-bright);
+    &:hover { text-decoration: underline; }
+    &:focus-visible { @include focus-ring(2px); }
   }
 }
 .condition-card.is-alert {
@@ -734,7 +770,7 @@
 }
 .data-source-chain__tag--custom {
   color: var(--accent);
-  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--elev-1));
   border-color: color-mix(in oklab, var(--accent) 40%, transparent);
 }
 .data-source-chain__reset { flex: 0 0 auto; }
@@ -766,7 +802,6 @@
   // A disabled / removed source still in the chain: struck through, dimmed, so
   // it is never silently dropped.
   &--off {
-    opacity: 0.7;
     --entity-color: var(--text-faint);
 
     .data-source-chain__name {
@@ -818,7 +853,7 @@
 }
 .data-source-chain__nature--measured {
   color: var(--accent-good);
-  background: color-mix(in oklab, var(--accent-good) 14%, transparent);
+  background: color-mix(in oklab, var(--accent-good) 8%, var(--elev-1));
   border-color: color-mix(in oklab, var(--accent-good) 40%, transparent);
 }
 .data-source-chain__nature--model {
@@ -828,7 +863,7 @@
 }
 .data-source-chain__nature--nowcast {
   color: var(--accent-2, var(--accent));
-  background: color-mix(in oklab, var(--accent-2, var(--accent)) 14%, transparent);
+  background: color-mix(in oklab, var(--accent-2, var(--accent)) 8%, var(--elev-1));
   border-color: color-mix(in oklab, var(--accent-2, var(--accent)) 40%, transparent);
 }
 // Live-now marker: reporting-now (green), standby/backstop (dim), off (faint).
@@ -913,10 +948,11 @@
   &:hover { text-decoration: underline; }
 }
 .settings-page__title {
+  font-family: var(--font-editorial);
   margin: var(--space-1) 0 var(--space-2);
   color: var(--text-bright);
   font-size: var(--text-h1);
-  font-weight: 700;
+  font-weight: 400;
   letter-spacing: var(--tracking-tight);
 }
 .settings-page__subtitle {

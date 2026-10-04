@@ -152,12 +152,15 @@ test.describe("fixed demo visuals " + screen.name, () => {
       await expect.poll(() => [
         ...Object.keys(streams), "/api/info", "/api/health", "/api/irrigation/tuning",
       ].every((key) => served.has(key))).toBe(true);
+      if (p.path === "/irrigation" || p.path === "/zones") {
+        await expect.poll(() => served.has("/api/irrigation/quick-run")).toBe(true);
+      }
 
       // CI installs DejaVu. Explicit families avoid selecting an optional Inter,
       // Segoe UI, or system monospace font on another acceptance host.
       await page.addStyleTag({ content: `:root {
-        --font-sans: "DejaVu Sans", sans-serif;
-        --font-display: "DejaVu Sans", sans-serif;
+        --font-sans: "DM Sans", sans-serif;
+        --font-display: "DM Sans", sans-serif;
         --font-mono: "DejaVu Sans Mono", monospace;
       }` });
       await page.evaluate(() => document.fonts.ready);
@@ -204,6 +207,9 @@ test.describe("fixed demo visuals " + screen.name, () => {
         return { pageOverflow: document.documentElement.scrollWidth > innerWidth, outside, clippedStats };
       });
       expect(layout).toEqual({ pageOverflow: false, outside: [], clippedStats: [] });
+      const truncated = await page.locator('.home-watering-verdict > span, .runlog-row__zone').evaluateAll(elements =>
+        elements.filter(e => e.scrollWidth > e.clientWidth + 1 && getComputedStyle(e).overflow === 'hidden').map(e => e.textContent));
+      expect(truncated, "watering reasons and zone names must remain readable").toEqual([]);
 
       expect(unexpected, "unhandled visual fixture requests").toEqual([]);
       expect(errors, `console/page errors on ${p.path}`).toEqual([]);

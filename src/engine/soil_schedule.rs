@@ -568,7 +568,7 @@ pub fn size_refill(
             let headroom_s = headroom_s.clamp(0, u32::MAX as i64) as u32;
             if headroom_s < capped_s {
                 let reason = format!(
-                    "held to the weekly ceiling: {:.2} in of the {:.2} in target delivered \
+                    "limited by the weekly target: {:.2} in of the {:.2} in target delivered \
                      in the last 7 days, {:.2} in of headroom left",
                     crate::units::mm_to_in(delivered_trailing_7d_mm.max(0.0)),
                     target_in,
@@ -856,7 +856,7 @@ pub fn plan_zone_with_coverage(
     let Some(expected_next_24h_rain_mm) = expected_next_24h_rain_mm else {
         plan.deferred_kind = Some(SoilDeferKind::ForecastUnavailable);
         plan.deferred_reason =
-            Some("Rain forecast unavailable for the next 24 hours; watering held".into());
+            Some("Rain forecast unavailable for the next 24 hours; watering skipped".into());
         return plan;
     };
     // Deferring asks how much of the forecast RAIN will reach the roots.
@@ -914,7 +914,7 @@ pub fn today_row(plan: &SoilZonePlan, cap_minutes: u32) -> (u32, String, bool) {
         return (
             0,
             format!(
-                "soil bucket holds: {:.1} of {:.1} mm depleted; waters when depletion \
+                "No watering needed: {:.1} of {:.1} mm depleted; waters when depletion \
                  crosses {:.1} mm",
                 plan.depletion_mm, plan.taw_mm, plan.raw_mm
             ),
@@ -934,7 +934,7 @@ pub fn today_row(plan: &SoilZonePlan, cap_minutes: u32) -> (u32, String, bool) {
             plan.planned_seconds,
             plan.ceiling_reason
                 .clone()
-                .unwrap_or_else(|| "held to the weekly ceiling".to_string()),
+                .unwrap_or_else(|| "limited by the weekly target".to_string()),
             plan.session_capped,
         );
     }
@@ -951,7 +951,7 @@ pub fn today_row(plan: &SoilZonePlan, cap_minutes: u32) -> (u32, String, bool) {
         // row says that rather than reading like an ordinary refill.
         let _ = write!(
             reason,
-            "; deferred as far as it can be, held for forecast rain {} mornings running",
+            "; rain deferral limit reached after {} mornings",
             plan.consecutive_defers
         );
     }
@@ -1798,7 +1798,8 @@ mod tests {
         let (seconds, reason, _) = today_row(&plan, p.max_dur_s / 60);
         assert!(seconds > 0, "the bound waters");
         assert!(
-            reason.starts_with("soil refill:") && reason.contains("deferred as far as it can be"),
+            reason.starts_with("soil refill:")
+                && reason.contains("rain deferral limit reached after 3 mornings"),
             "{reason}"
         );
         // Rain that ACTUALLY falls ends the run: the bucket refills, the
@@ -1971,7 +1972,7 @@ mod tests {
         assert_eq!(
             sized.ceiling_reason.as_deref(),
             Some(
-                "held to the weekly ceiling: 0.80 in of the 1.00 in target delivered in \
+                "limited by the weekly target: 0.80 in of the 1.00 in target delivered in \
                  the last 7 days, 0.20 in of headroom left"
             )
         );

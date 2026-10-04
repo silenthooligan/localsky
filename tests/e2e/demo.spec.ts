@@ -2,6 +2,23 @@ import { test, expect } from "@playwright/test";
 
 test.use({ serviceWorkers: "block" });
 
+test("demo simulator calculates without changing configuration or run history", async ({ page, request }) => {
+  const config = await (await request.get('/api/v1/config')).json();
+  const runs = (await (await request.get('/api/v1/irrigation/history?days=30')).json()).runs;
+  await page.goto('/simulator');
+  await expect(page.locator('html')).toHaveAttribute('data-hydrated', 'true');
+  await expect(page.locator('.sim-verdict')).toBeVisible();
+  const response = await request.post('/api/v1/irrigation/simulate', { data: { wind_now_mph: 100 } });
+  expect(response.status()).toBe(200);
+  expect((await response.json()).hypothetical.verdict).toBe('skip');
+  expect(await (await request.get('/api/v1/config')).json()).toEqual(config);
+  expect((await (await request.get('/api/v1/irrigation/history?days=30')).json()).runs).toEqual(runs);
+  // Exercise the guard with an invalid action, so this can never start a valve.
+  const blocked = await request.post('/api/v1/irrigation/action', { data: {} });
+  expect(blocked.status()).toBe(403);
+  expect((await blocked.json()).error).toBe('demo_read_only');
+});
+
 test("demo history has recent watering and daily skip reasons", async ({ page, request }) => {
   await expect.poll(async () => {
     const response = await request.get("/api/v1/irrigation/history?days=30");
@@ -32,12 +49,20 @@ test("demo setup explains read-only mode and keeps the write guard", async ({ pa
   await expect(page.locator(".setup-demo-intro")).toBeVisible();
   await expect(page.locator(".setup-demo-intro")).toContainText("This demo is read-only");
   await expect(page.locator(".setup-live-intro")).toBeHidden();
-  const startFresh = page.getByRole("button", { name: "Start fresh", exact: true });
-  if (await startFresh.isVisible()) await startFresh.click();
+  await expect(page.locator("html")).toHaveAttribute("data-hydrated", "true");
   await expect(page.locator(".setup-footer [role=alert]")).toHaveText("This demo is read-only. Changes and device probes are disabled.");
   await expect(page.locator(".setup-shell")).not.toContainText("LS_API_REJECTED");
   const response = await request.put("/api/v1/wizard/draft", { data: {} });
   expect(response.status()).toBe(403);
   expect((await response.json()).error).toBe("demo_read_only");
   await page.locator(".setup-shell").screenshot({ path: "test-results/demo-setup.png" });
+  await page.getByRole("combobox", { name: "Jump to step", exact: true }).selectOption("controllers");
+  await expect(page).toHaveURL(/\/setup\/controllers$/);
+  await expect(page.getByRole("button", { name: "+ Add a controller", exact: true })).toBeVisible();
+  // A direct visit starts a new shell too. Both routes must stay explorable
+  // while every real write continues to receive the server's 403.
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-hydrated", "true");
+  await expect(page.getByRole("button", { name: "+ Add a controller", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit current setup", exact: true })).toHaveCount(0);
 });

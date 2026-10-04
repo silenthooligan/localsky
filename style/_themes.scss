@@ -23,42 +23,44 @@
 // extending the same placeholder from both produces an error). Mixin
 // inclusion is duplication-by-design and works in any context.
 @mixin localsky-light-tokens {
-  --bg-deep: var(--brand-snow-50);
+  --bg-deep: #eeefe5;
   --bg-panel: #ffffff;
-  --bg-panel-soft: var(--brand-snow-100);
+  --bg-panel-soft: #e3ece5;
   // Light page wash: a faint cool snow tint, not dark navy.
-  --bg-wash: var(--brand-snow-100);
+  --bg-wash: #eeefe5;
 
-  --text: var(--brand-ink-800);
-  --text-bright: var(--brand-ink-900);
+  --text: #263d37;
+  --text-bright: #182c2b;
   // Soft sits between body text and dim, same role as the dark theme's.
-  --text-soft: color-mix(in oklab, var(--brand-ink-800) 60%, var(--brand-ink-700));
+  --text-soft: #42574b;
   // Light-mode dim/faint are intentionally deeper than the dark-mode
   // equivalents: at 96 to 98% L backgrounds the mid-gray inks read as
   // washed-out, so anchor body-secondary on ink-700 and eyebrows on
   // ink-600 for the contrast the dark scheme gets for free.
-  --text-dim: var(--brand-ink-700);
-  --text-faint: var(--brand-ink-600);
+  --text-dim: #546358;
+  --text-faint: #5b6a5f;
 
-  --border: var(--brand-snow-200);
-  --border-strong: var(--brand-ink-200);
+  --border: #b3c5b8;
+  --border-strong: #7e9c88;
 
-  --accent: var(--brand-blue-600);
-  --accent-text: var(--brand-blue-700);
-  --accent-cool: var(--brand-blue-500);
-  --accent-rain: var(--brand-blue-500);
-  --accent-good: var(--brand-teal-600);
+  --accent: #006ba3;
+  --accent-text: #006ba3;
+  --accent-cool: #006ba3;
+  --accent-rain: #006f66;
+  --accent-good: #337437;
   // Deepened for AA text: the old #d97a00 / #c97a00 measured 2.96:1 and
   // 3.18:1 on snow-50 (3.12 / 3.35 on white) yet color normal-size text
   // (chain fall-through warnings, restart banners, stale badges). These
   // keep the warm-orange vs amber hue split and clear 4.5:1 on both
   // white and snow-50 (warm 4.67:1, warn 4.78:1 on snow-50).
-  --accent-warm: #a85e00;
-  --accent-warn: #a06000;
+  --accent-warm: #935212;
+  --accent-warn: #935212;
   --accent-hot:  #d63838;
   --accent-danger: #c43b3b;
-  --accent-lightning: #c69400;
-  --accent-water: var(--brand-blue-500);
+  --accent-lightning: #846100;
+  --accent-uv-high: #9c4d11;
+  --accent-uv-extreme: #8b3c93;
+  --accent-water: #006ba3;
 
   // Legacy aliases → v2 elevation (light). Light separates by shadow,
   // so glass/clay surfaces become white cards with the v2 shadow ramp.
@@ -84,29 +86,32 @@
   --grad-flow: linear-gradient(135deg, var(--brand-blue-600) 0%, var(--brand-teal-600) 100%);
   // Light --grad-flow already passes AA with white (blue-600 -> teal-600, min
   // 4.67:1), so the CTA gradient just reuses it here.
-  --grad-flow-cta: var(--grad-flow);
+  --grad-flow-cta: linear-gradient(#006ba3, #006ba3);
 
   --focus-halo: 0 0 0 4px rgba(20, 144, 220, 0.22);
 
   // v2 elevation: LIGHT separates surfaces by SHADOW DEPTH, not fill,
   // so the elev fills stay near-white and the shadow ramp does the work.
-  --elev-0: var(--brand-snow-50);
-  --elev-1: #ffffff;
-  --elev-2: #ffffff;
+  --elev-0: var(--bg-deep);
+  --elev-1: var(--bg-panel);
+  --elev-2: var(--bg-panel-soft);
   --elev-3: #ffffff;
-  --elev-line: rgba(15, 21, 37, 0.07);
-  --elev-border: rgba(15, 21, 37, 0.10);
-  --elev-border-strong: rgba(15, 21, 37, 0.18);
-  --shadow-1: 0 1px 2px rgba(15, 21, 37, 0.06);
-  --shadow-2: 0 4px 14px rgba(15, 21, 37, 0.10);
+  --elev-line: #dce0d5;
+  --elev-border: #b3c5b8;
+  --elev-border-strong: #7e9c88;
+  --shadow-1: 0 1px 2px rgba(24, 44, 43, 0.03);
+  --shadow-2: 0 3px 12px rgba(24, 44, 43, 0.05);
   --shadow-3: 0 16px 40px rgba(15, 21, 37, 0.16);
-  --specular: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --specular: 0 0 0 transparent;
   // Light panels bottom out at #ffffff, so the recess goes the other way.
-  --input-bg: #e9eef8;
-  --input-bg-disabled: #eef2fa;
-  --input-border: #78849a;
-  --input-border-hover: #5d6878;
+  --input-bg: #ffffff;
+  --input-bg-disabled: #e3ece5;
+  --input-border: #7a897c;
+  --input-border-hover: #546358;
   // Light accents were already deepened for white text.
+  --chart-pressure: #7041a4;
+  --chart-et: #8a397b;
+  --chart-wind: #3d6092;
   --on-accent: #ffffff;
   --on-danger: #ffffff;
 }
@@ -116,13 +121,9 @@
 // they paint white-on-white and disappear; remap to ink-tinted overlays
 // so the affected widgets keep their structure in light mode.
 @mixin localsky-light-element-overrides {
-  // The sidebar stays dark in every theme, but its base fill is
-  // 72%-navy-over-transparent: over the dark page it reads near-black,
-  // over light mode's white page it washes to a mid gray and the
-  // (re-pinned light) nav text loses contrast. Pin an opaque navy in
-  // light mode so the side panel text stays crisp.
+  // Navigation uses the same opaque surface as the content panels.
   .sidebar {
-    background: var(--brand-navy-900);
+    background: var(--elev-1);
     border-right-color: rgba(15, 21, 37, 0.18);
   }
   .uv-bar { background: rgba(15, 21, 37, 0.08); }
@@ -130,19 +131,7 @@
   // deepens for AA text; the shared dark-ink ribbon text would drop to
   // about 3.5:1 on the deeper amber, so flip it to white (5.0:1).
   @at-root html#{&}[data-dry-run="true"]::before { color: #ffffff; }
-  // Neon-yellow text on a yellow-tinted near-white background disappears.
-  // Flip the active mode-toggle segment to a saturated amber fill with
-  // dark ink text so it still pops while staying legible on near-white.
-  .mode-toggle__seg.is-active {
-    --mode-amber: #f5b800;
-    color: var(--brand-ink-900);
-    background: linear-gradient(180deg, #ffd400 0%, #f5b800 100%);
-    border-color: var(--mode-amber);
-    box-shadow:
-      inset 0 0 0 1px color-mix(in oklab, var(--mode-amber) 70%, transparent),
-      0 0 8px color-mix(in oklab, var(--mode-amber) 45%, transparent);
-    text-shadow: none;
-  }
+
 }
 
 // The one place light mode is applied: an explicit choice, or "auto" when
@@ -162,7 +151,7 @@
 // High-contrast theme. Glass blur disabled; solid surfaces.
 // ─────────────────────────────────────────────────────────────────────
 // Brand-hinted: accent uses brand-blue-300 (the lighter shade) which
-// hits ~9:1 contrast on pure black. accent-good uses brand-teal-200 for
+// hits ~9:1 contrast on pure black. accent-good uses a distinct light green for
 // similar reasons. text-bright stays pure white; borders stay pure white.
 
 [data-theme="hc"] {
@@ -182,8 +171,9 @@
 
   --accent: var(--brand-blue-300);          // 9:1 contrast on black
   --accent-text: var(--brand-blue-200);
-  --accent-rain: var(--brand-blue-300);
-  --accent-good: var(--brand-teal-200);     // 9:1 contrast on black
+  --accent-rain: #8edcd2;
+  --accent-water: var(--brand-blue-300);
+  --accent-good: #b1f4b3;                 // distinct from rain teal on black
   --accent-warm: #ffcc00;
   --accent-warn: #ffcc00;
   --accent-hot:  #ff4040;
@@ -224,7 +214,7 @@
   --shadow-1: 0 0 0 1px #ffffff;
   --shadow-2: 0 0 0 2px #ffffff;
   --shadow-3: 0 0 0 2px #ffffff;
-  --specular: none;
+  --specular: 0 0 0 transparent;
   --input-bg: #000000;
   --input-bg-disabled: #000000;
   --input-border: #ffffff;
@@ -248,7 +238,7 @@ html, body {
   // sense of depth without a heavy gradient. The tint pulls from the
   // brand navy-800 so it harmonizes with the brand reference's dark
   // panel color.
-  background: radial-gradient(ellipse at 30% 0%, var(--bg-wash), var(--bg-deep) 60%);
+  background: var(--bg-deep);
   color: var(--text);
   font-family: var(--font-sans);
   min-height: 100vh;
@@ -340,59 +330,7 @@ html[data-dry-run="true"][data-demo="true"] body {
   padding-top: 4.4rem;
 }
 
-// Aurora backdrop. Two slow-drifting low-opacity color washes give the
-// liquid-glass panels something to refract. Sized larger than viewport
-// and translated by the keyframes; pointer-events:none so they never
-// catch clicks. Single fixed layer per pseudo-element so scroll doesn't
-// shift them, the glass on top reads as floating in space.
-body::before,
-body::after {
-  content: "";
-  position: fixed;
-  inset: -20%;
-  pointer-events: none;
-  z-index: 0;
-  filter: blur(60px);
-  // Quieter in v2: a faint, strictly on-brand blue+teal ambient wash that
-  // sits behind the flat elevation surfaces (the purple/green/amber washes
-  // and the heavy 0.55 opacity belonged to the retired glass aesthetic).
-  // S5: lifted from 0.3 -> 0.42 so the signature blue+teal wash actually reads
-  // through the hairline borders (at 0.3 behind --elev-1 it was ~invisible).
-  // Taste dial -- nudge down if it competes with bright metric panels.
-  opacity: 0.42;
-}
-
-body::before {
-  background:
-    radial-gradient(40rem 28rem at 18% 22%, rgba(94, 200, 255, 0.24), transparent 60%),
-    radial-gradient(36rem 30rem at 82% 78%, rgba(46, 179, 164, 0.19), transparent 60%);
-  animation: aurora-drift-a 48s ease-in-out infinite alternate;
-}
-
-body::after {
-  background:
-    radial-gradient(30rem 22rem at 75% 18%, rgba(20, 144, 220, 0.16), transparent 60%);
-  animation: aurora-drift-b 64s ease-in-out infinite alternate;
-}
-
-@keyframes aurora-drift-a {
-  0%   { transform: translate3d(0, 0, 0) rotate(0deg); }
-  50%  { transform: translate3d(2rem, -1.5rem, 0) rotate(2deg); }
-  100% { transform: translate3d(-1.5rem, 2rem, 0) rotate(-1.5deg); }
-}
-
-@keyframes aurora-drift-b {
-  0%   { transform: translate3d(0, 0, 0) rotate(0deg); }
-  50%  { transform: translate3d(-2rem, 1.5rem, 0) rotate(-2deg); }
-  100% { transform: translate3d(1.5rem, -2rem, 0) rotate(1.5deg); }
-}
-
-// Respect users who turn motion off, freeze the auroras.
-@include reduced-motion {
-  body::before, body::after {
-    animation: none;
-  }
-}
+// Quiet page surfaces keep attention on measurements and controls.
 
 // App shell: sidebar (~240px) on the left, main page column on the right.
 // On mobile the sidebar is hidden entirely; the bottom tab-bar
@@ -423,7 +361,7 @@ body::after {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
   padding: var(--space-5) var(--space-3) var(--space-4);
-  background: color-mix(in oklab, var(--brand-navy-900) 72%, transparent);
+  background: var(--elev-1);
   -webkit-backdrop-filter: var(--blur-chrome);
   backdrop-filter: var(--blur-chrome);
   border-right: 1px solid var(--border);
@@ -432,15 +370,7 @@ body::after {
   gap: var(--space-5);
   z-index: var(--z-nav);
 
-  // The sidebar background is intentionally dark in every theme for
-  // hierarchy, so re-pin the text tokens to their dark-theme values
-  // inside the sidebar. Without this, light-mode's dark inks render
-  // dark-on-dark and the nav labels disappear.
-  --text: #e6ecf5;
-  --text-bright: #ffffff;
-  --text-dim: #94a0b6;
-  --text-faint: #8693ac;
-  --border: rgba(255, 255, 255, 0.08);
+
 }
 
 .sidebar-brand {
@@ -459,8 +389,8 @@ body::after {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
     color: var(--accent-good);   // teal cloud outline
     > svg, > img { width: 100%; height: 100%; display: block; }
   }

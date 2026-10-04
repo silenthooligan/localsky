@@ -12,11 +12,18 @@
 set -eu
 IMG="${1:?image}"
 NAME=localsky-fresh
+MODE="${2:-plain}"
+if [ "$MODE" = haos ]; then
+  set -- -e SUPERVISOR_TOKEN=test-only -e HA_TOKEN=test-only -e HA_URL=http://127.0.0.1:9 -e VAPID_PUBLIC_KEY=test-only
+else
+  set --
+fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
   --tmpfs /data \
   -e LEPTOS_SITE_ADDR=0.0.0.0:8090 \
   -e HISTORY_DB_PATH=/data/irrigation.db \
+  "$@" \
   "$IMG" >/dev/null
 fail() {
   echo "FRESH-INSTALL FAIL: $1"
@@ -44,4 +51,12 @@ echo "$health" | grep -q '"config_present":false' || fail "health lacks config_p
 echo "$health" | grep -q '"location_configured":false' || fail "health lacks location_configured=false: $health"
 c http://127.0.0.1:8090/api/v1/info | grep -q '"location_configured":false' || fail "info lacks location_configured=false"
 echo "FRESH-INSTALL OK: / -> 302 /setup, wizard serves, health says why"
+docker exec "$NAME" test ! -f /data/localsky.toml || fail "fresh $MODE install synthesized a legacy yard"
+# Supervisor sends SIGTERM. A connected event stream must not prevent clean exit.
+docker exec -d "$NAME" curl -sN --max-time 30 http://127.0.0.1:8090/api/v1/stream -o /tmp/shutdown-stream
+sleep 1
+docker stop --time 8 "$NAME" >/dev/null
+[ "$(docker inspect "$NAME" --format '{{.State.ExitCode}}')" = 0 ] || fail "SIGTERM did not exit cleanly"
+echo "SHUTDOWN OK: $MODE install exits zero with an event stream connected"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+if [ "$MODE" = plain ]; then sh "$0" "$IMG" haos; fi

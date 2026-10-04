@@ -82,7 +82,7 @@ pub fn AnomalyBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 /// when the reason is missing or doesn't match the expected shape.
 fn suspect_line(name: &str, reason: Option<&str>) -> String {
     if let Some(r) = reason {
-        // Canonical engine form: "Soil probe suspect (28% vs yard 73%); watering held ..."
+        // Canonical engine form: "Soil probe suspect (28% vs yard 73%); watering skipped ..."
         if let Some(rest) = r.strip_prefix("Soil probe suspect (") {
             if let Some((inner, _)) = rest.split_once(')') {
                 // inner = "28% vs yard 73%" (or "offline vs yard 73%")
@@ -90,7 +90,7 @@ fn suspect_line(name: &str, reason: Option<&str>) -> String {
             }
         }
     }
-    format!("{name} probe suspect: watering held until the probe is reliable")
+    format!("{name} probe suspect: watering skipped until the probe is reliable")
 }
 
 /// Build the one-line offline summary for a faulted soil probe. Names the

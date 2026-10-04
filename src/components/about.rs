@@ -46,7 +46,7 @@ pub fn AboutPage() -> impl IntoView {
         <div class="about-page">
             <div class="about-hero">
                 <span class="about-hero__mark">
-                    <img src="/brand-mark.svg" alt="" width="56" height="56"/>
+                    <img src=crate::base::url("/brand-mark.svg") alt="" width="56" height="56"/>
                 </span>
                 <h1 class="about-hero__name">"LOCAL"<span class="about-hero__accent">"SKY"</span></h1>
                 <p class="about-hero__tag">

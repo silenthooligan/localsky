@@ -567,7 +567,7 @@ fn gateway_card(
         None => "source-health__dot",
     };
     let dot_style = match online {
-        Some(true) => "background: var(--verdict-run)",
+        Some(true) => "background: var(--status-online)",
         Some(false) => "background: var(--danger, #e5484d)",
         None => "background: var(--text-faint)",
     };
@@ -626,7 +626,7 @@ fn soil_probe_row(
     let mut chips: Vec<_> = Vec::new();
     if let Some(b) = p.battery_pct {
         chips.push(view! {
-            <span class="soil-card__pill" style="--sc: var(--verdict-run)">
+            <span class="soil-card__pill" style="--sc: var(--status-online)">
                 {format!("Battery {b:.0}%")}
             </span>
         });

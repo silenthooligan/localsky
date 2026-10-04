@@ -1,114 +1,192 @@
-// Persistent "now running" banner that surfaces any active zone right at the
-// top of the page, with a one-tap stop control. Closes the loop on the user's
-// "I want to see what's actually happening, not just rely on automations" ask.
-//
-// Position rules:
-// - On mobile, sticks to the top below the header so it's reachable without
-//   scrolling. Bottom-tab nav is at the bottom; this is at the top.
-// - On desktop, renders inline above the bento. Hidden when no zones run.
-//
-// Data: reads the same IrrigationSnapshot signal everything else uses.
-// Deduplicates: if multiple zones run simultaneously (rare but possible
-// during manual overlap), shows the first running zone with a "+N more"
-// hint. The stop button always invokes stop_all in that case to be safe.
-
-use crate::components::ui::Button;
-use crate::model::IrrigationSnapshot;
+//! Persistent app-wide watering controls, including gaps between Quick Run zones.
+use super::quick_run_client::QuickRunClient;
+use crate::{
+    components::ui::{Button, Icon},
+    model::{quick_run::QuickRunPhase, IrrigationSnapshot},
+};
 use leptos::prelude::*;
-use serde_json::json;
 
 #[component]
 pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    // Created at component scope (context lookup), shared by every
-    // render of the inner closure. The note-aware variant has to live out
-    // here too: built inside the closure below it was owned by a render
-    // that the next streamed snapshot disposes, and it resolved the toast
-    // hub from inside its own continuation, where there is no owner to
-    // resolve from.
-    let toast = crate::components::ui::use_toast();
-    let stop_done = super::controls::toast_on_err("Stop failed; zone may still be running");
-    let note_done = Callback::new(
-        move |result: Result<Option<String>, crate::components::request_error::RequestError>| {
+    let client = expect_context::<QuickRunClient>();
+    let location = leptos_router::hooks::use_location();
+    let pending = RwSignal::new(false);
+    let problem = RwSignal::new(String::new());
+    let sent = RwSignal::new(String::new());
+    let running = Memo::new(move |_| {
+        snap.get()
+            .zones
+            .into_iter()
+            .filter(|z| z.is_running_or_unconfirmed())
+            .collect::<Vec<_>>()
+    });
+    let visible = move || {
+        !location.pathname.get().ends_with("/login")
+            && (client.active() || !running.get().is_empty())
+    };
+    let attention = move || {
+        (client.active() && client.offline.get())
+            || !problem.get().is_empty()
+            || (client.active() && !client.error.get().is_empty())
+            || running
+                .get()
+                .iter()
+                .any(|z| z.run_state() == crate::model::RunState::Unconfirmed)
+            || client
+                .state
+                .get()
+                .and_then(|s| s.run)
+                .is_some_and(|r| r.stop_unconfirmed)
+    };
+    let headline = move || {
+        if let Some(run) = client
+            .state
+            .get()
+            .and_then(|s| s.run)
+            .filter(|r| r.phase.active() || r.stop_unconfirmed)
+        {
+            if run.stop_unconfirmed {
+                return "Check watering".into();
+            }
+            if run.phase == QuickRunPhase::Stopping {
+                return "Stopping Quick Run…".into();
+            }
+            return run
+                .current
+                .and_then(|i| run.names.get(i).cloned())
+                .unwrap_or_else(|| "Quick Run is starting".into());
+        }
+        let zones = running.get();
+        zones
+            .first()
+            .map(|z| {
+                if zones.len() > 1 {
+                    format!("{} + {} more", z.name, zones.len() - 1)
+                } else {
+                    z.name.clone()
+                }
+            })
+            .unwrap_or_default()
+    };
+    let detail = move || {
+        if !problem.get().is_empty() {
+            return problem.get();
+        }
+        if client.active() && !client.error.get().is_empty() {
+            return client.error.get();
+        }
+        if client.active() && client.offline.get() {
+            return "Status unavailable. Check your connection.".into();
+        }
+        if let Some(run) = client
+            .state
+            .get()
+            .and_then(|s| s.run)
+            .filter(|r| r.phase.active() || r.stop_unconfirmed)
+        {
+            if run.stop_unconfirmed {
+                return "Stop wasn’t confirmed. Retry Stop.".into();
+            }
+            if run.phase == QuickRunPhase::Stopping {
+                return "Cancelling the remaining zones".into();
+            }
+            let progress = format!("{} of {} zones finished", run.completed, run.zones.len());
+            if let Some(end) = run
+                .current_ends_epoch
+                .filter(|_| run.phase == QuickRunPhase::Running)
+            {
+                let seconds = (end - client.clock.get()).max(0);
+                return if seconds > 0 {
+                    format!("About {} min left · {progress}", (seconds + 59) / 60)
+                } else {
+                    format!("Finishing this zone · {progress}")
+                };
+            }
+            return format!(
+                "{} · {progress}",
+                if run.phase == QuickRunPhase::Finishing {
+                    "Finishing this zone"
+                } else {
+                    "Preparing watering"
+                }
+            );
+        }
+        if !sent.get().is_empty() {
+            return sent.get();
+        }
+        if running
+            .get()
+            .iter()
+            .any(|z| z.run_state() == crate::model::RunState::Unconfirmed)
+        {
+            return "Controller status is unconfirmed".into();
+        }
+        "Watering now".into()
+    };
+    Effect::new(move |_| {
+        if running.get().is_empty() {
+            sent.set(String::new());
+            problem.set(String::new());
+        }
+    });
+    let done = Callback::new(
+        move |result: Result<
+            Option<serde_json::Value>,
+            crate::components::request_error::RequestError,
+        >| {
+            pending.set(false);
             match result {
-                // A controller with no per-zone stop reports the real scope (the
-                // whole device stopped); relay it.
-                Ok(Some(note)) => toast.info(note),
-                Ok(None) => {}
-                Err(e) => stop_done.run(Err(e)),
+                Ok(Some(body))
+                    if body["ok"] == true
+                        && !body["failed"].as_array().is_some_and(|v| !v.is_empty()) =>
+                {
+                    sent.set(if body["scope"] == "device" {
+                        "Stop sent for all zones on this controller".into()
+                    } else {
+                        "Stop sent · waiting for the controller".into()
+                    })
+                }
+                _ => problem.set("Stop wasn’t confirmed. Try again.".into()),
             }
         },
     );
-    move || {
-        let s = snap.get();
-        let running: Vec<_> = s
-            .zones
-            .iter()
-            .filter(|z| z.is_running_or_unconfirmed())
-            .cloned()
-            .collect();
-        let count = running.len();
-
-        if count == 0 {
-            return ().into_any();
+    let stop = Callback::new(move |_| {
+        if client.active() {
+            client.stop();
+            return;
         }
-
-        // Take the first-running zone for the headline; show +N more if more.
-        let first = running[0].clone();
-        let first_name = first.name.clone();
-        let first_slug = first.slug.clone();
-        let first_planned = first.planned_run_seconds;
-
-        let extra_count = count.saturating_sub(1);
-
-        let on_stop = move |_| {
-            // Single running zone -> stop just that one. Multiple -> stop_all
-            // to handle the overlap case without a per-zone dance.
-            if count > 1 {
-                super::controls::post_action_then(json!({"kind": "stop_all"}), stop_done);
-            } else {
-                let slug = first_slug.clone();
-                // Note-aware: a controller with no per-zone stop reports the
-                // real scope (the whole device stopped); relay it.
-                super::controls::post_action_note_then(
-                    json!({"kind": "stop", "zone": slug}),
-                    note_done,
-                );
-            }
+        if pending.get_untracked() {
+            return;
+        }
+        let zones = running.get_untracked();
+        let Some(first) = zones.first() else {
+            return;
         };
-
-        let unconfirmed = first.run_state() == crate::model::RunState::Unconfirmed;
-        let planned_label = match (first_planned > 0, unconfirmed) {
-            (true, false) => format!("{} min planned", (first_planned + 30) / 60),
-            (true, true) => format!("{} min planned, unconfirmed", (first_planned + 30) / 60),
-            (false, false) => "running".to_string(),
-            (false, true) => "running, unconfirmed".to_string(),
+        pending.set(true);
+        problem.set(String::new());
+        let body = if zones.len() > 1 {
+            serde_json::json!({"kind":"stop_all"})
+        } else {
+            serde_json::json!({"kind":"stop", "zone":first.slug})
         };
-
-        // The same selected actual meter reading the API and HA consume.
-        let flow_label = s.flow.rate_gpm.map(|gpm| format!("Flow: {gpm:.1} gpm"));
-
-        view! {
-            <div class="running-banner" role="status" aria-live="polite">
-                <div class="running-banner-pulse" aria-hidden="true"></div>
-                <div class="running-banner-text">
-                    <div class="running-banner-zone">{first_name}</div>
-                    <div class="running-banner-meta">
-                        {planned_label}
-                        {move || if extra_count > 0 {
-                            format!(" · +{extra_count} more")
-                        } else {
-                            String::new()
-                        }}
-                    </div>
-                    {flow_label.map(|l| view! {
-                        <div class="running-banner-flow">{l}</div>
-                    })}
+        super::controls::post_action_body_then(body, done);
+    });
+    view! {
+        <Show when=visible>
+            <section class="watering-strip" class:watering-strip--attention=attention aria-label="Current watering">
+                <span class="watering-strip__icon" aria-hidden="true"><Icon name="sprinkler" size=24/></span>
+                <div class="watering-strip__copy">
+                    <strong>{headline}</strong>
+                    <span role="status" aria-live="polite">{detail}</span>
+                    {move || snap.get().flow.rate_gpm.map(|gpm| view! { <span>{format!("Flow: {gpm:.1} gpm")}</span> })}
                 </div>
-                <Button variant="danger" class="running-banner-stop" on_click=Callback::new(on_stop)>
-                    {if count > 1 { "STOP ALL" } else { "STOP" }}
-                </Button>
-            </div>
-        }
-        .into_any()
+                <div class="watering-strip__actions">
+                    <Button variant="secondary" href=crate::base::url("/irrigation")>"View"</Button>
+                    <Button variant="danger" icon="stop" class="running-banner-stop" loading=Signal::derive(move || pending.get() || client.pending.get()) on_click=stop>
+                        {move || if client.active() { "Stop Quick Run" } else if running.get().len() > 1 { "Stop all" } else { "Stop" }}
+                    </Button>
+                </div>
+            </section>
+        </Show>
     }
 }

@@ -89,6 +89,26 @@ fn verdict_label(v: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "hydrate")]
+async fn simulate(req: &crate::model::SimRequest) -> Result<SimResult, String> {
+    use crate::components::request_error::RequestError;
+    let response = gloo_net::http::Request::post("/api/irrigation/simulate")
+        .json(req)
+        .map_err(|_| "The scenario could not be prepared.".to_string())?
+        .send()
+        .await
+        .map_err(|_| RequestError::network("simulation request").to_string())?;
+    if !response.ok() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(RequestError::response(status, &body).to_string());
+    }
+    response
+        .json::<SimResult>()
+        .await
+        .map_err(|_| "The simulation response could not be read.".to_string())
+}
+
 #[component]
 pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // Slider state (absolute values). Seeded from the live SkipCheck once
@@ -105,6 +125,9 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let seeded = RwSignal::new(false);
 
     let result: RwSignal<Option<SimResult>> = RwSignal::new(None);
+    let pending = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(0_u64);
 
     // Per-device display-unit preferences. The slider signals above stay
     // in the engine's internal (imperial) unit so the SimRequest POST is
@@ -130,6 +153,7 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // Seed once when the live snapshot first carries a real reading.
     #[cfg(feature = "hydrate")]
     {
+        let generation = RwSignal::new(0_u64);
         Effect::new(move |_| {
             let s = snap.get();
             if !seeded.get_untracked() && s.last_refresh_epoch > 0 {
@@ -140,6 +164,7 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
         // Re-run the simulation whenever a slider moves (after seeding).
         Effect::new(move |_| {
+            let _ = retry.get();
             let req = crate::model::SimRequest {
                 temp_now_f: Some(temp.get()),
                 humidity_now_pct: Some(humidity.get()),
@@ -161,19 +186,22 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             if !seeded.get() {
                 return;
             }
-            let body = serde_json::to_string(&req).unwrap_or_default();
+            let current = generation.get_untracked().wrapping_add(1);
+            generation.set(current);
+            pending.set(true);
+            error.set(None);
+            result.set(None);
             leptos::task::spawn_local(async move {
-                if let Ok(resp) = gloo_net::http::Request::post("/api/irrigation/simulate")
-                    .header("Content-Type", "application/json")
-                    .body(body)
-                    .ok()
-                    .unwrap()
-                    .send()
-                    .await
-                {
-                    if let Ok(r) = resp.json::<SimResult>().await {
-                        result.set(Some(r));
-                    }
+                let response = simulate(&req).await;
+                // A slow earlier response must never replace the latest inputs.
+                // The component may also have been disposed during navigation.
+                if generation.try_get_untracked() != Some(current) {
+                    return;
+                }
+                pending.set(false);
+                match response {
+                    Ok(value) => result.set(Some(value)),
+                    Err(message) => error.set(Some(message)),
                 }
             });
         });
@@ -188,7 +216,7 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             <header class="page-head">
                 <p class="page-eyebrow">"Analyze"</p>
                 <h1 class="page-title">"Simulator"</h1>
-                <p class="sim-page__sub">"Move a slider, see how today\u{2019}s decision would change. Same engine as the real morning run."</p>
+                <p class="sim-page__sub">"Try weather changes against the current rule ladder. No watering is started."</p>
             </header>
 
             <div class="sim-layout">
@@ -215,8 +243,9 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <SimSlider label="3-day high" kind=SimUnit::Temp prefs value=heat_3day min=40.0 max=115.0 step=1.0/>
 
                     <div class="sim-script">
-                        <label class="sim-slider__label">"Test a custom rule (Rhai)"</label>
+                        <label class="sim-slider__label" for="sim-test-script">"Test a custom rule (Rhai)"</label>
                         <textarea
+                            id="sim-test-script"
                             class="sim-script__input"
                             spellcheck="false"
                             placeholder="e.g. wind_now_mph > 12.0"
@@ -273,15 +302,21 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     </div>
                 </section>
 
-                <section class="sim-result">
+                <section class="sim-result" aria-busy=move || pending.get().to_string()>
+                    <Show when=move || error.get().is_some()>
+                        <div class="settings-load-error" role="alert">
+                            <p>"Simulation unavailable. "{move || error.get().unwrap_or_default()}</p>
+                            <button type="button" class="btn btn--ghost" on:click=move |_| retry.update(|n| *n += 1)>"Retry simulation"</button>
+                        </div>
+                    </Show>
                     {move || match result.get() {
+                        None if error.get().is_some() => ().into_any(),
                         None => view! {
                             <div class="sim-result__empty">
                                 <crate::components::ui::Icon name="simulator" size=34/>
-                                <p class="sim-result__empty-title">"Move a slider to run a what-if"</p>
+                                <p class="sim-result__empty-title" role="status">{move || if pending.get() { "Calculating your scenario…" } else { "Waiting for current weather…" }}</p>
                                 <p class="sim-result__empty-body">
-                                    "The verdict is redecided instantly with your hypothetical "
-                                    "weather and shows the verdict diff against today."
+                                    "Adjust the inputs to compare with current conditions."
                                 </p>
                             </div>
                         }.into_any(),
@@ -316,8 +351,8 @@ fn SimSlider(
     if kind == SimUnit::Percent {
         return view! {
             <div class="sim-slider">
-                <label class="sim-slider__label">{label}</label>
-                <Slider value min max step suffix="%" precision/>
+                <span class="sim-slider__label">{label.clone()}</span>
+                <Slider value min max step suffix="%" precision aria_label=label/>
             </div>
         }
         .into_any();
@@ -365,9 +400,10 @@ fn SimSlider(
         value.set(kind.to_stored(v, p).clamp(min, max));
     };
 
+    let number_label = label.clone();
     view! {
         <div class="sim-slider">
-            <label class="sim-slider__label">{label.clone()}</label>
+            <span class="sim-slider__label">{label.clone()}</span>
             <div class="ui-slider">
                 <input
                     type="range"
@@ -391,6 +427,7 @@ fn SimSlider(
                         max=disp_max
                         step=disp_step
                         prop:value=move || fmt_value(disp_val(), kind.is_metric(prefs.get()))
+                        aria-label=move || format!("{number_label} ({})", kind.unit_label(prefs.get()))
                         on:input=move |ev| {
                             if let Ok(v) = event_target_value(&ev).parse::<f64>() {
                                 commit(v);
@@ -448,10 +485,10 @@ fn SimVerdict(r: SimResult, prefs: Signal<UnitPrefs>) -> impl IntoView {
         view! {
             <div class="sim-verdict__transition">
                 <div class="sim-verdict__state">
-                    <span class="sim-verdict__caption">"Today"</span>
+                    <span class="sim-verdict__caption">"Current conditions"</span>
                     <span class="sim-verdict__pill" style=format!("--v:{btok}")>{blab}</span>
                 </div>
-                <span class="sim-verdict__arrow is-changed" aria-label="changes to">"→"</span>
+                <span class="sim-verdict__arrow is-changed" role="img" aria-label="changes to">"→"</span>
                 <div class="sim-verdict__state">
                     <span class="sim-verdict__caption">"With your changes"</span>
                     <span class="sim-verdict__pill" style=format!("--v:{htok}")>{hlab}</span>
@@ -465,7 +502,7 @@ fn SimVerdict(r: SimResult, prefs: Signal<UnitPrefs>) -> impl IntoView {
         view! {
             <div class="sim-verdict__single">
                 <span class="sim-verdict__pill sim-verdict__pill--lg" style=format!("--v:{htok}")>{hlab}</span>
-                <span class="sim-verdict__samenote">"Same as today: your changes don\u{2019}t flip the decision."</span>
+                <span class="sim-verdict__samenote">"Decision unchanged"</span>
             </div>
         }
         .into_any()

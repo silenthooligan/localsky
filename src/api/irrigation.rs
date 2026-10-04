@@ -77,6 +77,9 @@ pub fn router(
     // the adoption markers that say where each control's value lives, so it
     // lives in its own sub-router with that state.
     let watering_policy_for_invite = watering_policy.clone();
+    let quick_run_routes =
+        super::quick_run::router(store.clone(), dispatch.clone(), history.clone());
+    let notification_routes = super::notification_stop::router(store.clone(), dispatch.clone());
     let action_router = Router::new()
         .route("/action", post(action))
         .with_state(ActionState {
@@ -113,7 +116,11 @@ pub fn router(
             advisor,
         });
 
-    let merged = read_routes.merge(advisor_routes).merge(action_router);
+    let merged = read_routes
+        .merge(advisor_routes)
+        .merge(action_router)
+        .merge(notification_routes)
+        .merge(quick_run_routes);
 
     if let Some(h) = history {
         // The soil opt-in offer exists only where a dismissal can land
@@ -628,7 +635,7 @@ async fn simulate(
                     if rule.outcome == "fired" && rule.overridden_by.is_none() {
                         rule.overridden_by = Some(us.id.clone());
                         rule.overridden_detail = Some(us.reason.clone());
-                        rule.detail.push_str("; watering held by test script");
+                        rule.detail.push_str("; watering skipped by test script");
                     }
                 }
                 hypothetical.rules.push(crate::model::RuleEval {

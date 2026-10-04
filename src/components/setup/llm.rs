@@ -233,13 +233,7 @@ pub fn LlmStep() -> impl IntoView {
         <div class="setup-step">
             <h2 class="setup-step__title">"AI advisor "<span class="setup-step__optional">"optional"</span><HelpHint topic="llm"/></h2>
             <p class="setup-step__body">
-                "LocalSky can call an LLM to explain today's verdict in plain "
-                "English and flag anomalies in the snapshot. The deterministic "
-                "skip-rule engine owns every irrigation decision; the LLM is "
-                "surface content only and never gates safety. Pick "
-                <strong>"Auto"</strong>
-                " to have LocalSky probe localhost on boot for Ollama / "
-                "llama.cpp / LM Studio."
+                "Add AI explanations of your weather and watering. The advisor never controls watering. Auto looks for a local AI service when LocalSky starts."
             </p>
 
             <Panel title="Provider".to_string()>

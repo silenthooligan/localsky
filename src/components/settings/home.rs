@@ -15,41 +15,41 @@ use leptos_router::hooks::{use_location, use_navigate};
 use super::help::SettingsHelp;
 use super::{
     SettingsAccount, SettingsAdvanced, SettingsDataSources, SettingsDevices, SettingsEngine,
-    SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar,
-    SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules, SettingsTheme,
-    SettingsUnits, SettingsZones,
+    SettingsHistory, SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications,
+    SettingsRadar, SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules,
+    SettingsTheme, SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
 
-struct SectionLink {
-    key: &'static str,
-    label: &'static str,
-    helptext: &'static str,
+pub(super) struct SectionLink {
+    pub(super) key: &'static str,
+    pub(super) label: &'static str,
+    pub(super) helptext: &'static str,
     icon: &'static str,
     /// Entity identity ("source"/"sensor"/"controller"/"zone") -> a left
     /// color-stripe so the four hardware concepts are visually distinct.
     entity: Option<&'static str>,
 }
 
-struct SectionGroup {
+pub(super) struct SectionGroup {
     title: &'static str,
     subtitle: &'static str,
-    links: &'static [SectionLink],
+    pub(super) links: &'static [SectionLink],
 }
 
-const GROUPS: &[SectionGroup] = &[
+pub(super) const GROUPS: &[SectionGroup] = &[
     SectionGroup {
         title: "Hardware",
         // One front door (Devices) for everything LocalSky talks to; Zones is
         // the yard it waters. Sources, sensors and controllers are no longer
         // separate doors -- they live inside Devices (a source carries its
         // sensors; a controller runs its zones).
-        subtitle: "Everything LocalSky talks to, and the yard it waters.",
+        subtitle: "Devices, zones, and location.",
         links: &[
             SectionLink {
                 key: "devices",
                 label: "Devices",
-                helptext: "Add and edit your weather sources + controllers, see the sensors each source carries, and pick which source provides each reading",
+                helptext: "Weather sources, controllers, and sensor priorities",
                 icon: "controllers",
                 entity: None,
             },
@@ -60,21 +60,21 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "zones",
                 label: "Zones",
-                helptext: "An AREA of yard: grass species, soil texture, area, sprinkler rate",
+                helptext: "Grass, soil, area, and sprinkler rate",
                 icon: "zones",
                 entity: Some("zone"),
             },
             SectionLink {
                 key: "home-assistant",
                 label: "Home Assistant",
-                helptext: "The bidirectional link: what flows in, what HA consumes",
+                helptext: "Connection and shared readings",
                 icon: "home",
                 entity: None,
             },
             SectionLink {
                 key: "location",
                 label: "Location",
-                helptext: "Lat / lon / elevation / timezone",
+                helptext: "Coordinates, elevation, and timezone",
                 icon: "location",
                 entity: None,
             },
@@ -82,7 +82,7 @@ const GROUPS: &[SectionGroup] = &[
     },
     SectionGroup {
         title: "Logic",
-        subtitle: "How LocalSky decides what to do with that hardware.",
+        subtitle: "When and how much to water.",
         links: &[
             SectionLink {
                 key: "skip-rules",
@@ -108,7 +108,7 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "schedules",
                 label: "Schedules",
-                helptext: "Manual programs that override smart watering",
+                helptext: "Custom watering programs",
                 icon: "calendar",
                 entity: None,
             },
@@ -123,12 +123,12 @@ const GROUPS: &[SectionGroup] = &[
     },
     SectionGroup {
         title: "App",
-        subtitle: "How LocalSky talks to you + per-browser preferences.",
+        subtitle: "Preferences, history, and access.",
         links: &[
             SectionLink {
                 key: "account",
                 label: "Account",
-                helptext: "Owner login + API tokens for integrations",
+                helptext: "Owner login and API tokens",
                 icon: "settings",
                 entity: None,
             },
@@ -142,7 +142,7 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "units",
                 label: "Units",
-                helptext: "Household default (imperial or metric), with optional per-device overrides",
+                helptext: "Metric or imperial; household and device preferences",
                 icon: "units",
                 entity: None,
             },
@@ -156,7 +156,7 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "theme",
                 label: "Theme",
-                helptext: "Dark, light, auto, high-contrast",
+                helptext: "Field Green, Slate, or Classic Blue; light, dark, auto, high contrast",
                 icon: "theme",
                 entity: None,
             },
@@ -168,9 +168,16 @@ const GROUPS: &[SectionGroup] = &[
                 entity: None,
             },
             SectionLink {
+                key: "history",
+                label: "History retention",
+                helptext: "How long to keep readings and watering records",
+                icon: "history",
+                entity: None,
+            },
+            SectionLink {
                 key: "advanced",
                 label: "Advanced",
-                helptext: "Nerd mode, raw snapshots, rollback",
+                helptext: "Source freshness, Nerd mode, kiosk, and backups",
                 icon: "advanced",
                 entity: None,
             },
@@ -200,6 +207,7 @@ fn section_key(s: &str) -> Option<&'static str> {
         "theme",
         "help",
         "advanced",
+        "history",
     ];
     KEYS.iter().copied().find(|&k| k == s)
 }
@@ -255,11 +263,11 @@ pub fn SettingsHome() -> impl IntoView {
                 <p class="page-eyebrow">"Configure"</p>
                 <h1 class="page-title">"Settings"</h1>
                 <p class="settings-hub__sub">
-                    "Per-deployment config lives in Hardware + Logic. Per-device "
-                    "preferences (theme, units, nerd mode) are App-group items."
+                    "Devices, watering, and app preferences."
                 </p>
             </header>
 
+            <super::search::SettingsSearch/>
             <div class="settings-shell" class:has-detail=move || selected.get().is_some()>
                 <div class="settings-shell__list">
                     {GROUPS.iter().map(|g| {
@@ -311,7 +319,7 @@ pub fn SettingsHome() -> impl IntoView {
                 <div class="settings-group__head">
                     <h2 class="settings-group__title">"Configuration"</h2>
                     <p class="settings-group__sub">
-                        "Edit the selected section here. Saves apply to this LocalSky instance; changes that need a restart say so."
+                        "Choose a section to view its settings."
                     </p>
                 </div>
 
@@ -416,16 +424,24 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
                     .unwrap_or("?")
                     .to_string();
                 let st = s.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                let dot = match st {
+                let state = super::source_status::presentation(
+                    st,
+                    s["enabled"].as_bool().unwrap_or(true),
+                    s["note"]
+                        .as_str()
+                        .is_some_and(|n| n.contains("no location")),
+                );
+                let dot = match state.tone {
                     "fresh" => "settings-overview__dot is-fresh",
                     "stale" => "settings-overview__dot is-stale",
-                    _ => "settings-overview__dot is-offline",
+                    "offline" => "settings-overview__dot is-offline",
+                    _ => "settings-overview__dot is-waiting",
                 };
                 view! {
                     <li class="settings-overview__row">
                         <span class=dot aria-hidden="true"></span>
                         <span class="settings-overview__row-name">{id}</span>
-                        <span class="settings-overview__row-meta">{st.to_string()}</span>
+                        <span class="settings-overview__row-meta">{state.label}</span>
                     </li>
                 }
             })
@@ -559,8 +575,7 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
                 </div>
 
                 <p class="settings-overview__hint">
-                    "Pick a section on the left to edit it here. The Sensors hub shows live "
-                    "per-field readings; the Devices section maps everything that feeds this box."
+                    "See live readings in Sensors, or manage connections in Devices."
                 </p>
             </div>
         }
@@ -588,6 +603,7 @@ fn section_view(key: &str) -> leptos::prelude::AnyView {
         "units" => view! { <SettingsUnits/> }.into_any(),
         "radar" => view! { <SettingsRadar/> }.into_any(),
         "theme" => view! { <SettingsTheme/> }.into_any(),
+        "history" => view! { <SettingsHistory/> }.into_any(),
         "advanced" => view! { <SettingsAdvanced/> }.into_any(),
         _ => view! { <div/> }.into_any(),
     }

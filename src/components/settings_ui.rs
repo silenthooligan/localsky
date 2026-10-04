@@ -248,6 +248,9 @@ pub fn SettingsCard(
     /// Detail rows rendered inside the expanded body. Typically a
     /// stack of SettingsKv.
     details: Children,
+    /// False for device sensor lists or prose rather than key/value pairs.
+    #[prop(default = true)]
+    details_are_key_values: bool,
     /// Right-aligned action button row at the bottom of the body.
     /// Pass `move || view!{}` if no actions.
     actions: Children,
@@ -314,7 +317,11 @@ pub fn SettingsCard(
                 <span class=chevron_class aria-hidden="true">"\u{203A}"</span>
             </button>
             <div class="settings-card__body">
-                <dl class="settings-card__kvs">{details()}</dl>
+                {if details_are_key_values {
+                    view! { <dl class="settings-card__kvs">{details()}</dl> }.into_any()
+                } else {
+                    view! { <div class="settings-card__kvs">{details()}</div> }.into_any()
+                }}
                 <div class="settings-card__actions">{actions()}</div>
             </div>
         </article>

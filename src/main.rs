@@ -14,6 +14,7 @@
 async fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     use localsky::boot;
+    use std::future::IntoFuture;
 
     let logging = boot::logging::init();
     let storage = boot::storage::open()
@@ -44,12 +45,48 @@ async fn main() -> anyhow::Result<()> {
     if let Some(announcement) = announcement {
         announcement.start(bound);
     }
-    axum::serve(
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await
-    .context("axum serve loop exited unexpectedly")?;
+    .with_graceful_shutdown(async {
+        let _ = shutdown_rx.await;
+    })
+    .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result.context("axum serve loop exited unexpectedly")?,
+        signal = shutdown_signal() => {
+            signal?;
+            // Refuse new dispatches during the drain. Keep the durable active-run
+            // ledger intact so normal startup recovery still reconciles it.
+            control.registry.restart_hold().latch(vec!["LocalSky is shutting down".into()]);
+            tracing::info!("shutdown requested; draining HTTP requests");
+            let _ = shutdown_tx.send(());
+            // SSE clients stay connected indefinitely. Give ordinary requests a
+            // bounded drain, then close streams before Supervisor's kill timeout.
+            match tokio::time::timeout(std::time::Duration::from_secs(3), &mut server).await {
+                Ok(result) => result.context("HTTP shutdown failed")?,
+                Err(_) => tracing::info!("closing remaining event streams for shutdown"),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+async fn shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = term.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }
 

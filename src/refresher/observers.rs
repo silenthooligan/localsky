@@ -36,6 +36,7 @@ pub struct ObserverDeps {
 #[derive(Default)]
 pub(crate) struct PushEdges {
     prev_zone_running: std::collections::HashMap<String, bool>,
+    notification_action_sent: std::collections::HashSet<String>,
     zone_started_at: std::collections::HashMap<String, i64>,
     /// Daily verdict push fires once per local day; the date is the key.
     last_verdict_day: Option<String>,
@@ -200,6 +201,7 @@ pub(crate) async fn observe(
         snap,
         edges,
         deps.forecast_store.snapshot().last_refresh_epoch,
+        &deps.controllers,
     );
     // Per-tick engine metrics from the authoritative snapshot (verdict
     // mix and degraded rate are the core health signals).
@@ -318,7 +320,7 @@ pub(crate) fn ledger_et0_emission(
 /// Parse the canonical quarantine reason string the engine produces
 /// (`quarantine_reason` in `engine::skip_rules`) back into its numbers for
 /// the push payload. The format is:
-///   "Soil probe suspect (<probe> vs yard <median>%); watering held until the probe is reliable"
+///   "Soil probe suspect (<probe> vs yard <median>%); watering skipped until the probe is reliable"
 /// where `<probe>` is either "<n>%" (a present-but-outlier reading) or the
 /// literal "offline". Returns `(raw_pct, yard_pct)`: `raw_pct` is `None` for
 /// the offline case. Returns `None` when the string isn't a quarantine reason
@@ -355,10 +357,12 @@ pub(crate) fn emit_push_events(
     snap: &IrrigationSnapshot,
     edges: &mut PushEdges,
     forecast_last_refresh_epoch: i64,
+    controllers: &ControllerRegistry,
 ) {
     use crate::push::PushEvent;
     let PushEdges {
         prev_zone_running: prev_running,
+        notification_action_sent: action_sent,
         zone_started_at: started_at,
         last_verdict_day,
         probe_fault_notified,
@@ -367,15 +371,41 @@ pub(crate) fn emit_push_events(
         ..
     } = edges;
     let now = Utc::now().timestamp();
+    let notices = controllers.zone_locks().notification_runs;
     for z in &snap.zones {
         let was = *prev_running.get(&z.slug).unwrap_or(&false);
-        if z.running && !was {
-            started_at.insert(z.slug.clone(), now);
+        // Unknown readback is neither a confirmed start nor a confirmed end.
+        if !z.running_known {
+            continue;
+        }
+        let stop = if z.running && !action_sent.contains(&z.slug) {
+            z.controller_id
+                .as_deref()
+                .filter(|id| controllers.get(id).is_some())
+                .and_then(|id| {
+                    notices.issue(
+                        &z.slug,
+                        id,
+                        z.running_observed_epoch.unwrap_or(snap.last_refresh_epoch),
+                        now,
+                    )
+                })
+        } else {
+            None
+        };
+        if z.running && (!was || stop.is_some()) {
+            if stop.is_some() {
+                action_sent.insert(z.slug.clone());
+            }
+            started_at.entry(z.slug.clone()).or_insert(now);
             push.emit(PushEvent::ZoneStarted {
                 name: z.name.clone(),
                 slug: z.slug.clone(),
+                stop,
             });
         } else if !z.running && was {
+            action_sent.remove(&z.slug);
+            notices.clear_zone(&z.slug);
             let dur_s = started_at
                 .remove(&z.slug)
                 .map(|start| (now - start).max(0))
@@ -488,5 +518,82 @@ pub(crate) fn emit_push_events(
         };
         push.emit(crate::push::PushEvent::DailyVerdict { verdict, reason });
         *last_verdict_day = Some(today);
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use crate::{
+        controllers::dry_run::DryRunController,
+        model::ZoneState,
+        push::{PushDispatcher, PushEvent},
+    };
+
+    #[test]
+    fn only_known_edges_notify_and_a_stop_does_not_reannounce_cached_running() {
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(
+            Arc::new(DryRunController::new("test", Default::default(), None)),
+            true,
+        )]);
+        let now = Utc::now().timestamp();
+        let mut snap = IrrigationSnapshot {
+            last_refresh_epoch: now,
+            zones: vec![ZoneState {
+                slug: "lawn".into(),
+                name: "Lawn".into(),
+                controller_id: Some("test".into()),
+                running: true,
+                running_known: false,
+                running_observed_epoch: Some(now + 1),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (push, mut rx) = PushDispatcher::capturing();
+        let mut edges = PushEdges::default();
+        emit_push_events(&push, &snap, &mut edges, now, &registry);
+        assert!(
+            rx.try_recv().is_err(),
+            "unknown state must not announce watering"
+        );
+        snap.zones[0].running_known = true;
+        emit_push_events(&push, &snap, &mut edges, now, &registry);
+        let PushEvent::ZoneStarted {
+            stop: Some(original),
+            ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected actionable start")
+        };
+        registry.zone_locks().notification_runs.clear_zone("lawn");
+        emit_push_events(&push, &snap, &mut edges, now, &registry);
+        assert!(
+            rx.try_recv().is_err(),
+            "a Stop receipt must not reannounce cached running"
+        );
+        snap.zones[0].running_known = false;
+        snap.zones[0].running = false;
+        emit_push_events(&push, &snap, &mut edges, now, &registry);
+        assert!(
+            rx.try_recv().is_err(),
+            "lost readback is not a completed run"
+        );
+        snap.zones[0].running_known = true;
+        emit_push_events(&push, &snap, &mut edges, now, &registry);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            PushEvent::ZoneStopped { .. }
+        ));
+        snap.zones[0].running = true;
+        emit_push_events(&push, &snap, &mut edges, now, &registry);
+        let PushEvent::ZoneStarted {
+            stop: Some(next), ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected next actionable start")
+        };
+        assert_ne!(original.run_id, next.run_id);
     }
 }

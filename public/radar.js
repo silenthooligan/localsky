@@ -57,6 +57,7 @@
   // route changes. Multiple visits work; multiple maps don't pile up.
 
   var currentMap = null;
+  var mapResizeObserver = null;
   var radarPollTimer = null;
   var strikePollTimer = null;
   var warningsPollTimer = null;
@@ -76,6 +77,7 @@
   }
 
   function teardownExisting() {
+    if (mapResizeObserver) { mapResizeObserver.disconnect(); mapResizeObserver = null; }
     if (animationTimer) { clearTimeout(animationTimer); animationTimer = null; }
     if (radarPollTimer) { clearInterval(radarPollTimer); radarPollTimer = null; }
     if (strikePollTimer) { clearInterval(strikePollTimer); strikePollTimer = null; }
@@ -370,7 +372,10 @@
     // fresh whitespace below falls back to leaflet.css's default
     // .leaflet-container background.
     if (typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(function () { map.invalidateSize(); }).observe(el);
+      mapResizeObserver = new ResizeObserver(function () {
+        if (currentMap === map && el.isConnected) map.invalidateSize();
+      });
+      mapResizeObserver.observe(el);
     }
 
     L.control

@@ -24,6 +24,17 @@ docker run -d \
 
 Open **http://localhost:8090** on the host, or **http://YOUR_SERVER:8090** from another device. The setup wizard opens on a fresh installation.
 
+Choose a **Theme** (Field Green, Slate, or Classic Blue) and **Display mode** (light, dark, auto, or
+high contrast) at the top of any setup step.
+These choices stay with this browser and carry through to the app. Use **Next**
+and **Back**, or **Jump to step** to revisit a section. Your draft is saved as
+you go; **Save and finish** on the review step applies it.
+
+On a configured instance, **Edit current setup** loads your running settings
+into a new draft. **Resume saved draft** continues unfinished changes instead.
+Opening the wizard does not change either. Starting from scratch is a separate
+choice; your running setup changes only when you apply the draft.
+
 The named volume `localsky-data` survives container replacement. A writable bind mount also works; the image initializes ownership for its application user. Keep this volume when upgrading.
 
 ### Networking for local devices

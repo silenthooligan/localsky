@@ -13,6 +13,7 @@
 
 pub mod control;
 pub mod flow;
+pub mod quick_run;
 pub mod snapshot;
 
 pub use control::*;

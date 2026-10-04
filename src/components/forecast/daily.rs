@@ -48,7 +48,7 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     }}
                 </span>
             </header>
-            <div class="daily-row">
+            <div class="daily-row" tabindex="0" role="region" aria-label="Daily forecast. Scroll for later days.">
                 {move || {
                     let s = snap.get();
                     let prefs = unit_prefs.get();

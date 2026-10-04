@@ -37,11 +37,11 @@
 
 // ── Condition builder ──
 .rulelab-conditions { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
-.rulelab-conditions__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.rulelab-conditions__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
 .rulelab__section-title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
 .cond-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .cond-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
-.cond-row__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--verdict-run); flex: none; }
+.cond-row__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-online); flex: none; }
 .cond-row__dot.is-off { background: var(--verdict-off); }
 .cond-row__text { display: flex; flex-direction: column; gap: 1px; margin-right: auto; min-width: 0; }
 .cond-row__name { font-weight: 700; color: var(--text-bright); }
@@ -59,7 +59,7 @@
 .setup-reentry { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-5) 0 var(--space-4); }
 .setup-reentry .setup-footer__btn { margin: 0; }
 .setup-step .setup-reentry + .sensors-section__hint { margin-top: 0; max-width: 70ch; line-height: 1.55; }
-.setup-test-result.is-ok { color: var(--verdict-run); }
+.setup-test-result.is-ok { color: var(--status-online); }
 .setup-test-result.is-err { color: var(--verdict-skip); }
 .setup-scan { display: flex; flex-direction: column; gap: var(--space-2); margin-left: calc(8px + var(--space-3)); padding: var(--space-3); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
 .setup-scan__title { margin: 0; font-size: var(--text-meta); font-weight: 700; color: var(--text-bright); }
@@ -95,11 +95,17 @@
 .cond-rows__val { max-width: 6rem; }
 .cond-rows__del { border: none; background: none; color: var(--text-faint); font-size: 1.2rem; cursor: pointer; padding: 0 var(--space-2); }
 .cond-rows__del:hover { color: var(--verdict-skip); }
+@media (max-width: 600px) {
+  .cond-rows__row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; }
+  .cond-rows__row > select:first-child { grid-column: 1 / -1; width: 100%; min-width: 0; }
+  .cond-rows__op, .cond-rows__val { max-width: none; width: 100%; min-width: 0; }
+  .cond-rows__del { min-height: 44px; }
+}
 .ui-input--inline { display: inline-block; width: auto; }
 .cond-editor__preview { margin-top: var(--space-1); }
 .cond-fire { font-size: var(--text-meta); font-weight: 700; font-family: var(--font-mono); color: var(--text-faint); }
 .cond-fire--yes { color: var(--verdict-skip); }
-.cond-fire--no { color: var(--verdict-run); }
+.cond-fire--no { color: var(--status-online); }
 
 .rulelab-layout {
   display: grid;
@@ -118,10 +124,13 @@
   padding: var(--space-3);
   position: sticky;
   top: var(--space-5);
+  max-height: calc(100dvh - 2 * var(--space-5));
+  overflow-y: auto;
+  min-width: 0;
 }
 .rulelab-history__item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-auto-rows: min-content;
   gap: 2px var(--space-2);
   text-align: left;
@@ -131,11 +140,12 @@
   padding: var(--space-2) var(--space-3);
   cursor: pointer;
   color: var(--text);
+  flex-shrink: 0;
   transition: background var(--motion-fast) var(--ease-out);
   &:hover { background: var(--surface-soft); }
   &.is-active { background: color-mix(in oklab, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
 }
-.rulelab-history__day { font-weight: 600; color: var(--text-bright); display: inline-flex; align-items: baseline; gap: 6px; }
+.rulelab-history__day { font-weight: 600; color: var(--text-bright); display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
 .rulelab-history__count {
   font-size: var(--text-meta); font-weight: 500; color: var(--text-faint);
   background: var(--elev-1); border: 1px solid var(--elev-border);
@@ -145,14 +155,14 @@
   justify-self: end;
   font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800;
   color: var(--v); padding: 2px 6px; border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--v) 16%, transparent);
+  background: color-mix(in oklab, var(--v) 8%, var(--elev-1));
 }
 .rulelab-history__reason { grid-column: 1 / -1; font-size: var(--text-meta); color: var(--text-faint); }
 .rulelab-main { min-width: 0; }
 @media (max-width: 920px) {
-  .rulelab-layout { grid-template-columns: 1fr; }
-  .rulelab-history { position: static; flex-direction: row; flex-wrap: wrap; }
-  .rulelab-history__item { flex: 1 1 200px; }
+  .rulelab-layout { grid-template-columns: minmax(0, 1fr); }
+  .rulelab-history { position: static; flex-direction: row; flex-wrap: nowrap; max-height: none; overflow-x: auto; scroll-snap-type: x proximity; }
+  .rulelab-history__item { flex: 0 0 220px; scroll-snap-align: start; }
 }
 .rulelab-page__sub { margin: 0; color: var(--text-dim); }
 .rulelab-empty {
@@ -198,22 +208,16 @@
   color: var(--text-faint); padding: var(--space-7); text-align: center;
   background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius);
 }
-// Category accents, shared by row + legend via --wk-accent. Follows the
-// one-meaning-per-color language (Task D): teal = watering/satisfied, blue =
-// rain skip (wet), red = alert/stop (blocked-by-law · freeze · wind), amber =
-// heat-extend, gray = neutral (pause / other). Law + freeze were blue and wind
-// was gray, which read as "water" and "nothing happening"; they are restrictions
-// / safety stops, so they are now red.
-.wk-row--run, .wk-legend__item--run { --wk-accent: var(--accent-good); }
-.wk-row--rain, .wk-legend__item--rain { --wk-accent: var(--accent-rain); }
-.wk-row--law, .wk-legend__item--law { --wk-accent: var(--accent-danger); }
-.wk-row--freeze, .wk-legend__item--freeze { --wk-accent: var(--accent-danger); }
-.wk-row--extended, .wk-legend__item--extended { --wk-accent: var(--accent-warm); }
-// wind is a safety stop -> alert/red (--accent-hot keeps it a half-step from
-// the other reds). pause is a user-chosen off state, so it stays neutral gray.
-.wk-row--wind { --wk-accent: var(--accent-hot); }
+// Weekly rows and their legend share blue watering and amber holds.
+.wk-row--run, .wk-legend__item--run { --wk-accent: var(--verdict-run); }
+.wk-row--rain, .wk-legend__item--rain { --wk-accent: var(--verdict-skip); }
+.wk-row--law, .wk-legend__item--law { --wk-accent: var(--verdict-skip); }
+.wk-row--freeze, .wk-legend__item--freeze { --wk-accent: var(--verdict-skip); }
+.wk-row--extended, .wk-legend__item--extended { --wk-accent: var(--verdict-run); }
+// Pause is a user-chosen off state and remains neutral.
+.wk-row--wind { --wk-accent: var(--verdict-skip); }
 .wk-row--pause { --wk-accent: var(--text-faint); }
-.wk-row--skip, .wk-legend__item--skip { --wk-accent: var(--text-faint); }
+.wk-row--skip, .wk-legend__item--skip { --wk-accent: var(--verdict-skip); }
 @media (max-width: 560px) {
   .wk-row { grid-template-columns: 5.5rem 1fr; row-gap: var(--space-1); }
   .wk-row__weather { grid-column: 2; justify-content: flex-start; }
@@ -224,121 +228,67 @@
 .rulelab-verdict {
   display: flex; flex-direction: column; gap: var(--space-2);
   padding: var(--space-5);
-  background: color-mix(in oklab, var(--v) 12%, var(--elev-1));
-  border: 1px solid var(--elev-border);
-  border-left: 4px solid var(--v);
-  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--v) 8%, var(--elev-1));
+  border: 1px solid var(--elev-border-strong);
+  border-top: 4px solid var(--v);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-1);
 }
-.rulelab-verdict__eyebrow {
-  font-family: var(--font-mono); font-size: var(--text-micro);
-  letter-spacing: var(--tracking-eyebrow); text-transform: uppercase;
-  color: var(--text-faint);
-}
+.rulelab-verdict__eyebrow { font-size: var(--text-caption); font-weight: 600; color: var(--text-dim); }
 .rulelab-verdict__row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
-.rulelab-verdict__pill {
-  font-family: var(--font-mono); font-weight: 800; letter-spacing: 0.06em;
-  font-size: var(--text-h2);
-  color: var(--v); padding: 4px 12px; border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--v) 18%, transparent); white-space: nowrap;
+.rulelab-verdict__pill { font-size: var(--text-h2); line-height: 1.2; font-weight: 700; color: var(--v); }
+.rulelab-verdict__reason { color: var(--text-bright); line-height: 1.6; }
+.rulelab-verdict__source { color: var(--text-dim); font-size: var(--text-caption); }
+.rulelab-path { background: var(--elev-1); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-lg); overflow: hidden; }
+.rulelab-path__head {
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-soft); border-bottom: 1px solid var(--elev-border);
+  h2 { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
+  p { margin: var(--space-1) 0 0; font-size: var(--text-caption); color: var(--text-dim); }
 }
-.rulelab-verdict__reason { color: var(--text-bright); font-weight: 600; font-size: var(--text-h3); }
-
-.rulelab-ladder { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); counter-reset: rule; }
+.rulelab-ladder { list-style: none; margin: 0; padding: var(--space-2) var(--space-4); }
 .rule-row {
-  display: flex; align-items: center; gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  background: var(--elev-1);
-  border: 1px solid var(--elev-border);
-  border-radius: var(--radius);
-  border-left: 3px solid transparent;
-  counter-increment: rule;
+  display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: var(--space-3);
+  position: relative; padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--elev-border);
+  &:last-child { border-bottom: 0; }
+  &::before { content: ''; position: absolute; left: 1rem; top: 2.7rem; bottom: -0.5rem; width: 1px; background: var(--elev-border-strong); }
+  &:last-child::before { display: none; }
 }
-// The ladder is first-match: numbering it makes the run order legible, so the
-// fired rung reads as "the decision happened here" with everything below muted.
-.rule-row::before {
-  content: counter(rule);
-  flex: 0 0 auto;
-  width: 1.4rem;
-  text-align: right;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-weight: 800;
-  font-size: var(--text-micro);
-  color: var(--text-faint);
+.rule-row__step {
+  display: grid; place-items: center; align-self: start; width: 2rem; height: 2rem;
+  border: 1px solid var(--elev-border-strong); border-radius: 50%;
+  background: var(--elev-1); color: var(--text-dim); font-size: var(--text-caption); font-variant-numeric: tabular-nums;
 }
-.rule-row.is-fired { border-left-color: var(--accent-row); border-left-width: 4px; background: color-mix(in oklab, var(--accent-row) 8%, var(--elev-1)); }
-.rule-row.is-fired::before { color: var(--accent-row); }
-.rule-row.is-muted {
-  // Desaturate (not just fade): a flat opacity:0.5 reads as loading/disabled/
-  // broken; draining the color specifically says "this rung was never reached"
-  // in the first-match ladder. Hover restores it for inspection.
-  opacity: 0.4;
-  filter: saturate(0.35);
-  transition: opacity var(--motion-base) var(--ease-out), filter var(--motion-base) var(--ease-out);
-}
-.rule-row.is-muted:hover { opacity: 0.75; filter: saturate(0.85); }
-.rule-row__cat {
-  font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase;
-  letter-spacing: 0.06em; color: var(--text-faint);
-  width: 4.5rem; flex: 0 0 auto;
-}
-.rule-row__cat[data-cat="safety"] { color: var(--accent-hot); }
-.rule-row__cat[data-cat="weather"] { color: var(--accent-rain); }
-.rule-row__cat[data-cat="soil"] { color: var(--accent-good); }
-.rule-row__cat[data-cat="heat"] { color: var(--accent-warm); }
-.rule-row__body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.rule-row__body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; padding-block: 2px; overflow-wrap: anywhere; }
+.rule-row__head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--space-1) var(--space-3); }
 .rule-row__label { font-weight: 600; color: var(--text-bright); }
-.rule-row__detail { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-dim); }
-// P3-9: distance-to-flip chip. Subtle, tinted by the row accent so a fired
-// gate's "past the line" reads in the verdict color and a passed gate's
-// "headroom" reads calm.
-.rule-row__margin {
-  display: inline-block;
-  margin-top: 2px;
-  width: fit-content;
-  font-size: var(--text-meta);
-  line-height: 1.3;
-  padding: 1px 7px;
-  border-radius: var(--radius-pill, 999px);
-  color: var(--accent-row, var(--text-dim));
-  background: color-mix(in oklab, var(--accent-row, var(--text-faint)) 14%, transparent);
+.rule-row__detail { font-size: var(--text-caption); color: var(--text-dim); line-height: 1.5; }
+.rule-row__badge { flex: none; font-size: var(--text-caption); font-weight: 600; }
+.rule-row__badge--fired { color: var(--accent-row); }
+.rule-row__badge--passed { color: var(--accent-good); }
+.rule-row__badge--skipped { color: var(--text-dim); }
+.rule-row__badge--overridden { color: var(--accent-warn); }
+.rule-row.is-fired, .rule-row.is-overridden {
+  .rule-row__body { padding: var(--space-3); border-radius: var(--radius-sm); border-left: 3px solid var(--accent-row); background: color-mix(in oklab, var(--accent-row) 6%, var(--elev-1)); }
+  .rule-row__step { margin-top: var(--space-2); border-color: var(--accent-row); color: var(--accent-row); }
 }
-.rule-row__badge {
-  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800;
-  letter-spacing: 0.06em; padding: 3px 8px; border-radius: var(--radius-sm);
-  white-space: nowrap; flex: 0 0 auto;
+.rule-row.is-muted { opacity: 1; }
+.rule-row__overridden { font-size: var(--text-caption); color: var(--text); line-height: 1.5; }
+.rulelab-unchecked {
+  border-top: 1px solid var(--elev-border-strong);
+  summary { cursor: pointer; padding: var(--space-4) var(--space-5); color: var(--text-dim); font-weight: 600; min-height: 44px; }
+  > p { margin: 0; padding: 0 var(--space-5) var(--space-2); color: var(--text-dim); font-size: var(--text-caption); }
 }
-.rule-row__badge--fired { color: var(--accent-row); background: color-mix(in oklab, var(--accent-row) 18%, transparent); }
-.rule-row__badge--passed { color: var(--accent-good); background: color-mix(in oklab, var(--accent-good) 14%, transparent); }
-.rule-row__badge--skipped { color: var(--text-faint); background: var(--surface-soft); }
-.rule-row__badge--overridden { color: var(--accent-warn); background: color-mix(in oklab, var(--accent-warn) 16%, transparent); }
-
-// An overridden gate DID trip; it just did not decide. Read it as a live
-// signal (warn accent, left rule) rather than the muted treatment given to
-// gates that never ran, and never as a pass.
-.rule-row.is-overridden {
-  border-left-color: var(--accent-warn);
-  border-left-width: 4px;
-  background: color-mix(in oklab, var(--accent-warn) 6%, var(--elev-1));
-}
-.rule-row.is-overridden::before { color: var(--accent-warn); }
-.rule-row__overridden {
-  display: inline-block;
-  margin-top: 2px;
-  width: fit-content;
-  font-size: var(--text-meta);
-  line-height: 1.3;
-  padding: 1px 7px;
-  border-radius: var(--radius-pill, 999px);
-  color: var(--accent-warn);
-  background: color-mix(in oklab, var(--accent-warn) 12%, transparent);
-}
-
 @media (max-width: 600px) {
-  .rule-row { flex-wrap: wrap; }
-  .rule-row__cat { width: auto; }
+  .rulelab-verdict, .rulelab-path__head { padding: var(--space-4); }
+  .rulelab-ladder { padding-inline: var(--space-3); }
+  .rule-row { grid-template-columns: 1.75rem minmax(0, 1fr); gap: var(--space-2); }
+  .rule-row__step { width: 1.75rem; height: 1.75rem; }
+  .rule-row::before { left: 0.875rem; }
 }
+.rulelab-load-error { padding: var(--space-3); border-left: 3px solid var(--accent-warn); color: var(--text); background: var(--elev-2); }
+.cond-editor__fields { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: var(--space-3); }
 
 // ═══════════════════════════════════════════════════════════════════════
 // Simulator (marquee feature 1)
@@ -586,7 +536,7 @@
   padding: var(--space-2) 0; border-bottom: 1px solid var(--elev-line);
   &:last-child { border-bottom: none; }
 }
-.hist-zone-row__name { font-weight: 600; color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-zone-row__name { font-weight: 600; color: var(--text-bright); min-width: 0; overflow-wrap: anywhere; }
 .hist-zone-row__spark { min-width: 0; }
 .hist-zone-row__total { font-family: var(--font-mono); color: var(--text-dim); }
 
@@ -672,7 +622,7 @@
 .settings-overview__stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-3); }
 
 .settings-overview__status { font-family: var(--font-mono); font-size: var(--text-h3); color: var(--text-bright); }
-.settings-overview__status.is-ok { color: var(--verdict-run); }
+.settings-overview__status.is-ok { color: var(--status-online); }
 .settings-overview__status.is-warn { color: var(--verdict-wind); }
 .settings-overview__section { display: flex; flex-direction: column; gap: var(--space-2); }
 .settings-overview__section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
@@ -684,7 +634,7 @@
 .settings-overview__row-name { color: var(--text); font-weight: 600; margin-right: auto; }
 .settings-overview__row-meta { color: var(--text-faint); font-size: var(--text-meta); font-family: var(--font-mono); }
 .settings-overview__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.settings-overview__dot.is-fresh { background: var(--verdict-run); }
+.settings-overview__dot.is-fresh { background: var(--status-online); }
 .settings-overview__dot.is-stale { background: var(--verdict-wind); }
 .settings-overview__dot.is-offline { background: var(--verdict-skip); }
 .settings-overview__hint { margin: 0; color: var(--text-faint); font-size: var(--text-meta); line-height: 1.5; }
@@ -791,7 +741,7 @@
   border-radius: 999px;
   font-size: var(--text-meta);
   font-weight: 700;
-  color: #0b1020;
+  color: var(--on-accent);
   background: var(--accent);
   border: 1px solid color-mix(in oklab, var(--accent) 70%, #000);
   box-shadow: 0 6px 24px color-mix(in oklab, var(--accent) 35%, transparent);
@@ -799,21 +749,12 @@
   transition: transform var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 .beta-fb__pill:hover { transform: translateY(-1px); box-shadow: 0 8px 28px color-mix(in oklab, var(--accent) 45%, transparent); }
-.beta-fb__sheet {
-  width: min(340px, calc(100vw - 2 * var(--space-4)));
-  padding: var(--space-4);
-  @include surface($border: (1px solid var(--elev-border-strong)), $shadow: (var(--shadow-3, 0 18px 60px rgba(0,0,0,0.5))));
-
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.beta-fb__title { margin: 0; font-weight: 800; color: var(--text-bright); }
 .beta-fb__sub { margin: 0; font-size: var(--text-body-sm); color: var(--text-dim); line-height: 1.45; }
-.beta-fb__kind { display: flex; gap: var(--space-2); }
+.beta-fb__kind { display: flex; gap: var(--space-2); margin-block: var(--space-4); }
 .beta-fb__kind-btn {
   flex: 1;
   padding: 6px 10px;
+  min-height: 44px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--elev-border-strong);
   background: none;
@@ -840,15 +781,8 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  border: none;
-  background: var(--accent);
-  color: #0b1020;
-  font-weight: 700;
-  cursor: pointer;
+  margin-block: var(--space-4);
 }
-.beta-fb__send:hover { filter: brightness(1.08); }
 .beta-fb__privacy { margin: 0; font-size: var(--text-micro); color: var(--text-faint); line-height: 1.4; }
 
 html[data-readonly="true"] .beta-fb,
@@ -885,7 +819,7 @@ html[data-kiosk="true"] .beta-fb,
 }
 .runlog-row:nth-child(even) { background: rgba(255, 255, 255, 0.02); }
 .runlog-row__time { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-dim); }
-.runlog-row__zone { color: var(--text); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runlog-row__zone { color: var(--text); font-weight: 600; min-width: 0; }
 .runlog-row__badge {
   justify-self: start;
   font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
@@ -912,7 +846,8 @@ html[data-kiosk="true"] .beta-fb,
 // ------------------------------------------------------------------
 // Rule Lab: order arrows, on/off switch, template farm.
 // ------------------------------------------------------------------
-.cond-row--off .cond-row__name, .cond-row--off .cond-row__sum { opacity: 0.55; }
+.cond-row--off .cond-row__name { color: var(--text-dim); text-decoration: line-through; }
+.cond-row--off .cond-row__sum { color: var(--text-dim); }
 .cond-row__order { display: flex; flex-direction: column; gap: 2px; }
 .cond-row__arrow {
   border: 1px solid var(--elev-border-strong); background: none; color: var(--text-faint);
@@ -920,6 +855,12 @@ html[data-kiosk="true"] .beta-fb,
 }
 .cond-row__arrow:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .cond-row__arrow:disabled { opacity: 0.3; cursor: default; }
+.cond-row--rule .cond-row__text { flex: 1; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .cond-row--rule { display: grid; grid-template-columns: 44px 8px minmax(0, 1fr); gap: var(--space-2); }
+  .cond-row--rule .cond-row__arrow { width: 44px; height: 44px; }
+  .cond-row--rule .cond-row__actions { grid-column: 1 / -1; justify-content: flex-end; }
+}
 // Segmented On|Off pill: both states visible so it reads as togglable
 // at a glance, active side lit in the verdict color.
 .toggle-pill {
@@ -933,7 +874,7 @@ html[data-kiosk="true"] .beta-fb,
   font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--text-faint);
 }
-.toggle-pill__opt--on.is-active { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 16%, transparent); }
+.toggle-pill__opt--on.is-active { color: var(--status-online); background: color-mix(in oklab, var(--status-online) 16%, transparent); }
 .toggle-pill__opt--off.is-active { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 16%, transparent); }
 
 .rule-templates { margin-top: var(--space-5); }
@@ -946,7 +887,7 @@ html[data-kiosk="true"] .beta-fb,
 .rule-templates__summary::-webkit-details-marker { display: none; }
 .rule-templates__summary:hover { color: var(--text); border-color: var(--accent); }
 .rule-templates[open] .rule-templates__summary { border-style: solid; margin-bottom: var(--space-3); }
-.rule-templates__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); }
+.rule-templates__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: var(--space-3); }
 .rule-template {
   display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
@@ -1019,25 +960,37 @@ html[data-kiosk="true"] .beta-fb,
 
 // Built-in gate manager: per-gate rows with switch or always-on lock.
 .gate-list { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
+.gate-group {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  h3 { margin: var(--space-3) 0 var(--space-1); padding: var(--space-3); background: var(--surface-soft); border-bottom: 2px solid var(--accent-rain); border-radius: var(--radius-sm); font-size: var(--text-h3); }
+  &:first-of-type h3 { border-color: var(--text-dim); }
+}
 .gate-row {
   display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
   // Read-only: this row reports what a gate decided, it is not a control.
   background: var(--surface-static-bg); border-radius: var(--radius-sm);
-  // Category stripe (same grammar as the decision trace): weather gates blue,
-  // control/legal "protected" gates red. Teaches one rule across both surfaces.
+  // Category stripes describe rule types, independently of live verdicts.
   box-shadow: inset 3px 0 0 var(--accent-rain);
 }
-.gate-row--protected { box-shadow: inset 3px 0 0 var(--accent-hot); }
+.gate-row--protected { box-shadow: inset 3px 0 0 var(--text-faint); }
 .gate-row--off .gate-row__label { color: var(--text-faint); text-decoration: line-through; }
 .gate-row__text { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .gate-row__label { font-weight: 600; color: var(--text); font-size: var(--text-body-sm); }
 .gate-row__meaning { font-size: var(--text-micro); color: var(--text-faint); line-height: 1.4; }
+.gate-row__details {
+  summary { cursor: pointer; color: var(--text-dim); font-size: var(--text-caption); padding-block: var(--space-2); }
+  .gate-row__meaning { display: block; padding-bottom: var(--space-2); font-size: var(--text-caption); }
+}
 .gate-row__lock {
-  color: var(--accent-hot);
   font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--text-faint); border: 1px dashed var(--elev-border-strong);
   border-radius: 999px; padding: 3px 10px; white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .gate-row { align-items: flex-start; flex-wrap: wrap; }
+  .gate-row__text { flex-basis: 100%; }
+  .gate-row__lock { margin-bottom: var(--space-1); }
 }
 
 // ------------------------------------------------------------------

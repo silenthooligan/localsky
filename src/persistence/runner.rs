@@ -134,6 +134,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "forecast_hourly_archive",
         sql: include_str!("migrations/M0023_forecast_hourly_archive.sql"),
     },
+    Migration {
+        version: "M0024",
+        name: "quick_runs",
+        sql: include_str!("migrations/M0024_quick_runs.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -315,6 +320,7 @@ mod tests {
                 "M0021".to_string(),
                 "M0022".to_string(),
                 "M0023".to_string(),
+                "M0024".to_string(),
             ]
         );
     }

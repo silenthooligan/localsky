@@ -180,11 +180,7 @@ pub fn RulesStep() -> impl IntoView {
         <div class="setup-step">
             <h2 class="setup-step__title">"Watering rules "<span class="setup-step__optional">"optional"</span><HelpHint topic="restrictions"/></h2>
             <p class="setup-step__body">
-                "Does your water district, city or HOA limit when you can water? "
-                "Most do, and LocalSky will keep to it: it never waters on a day or "
-                "at an hour the rule forbids, and the week on your dashboard shows "
-                "which days are yours. Pick the closest match; you can tune the "
-                "exact days and hours later under Settings."
+                "Choose a starting rule for your water district or HOA. Check its days and hours below; adjust them in Settings to match your local requirements."
             </p>
 
             <Panel title="Your house number".to_string()>

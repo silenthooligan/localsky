@@ -50,7 +50,7 @@ pub enum Admission {
 }
 
 pub const HISTORY_UNAVAILABLE_REASON: &str =
-    "Watering held: today's water use could not be verified from History";
+    "Watering cannot start: today's water use could not be verified from History";
 
 /// Seconds this zone has been (or is committed to be) open today: the
 /// interval UNION of the day's rows, never their sum. A manual run is
@@ -140,7 +140,7 @@ pub async fn used_today_s(runs: &RunsStore, slug: &str, now_epoch: i64) -> Optio
 
 /// Judge a requested run against the zone's daily ceiling.
 ///
-/// Without readable history the allowance is unknown, so watering is held.
+/// Without readable history the allowance is unknown, so watering is skipped.
 pub async fn admit(
     runs: Option<&RunsStore>,
     slug: &str,

@@ -986,7 +986,7 @@ fn RestrictionForm(
 
             <FormField
                 label="Exempt sprinkler types".to_string()
-                helptext="Heads this rule spares. Many districts exempt drip. The zone's card says it is exempt, but a yard-wide hold still stops it.".to_string()
+                helptext="Heads this rule spares. Many districts exempt drip. The zone's card says it is exempt, but a pause for the whole yard still stops it.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 {string_chips(extras.exempt_sprinklers, [

@@ -1,6 +1,6 @@
 # API reference
 
-LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **0.9.2** uses response contract **2.4.0**. The path prefix and contract version are independent.
+LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.0** uses response contract **2.4.0**. The path prefix and contract version are independent.
 
 Start with the [API quick start](api-quickstart.md), or download the [OpenAPI read profile](openapi.json). The profile covers selected read operations; the reference below also documents control and administration.
 

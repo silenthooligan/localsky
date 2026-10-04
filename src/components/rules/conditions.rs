@@ -55,17 +55,76 @@ struct Row {
     value: f64,
 }
 
+/// Only represent expressions this editor can round-trip without dropping terms.
+fn simple_conditions(
+    condition: Option<&serde_json::Value>,
+) -> Option<(&'static str, Vec<serde_json::Value>)> {
+    let condition = condition?;
+    let (mode, rows) = if condition.get("compare").is_some() {
+        ("all", vec![condition.clone()])
+    } else if let Some(rows) = condition.get("all").and_then(|v| v.as_array()) {
+        ("all", rows.clone())
+    } else {
+        ("any", condition.get("any")?.as_array()?.clone())
+    };
+    if rows.is_empty()
+        || rows.iter().any(|row| {
+            let Some(c) = row.get("compare") else {
+                return true;
+            };
+            !METRICS
+                .iter()
+                .any(|(metric, _, _)| Some(*metric) == c.get("metric").and_then(|v| v.as_str()))
+                || !OPS
+                    .iter()
+                    .any(|(_, op)| Some(*op) == c.get("op").and_then(|v| v.as_str()))
+                || c.get("value").and_then(|v| v.as_f64()).is_none()
+        })
+    {
+        return None;
+    }
+    Some((mode, rows))
+}
+
+fn rule_list(config: &serde_json::Value) -> Vec<serde_json::Value> {
+    config
+        .pointer("/conditions/rules")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "hydrate")]
+async fn persist_rules(
+    before: Vec<serde_json::Value>,
+    next: Vec<serde_json::Value>,
+) -> Result<
+    (
+        serde_json::Value,
+        crate::components::config_client::SaveOutcome,
+    ),
+    String,
+> {
+    let mut fresh = crate::components::config_client::get_config().await?;
+    if rule_list(&fresh) != before {
+        return Err("Rules changed elsewhere. Reload them before saving.".into());
+    }
+    fresh["conditions"]["rules"] = serde_json::json!(next);
+    let result = crate::components::config_client::put_config(&fresh).await?;
+    // Keep the server's normalized representation for the next conflict check
+    // (including numeric/default-field normalization), not the submitted JSON.
+    let saved = crate::components::config_client::get_config()
+        .await
+        .map_err(|e| format!("Current rules could not be reloaded after saving. {e}"))?;
+    Ok((saved, result))
+}
+
 /// Human one-liner for a stored rule's condition + action (list view).
 fn rule_summary(rule: &serde_json::Value) -> String {
-    let cond = rule.get("condition");
-    let (joiner, rows) =
-        if let Some(all) = cond.and_then(|c| c.get("all")).and_then(|v| v.as_array()) {
-            (" AND ", all.clone())
-        } else if let Some(any) = cond.and_then(|c| c.get("any")).and_then(|v| v.as_array()) {
-            (" OR ", any.clone())
-        } else {
-            return "custom condition".to_string();
-        };
+    let Some((joiner, rows)) = simple_conditions(rule.get("condition")) else {
+        return "Nested condition — configuration file editing".to_string();
+    };
+    let joiner = if joiner == "any" { " OR " } else { " AND " };
     let parts: Vec<String> = rows
         .iter()
         .filter_map(|r| {
@@ -106,32 +165,32 @@ struct RuleTemplate {
 const RULE_TEMPLATES: &[RuleTemplate] = &[
     RuleTemplate {
         name: "Skip after heavy rain",
-        desc: "More than half an inch already today: the yard has had its drink.",
+        desc: "Skip when today's rain exceeds 0.5 inches.",
         json: r#"{"id":"skip_heavy_rain","name":"Skip after heavy rain","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"rain_today_in","op":"gt","value":0.5}},"action":"skip"}"#,
     },
     RuleTemplate {
         name: "Skip cold mornings",
-        desc: "Below 45 F at decision time: cold water on cold turf does nothing good.",
+        desc: "Skip when the current temperature is below 45 °F.",
         json: r#"{"id":"skip_cold_morning","name":"Skip cold mornings","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"temp_now_f","op":"lt","value":45.0}},"action":"skip"}"#,
     },
     RuleTemplate {
         name: "Windy morning guard",
-        desc: "Wind above 12 mph: spray drifts instead of landing.",
+        desc: "Skip when current wind exceeds 12 mph.",
         json: r#"{"id":"skip_windy","name":"Windy morning guard","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"wind_now_mph","op":"gt","value":12.0}},"action":"skip"}"#,
     },
     RuleTemplate {
         name: "Soil already comfortable",
-        desc: "Zone probe above 70 percent: let the model coast.",
+        desc: "Skip when the zone's soil probe reads above 70%.",
         json: r#"{"id":"skip_soil_wet","name":"Soil already comfortable","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"zone_soil_pct","op":"gt","value":70.0}},"action":"skip"}"#,
     },
     RuleTemplate {
         name: "Heat wave boost",
-        desc: "Three-day forecast high above 95 F: stretch runs by a quarter.",
+        desc: "Add 25% when the three-day forecast high exceeds 95 °F.",
         json: r#"{"id":"heat_boost","name":"Heat wave boost","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"temp_max3day_f","op":"gt","value":95.0}},"action":{"adjust_multiplier":{"factor":1.25}}}"#,
     },
     RuleTemplate {
         name: "Dry spell extend",
-        desc: "No meaningful rain for a week: lean a little harder.",
+        desc: "Extend watering after more than seven days without meaningful rain.",
         json: r#"{"id":"dry_spell","name":"Dry spell extend","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"days_since_rain","op":"gt","value":7.0}},"action":"extend"}"#,
     },
 ];
@@ -139,15 +198,24 @@ const RULE_TEMPLATES: &[RuleTemplate] = &[
 #[component]
 pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let config = RwSignal::new(serde_json::Value::Null);
+    let loading = RwSignal::new(true);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(0_u32);
     // None = list view; Some(idx) = editing rules[idx]; usize::MAX = new.
     let editing: RwSignal<Option<usize>> = RwSignal::new(None);
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
+        retry.get();
+        loading.set(true);
+        error.set(None);
         leptos::task::spawn_local(async move {
-            if let Ok(v) = crate::components::config_client::get_config().await {
-                config.set(v);
+            match crate::components::config_client::get_config().await {
+                Ok(v) => config.set(v),
+                Err(e) => error.set(Some(format!("Rules could not be loaded. {e}"))),
             }
+            loading.set(false);
         });
     });
     #[cfg(not(feature = "hydrate"))]
@@ -157,24 +225,33 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
     // stored rules array, then PUT the whole config. Lives on the page,
     // not the row, so the delete confirmation can reach it too.
     let mutate_save = move |f: &dyn Fn(&mut Vec<serde_json::Value>)| {
-        config.update(|cfg| {
-            if let Some(arr) = cfg
-                .get_mut("conditions")
-                .and_then(|c| c.get_mut("rules"))
-                .and_then(|v| v.as_array_mut())
-            {
-                f(arr);
-            }
-        });
-        let candidate = config.get_untracked();
+        if busy.get_untracked() || loading.get_untracked() || config.get_untracked().is_null() {
+            return;
+        }
+        let before = rule_list(&config.get_untracked());
+        let mut next = before.clone();
+        f(&mut next);
         #[cfg(feature = "hydrate")]
-        leptos::task::spawn_local(async move {
-            if let Err(e) = crate::components::config_client::put_config(&candidate).await {
-                crate::components::ui::use_toast().error(format!("Rule save failed: {e}"));
-            }
-        });
-        #[cfg(not(feature = "hydrate"))]
-        let _ = candidate;
+        {
+            busy.set(true);
+            error.set(None);
+            let toast = crate::components::ui::use_toast();
+            leptos::task::spawn_local(async move {
+                match persist_rules(before, next).await {
+                    Ok((saved, outcome)) => {
+                        config.set(saved);
+                        toast.success(outcome.save_confirmation());
+                    }
+                    Err(e) => {
+                        if let Ok(current) = crate::components::config_client::get_config().await {
+                            config.set(current);
+                        }
+                        error.set(Some(format!("Could not confirm the rule change. {e}")));
+                    }
+                }
+                busy.set(false);
+            });
+        }
     };
 
     // Delete asks through the shared ConfirmSheet instead of a native
@@ -203,9 +280,10 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
             .unwrap_or_default();
         if rules.is_empty() {
             return view! {
-                <p class="sensors-section__hint">"No custom rules yet. Add one to skip / extend / scale watering on conditions you choose."</p>
+                <li class="sensors-section__hint">"No custom rules yet. Add a rule or start with an example below."</li>
             }.into_any();
         }
+        let total = rules.len();
         rules
             .into_iter()
             .enumerate()
@@ -216,6 +294,7 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                     .unwrap_or_else(|| "rule".to_string());
                 let enabled = r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                 let summary = rule_summary(&r);
+                let editable = simple_conditions(r.get("condition")).is_some();
                 let del = move |_| {
                     pending_delete.set(Some(idx));
                     delete_open.set(true);
@@ -231,28 +310,32 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                 let up = move |_| { mutate_save(&|arr| { if idx > 0 && idx < arr.len() { arr.swap(idx, idx - 1); } }); };
                 let down = move |_| { mutate_save(&|arr| { if idx + 1 < arr.len() { arr.swap(idx, idx + 1); } }); };
                 view! {
-                    <li class="cond-row" class:cond-row--off=!enabled>
+                    <li class="cond-row cond-row--rule" class:cond-row--off=!enabled>
                         <div class="cond-row__order">
-                            <button type="button" class="cond-row__arrow" aria-label="Move rule earlier" title="Evaluated sooner" on:click=up disabled=move || idx == 0>{"\u{25B2}"}</button>
-                            <button type="button" class="cond-row__arrow" aria-label="Move rule later" title="Evaluated later" on:click=down>{"\u{25BC}"}</button>
+                            <button type="button" class="cond-row__arrow" aria-label="Move rule earlier" title="Evaluated sooner" on:click=up disabled=move || idx == 0 || busy.get() || editing.get().is_some()>{"\u{25B2}"}</button>
+                            <button type="button" class="cond-row__arrow" aria-label="Move rule later" title="Evaluated later" on:click=down disabled=move || idx + 1 == total || busy.get() || editing.get().is_some()>{"\u{25BC}"}</button>
                         </div>
                         <span class="cond-row__dot" class:is-off=!enabled></span>
                         <div class="cond-row__text">
-                            <span class="cond-row__name">{name}</span>
+                            <span class="cond-row__name">{name.clone()}</span>
                             <span class="cond-row__sum">{summary}</span>
                         </div>
+                        <div class="cond-row__actions">
                         <button
                             type="button"
                             class="toggle-pill"
                             role="switch"
+                            aria-label=format!("{} rule", name)
+                            disabled=move || busy.get() || editing.get().is_some()
                             aria-checked=enabled.to_string()
                             on:click=toggle
                         >
                             <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=enabled>"On"</span>
                             <span class="toggle-pill__opt toggle-pill__opt--off" class:is-active=!enabled>"Off"</span>
                         </button>
-                        <Button variant="ghost" on_click=Callback::new(move |_| editing.set(Some(idx)))>"Edit"</Button>
-                        <Button variant="danger" on_click=Callback::new(del)>"Delete"</Button>
+                        <Button variant="ghost" disabled=Signal::derive(move || busy.get() || editing.get().is_some() || !editable) on_click=Callback::new(move |_| editing.set(Some(idx)))>"Edit"</Button>
+                        <Button variant="danger" disabled=Signal::derive(move || busy.get() || editing.get().is_some()) on_click=Callback::new(del)>"Delete"</Button>
+                        </div>
                     </li>
                 }
             })
@@ -264,49 +347,37 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
         <section class="rulelab-conditions">
             <div class="rulelab-conditions__head">
                 <h2 class="rulelab__section-title">"Your watering rules"</h2>
-                <Button variant="primary"
+                <Button variant="primary" disabled=Signal::derive(move || busy.get() || loading.get() || config.get().is_null() || editing.get().is_some())
                     on_click=Callback::new(move |_| editing.set(Some(usize::MAX)))>"+ New rule"</Button>
             </div>
             <p class="sensors-section__hint">
                 "A rule can add a skip, or extend or scale a run. It can never overrule a safety gate. They run top to bottom and the first skip wins."
             </p>
-            <ul class="cond-list">{rules_view}</ul>
+            <Show when=move || loading.get()><p role="status">"Loading custom rules…"</p></Show>
+            <Show when=move || busy.get()><p role="status">"Saving rule…"</p></Show>
+            <Show when=move || error.get().is_some()>
+                <div class="rulelab-load-error" role="alert"><p>{move || error.get().unwrap_or_default()}</p>
+                    <button type="button" class="btn btn--ghost" disabled=move || busy.get() || editing.get().is_some() || loading.get()
+                        on:click=move |_| retry.update(|n| *n += 1)>"Reload custom rules"</button>
+                </div>
+            </Show>
+            <Show when=move || !loading.get() && !config.get().is_null()><ul class="cond-list">{rules_view}</ul></Show>
 
             <details class="rule-templates">
-                <summary class="rule-templates__summary">"Template farm: proven rules, one click to make live"</summary>
+                <summary class="rule-templates__summary">"Example rules"</summary>
                 <div class="rule-templates__grid">
                     {RULE_TEMPLATES.iter().map(|t| {
                         let tpl = *t;
                         let add = move |_| {
                             let rule: serde_json::Value = serde_json::from_str(tpl.json).expect("template json");
-                            config.update(|cfg| {
-                                let conditions = cfg
-                                    .as_object_mut()
-                                    .map(|o| o.entry("conditions").or_insert(serde_json::json!({"rules": []})));
-                                if let Some(c) = conditions {
-                                    let arr = c
-                                        .as_object_mut()
-                                        .map(|o| o.entry("rules").or_insert(serde_json::json!([])));
-                                    if let Some(serde_json::Value::Array(arr)) = arr {
-                                        let mut r = rule.clone();
-                                        // Unique id per instantiation.
-                                        let base = r.get("id").and_then(|v| v.as_str()).unwrap_or("rule").to_string();
-                                        let n = arr.len();
-                                        r["id"] = serde_json::Value::String(format!("{base}_{n}"));
-                                        arr.push(r);
-                                    }
-                                }
+                            mutate_save(&|arr| {
+                                let mut r = rule.clone();
+                                let base = r.get("id").and_then(|v| v.as_str()).unwrap_or("rule");
+                                let mut suffix = arr.len();
+                                while arr.iter().any(|v| v.get("id").and_then(|v| v.as_str()) == Some(format!("{base}_{suffix}").as_str())) { suffix += 1; }
+                                r["id"] = serde_json::json!(format!("{base}_{suffix}"));
+                                arr.push(r);
                             });
-                            let candidate = config.get_untracked();
-                            #[cfg(feature = "hydrate")]
-                            leptos::task::spawn_local(async move {
-                                match crate::components::config_client::put_config(&candidate).await {
-                                    Ok(_) => crate::components::ui::use_toast().success("Rule added and live. Tune it with Edit."),
-                                    Err(e) => crate::components::ui::use_toast().error(format!("Add failed: {e}")),
-                                }
-                            });
-                            #[cfg(not(feature = "hydrate"))]
-                            let _ = candidate;
                         };
                         view! {
                             <div class="rule-template">
@@ -314,7 +385,7 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                                     <span class="rule-template__name">{t.name}</span>
                                     <span class="rule-template__desc">{t.desc}</span>
                                 </div>
-                                <Button variant="primary" on_click=Callback::new(add)>"Add"</Button>
+                                <Button variant="primary" disabled=Signal::derive(move || busy.get() || loading.get() || config.get().is_null() || editing.get().is_some()) on_click=Callback::new(add)>"Add"</Button>
                             </div>
                         }
                     }).collect_view()}
@@ -325,7 +396,7 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                 let existing = if idx == usize::MAX {
                     None
                 } else {
-                    config.get().get("conditions").and_then(|c| c.get("rules"))
+                    config.get_untracked().get("conditions").and_then(|c| c.get("rules"))
                         .and_then(|v| v.as_array()).and_then(|a| a.get(idx).cloned())
                 };
                 view! {
@@ -361,6 +432,8 @@ fn ConditionRuleEditor(
     existing: Option<serde_json::Value>,
     on_done: Callback<()>,
 ) -> impl IntoView {
+    // Compare against the list the editor actually opened, not a later render.
+    let original_rules = StoredValue::new(rule_list(&config.get_untracked()));
     // Seed from existing or sensible defaults.
     let seed_id = existing
         .as_ref()
@@ -381,18 +454,7 @@ fn ConditionRuleEditor(
         .unwrap_or(true);
     // Match mode + rows.
     let cond = existing.as_ref().and_then(|r| r.get("condition"));
-    let (seed_mode, seed_rows) =
-        if let Some(arr) = cond.and_then(|c| c.get("any")).and_then(|v| v.as_array()) {
-            ("any", arr.clone())
-        } else {
-            (
-                "all",
-                cond.and_then(|c| c.get("all"))
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-        };
+    let (seed_mode, seed_rows) = simple_conditions(cond).unwrap_or(("all", Vec::new()));
     let rows_seed: Vec<Row> = seed_rows
         .iter()
         .filter_map(|r| {
@@ -454,8 +516,13 @@ fn ConditionRuleEditor(
     let scope_mode = RwSignal::new(seed_scope.to_string());
     let scope_zones = RwSignal::new(seed_zones);
     let error = RwSignal::new(String::new());
+    let saving = RwSignal::new(false);
 
     let on_save = move |_| {
+        if saving.get_untracked() {
+            return;
+        }
+        error.set(String::new());
         let mut rid = id.get().trim().to_string();
         if rid.is_empty() {
             // Derive a slug from the name for new rules.
@@ -507,37 +574,43 @@ fn ConditionRuleEditor(
             "condition": condition,
             "action": action_json,
         });
-        config.update(|cfg| {
-            if !cfg.is_object() {
-                *cfg = serde_json::json!({});
-            }
-            // Ensure conditions.rules exists.
-            let obj = cfg.as_object_mut().unwrap();
-            let conditions = obj
-                .entry("conditions")
-                .or_insert(serde_json::json!({"rules": []}));
-            if conditions.get("rules").is_none() {
-                conditions
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("rules".into(), serde_json::json!([]));
-            }
-            if let Some(arr) = conditions.get_mut("rules").and_then(|v| v.as_array_mut()) {
-                if idx == usize::MAX || idx >= arr.len() {
-                    arr.push(entry);
-                } else {
-                    arr[idx] = entry;
-                }
-            }
-        });
-        let candidate = config.get_untracked();
+        let before = original_rules.get_value();
+        if before
+            .iter()
+            .enumerate()
+            .any(|(i, r)| i != idx && r.get("id") == entry.get("id"))
+        {
+            error.set("A rule with this name already exists. Choose another name.".into());
+            return;
+        }
+        let mut next = before.clone();
+        if idx != usize::MAX && idx >= next.len() {
+            error.set("This rule changed. Close the editor and reload rules.".into());
+            return;
+        }
+        if idx == usize::MAX {
+            next.push(entry);
+        } else {
+            next[idx] = entry;
+        }
         #[cfg(feature = "hydrate")]
-        leptos::task::spawn_local(async move {
-            let _ = crate::components::config_client::put_config(&candidate).await;
-        });
-        #[cfg(not(feature = "hydrate"))]
-        let _ = candidate;
-        on_done.run(());
+        {
+            saving.set(true);
+            let toast = crate::components::ui::use_toast();
+            leptos::task::spawn_local(async move {
+                match persist_rules(before, next).await {
+                    Ok((saved, outcome)) => {
+                        config.set(saved);
+                        toast.success(outcome.save_confirmation());
+                        on_done.run(());
+                    }
+                    Err(e) => {
+                        error.set(format!("Rule was not confirmed saved. {e}"));
+                        saving.set(false);
+                    }
+                }
+            });
+        }
     };
 
     // Live "would fire now?", answered by the ENGINE's own evaluator.
@@ -548,11 +621,11 @@ fn ConditionRuleEditor(
     // whether or not the forecast reported one, so a yard with no
     // overnight low previewed a freeze rule as firing while the live
     // evaluation held it Unknown. The evaluator is shared now, so the
-    // preview runs the same code the morning check runs. Rows naming a
-    // per-zone metric stay unpreviewable: there is no single yard-wide
-    // soil reading to evaluate against.
+    // preview runs the same code the morning check runs, retaining Unknown.
+    // A missing soil term stays in the expression; a known true ANY term or
+    // known false ALL term can still decide the result.
     let would_fire = move || {
-        use crate::engine::conditions::{eval_expr, ConditionCtx, ConditionExpr};
+        use crate::engine::conditions::{preview_expr, ConditionCtx, ConditionExpr};
         let s = snap.get();
         let rs = rows.get();
         let terms: Vec<ConditionExpr> = rs
@@ -564,22 +637,12 @@ fn ConditionRuleEditor(
                     value: r.value,
                 })
             })
-            .filter(|t| {
-                !matches!(
-                    t,
-                    ConditionExpr::Compare {
-                        metric: crate::engine::conditions::Metric::ZoneSoilPct,
-                        ..
-                    }
-                )
-            })
             .collect();
-        if terms.is_empty() {
-            return None; // only zone_soil_pct rows -> per-zone, not previewable
+        if terms.is_empty() || terms.len() != rs.len() {
+            return None;
         }
         let inputs = crate::engine::skip_rules::inputs_from_skipcheck(&s.skip_check);
-        // No yard-wide probe: a zone-soil term is filtered out above, so
-        // this stands in for the per-zone reading the engine would use.
+        // There is no yard-wide probe. Keep that evidence unknown.
         let zone = crate::engine::skip_rules::ZoneSoil {
             slug: String::new(),
             name: String::new(),
@@ -595,17 +658,19 @@ fn ConditionRuleEditor(
             i: &inputs,
             zone: &zone,
         };
-        let expr = if mode.get_untracked() == "any" {
+        let expr = if mode.get() == "any" {
             ConditionExpr::Any(terms)
         } else {
             ConditionExpr::All(terms)
         };
-        Some(eval_expr(&expr, &ctx))
+        preview_expr(&expr, &ctx)
     };
 
     view! {
         <div class="cond-editor">
             <h3 class="source-editor__title">{if idx == usize::MAX { "New rule" } else { "Edit rule" }}</h3>
+            <fieldset class="cond-editor__fields" disabled=move || saving.get()>
+            <legend class="sr-only">"Rule settings"</legend>
             <label class="cond-editor__field">
                 <span>"Name"</span>
                 <input type="text" class="ui-input" placeholder="e.g. Skip soggy front yard"
@@ -618,7 +683,7 @@ fn ConditionRuleEditor(
 
             <div class="cond-editor__match">
                 <span>"Match"</span>
-                <select class="ui-input ui-input--inline" on:change=move |ev| mode.set(event_target_value(&ev))>
+                <select aria-label="Match conditions" class="ui-input ui-input--inline" on:change=move |ev| mode.set(event_target_value(&ev))>
                     <option value="all" selected=move || mode.get() == "all">"ALL of"</option>
                     <option value="any" selected=move || mode.get() == "any">"ANY of"</option>
                 </select>
@@ -638,19 +703,19 @@ fn ConditionRuleEditor(
                         let remove = move |_| { rows.update(|r| if r.len() > 1 && i < r.len() { r.remove(i); }); };
                         view! {
                             <div class="cond-rows__row">
-                                <select class="ui-input ui-input--inline" on:change=set_metric>
+                                <select aria-label="Measurement" class="ui-input ui-input--inline" on:change=set_metric>
                                     {METRICS.iter().map(|(val,label,_)| {
                                         let val = val.to_string(); let sel = val == m;
                                         view!{<option value=val.clone() selected=sel>{label.to_string()}</option>}
                                     }).collect_view()}
                                 </select>
-                                <select class="ui-input ui-input--inline cond-rows__op" on:change=set_op>
+                                <select aria-label="Comparison" class="ui-input ui-input--inline cond-rows__op" on:change=set_op>
                                     {OPS.iter().map(|(sym,serde)| {
                                         let serde = serde.to_string(); let sel = serde == o;
                                         view!{<option value=serde.clone() selected=sel>{sym.to_string()}</option>}
                                     }).collect_view()}
                                 </select>
-                                <input type="number" class="ui-input ui-input--inline cond-rows__val" step="0.1"
+                                <input aria-label="Threshold" type="number" class="ui-input ui-input--inline cond-rows__val" step="0.1"
                                     prop:value=move || v.to_string() on:input=set_val/>
                                 <button type="button" class="cond-rows__del" on:click=remove aria-label="Remove condition">"×"</button>
                             </div>
@@ -668,13 +733,13 @@ fn ConditionRuleEditor(
 
             <div class="cond-editor__match">
                 <span>"Then"</span>
-                <select class="ui-input ui-input--inline" on:change=move |ev| action.set(event_target_value(&ev))>
+                <select aria-label="Watering action" class="ui-input ui-input--inline" on:change=move |ev| action.set(event_target_value(&ev))>
                     <option value="skip" selected=move || action.get() == "skip">"skip the zone"</option>
                     <option value="extend" selected=move || action.get() == "extend">"extend the run"</option>
                     <option value="adjust" selected=move || action.get() == "adjust">"scale the run"</option>
                 </select>
                 {move || (action.get() == "adjust").then(|| view! {
-                    <input type="number" class="ui-input ui-input--inline cond-rows__val" min="0.5" max="1.5" step="0.05"
+                    <input aria-label="Run multiplier" type="number" class="ui-input ui-input--inline cond-rows__val" min="0.5" max="1.5" step="0.05"
                         prop:value=move || factor.get().to_string()
                         on:input=move |ev| { if let Ok(v) = event_target_value(&ev).parse::<f64>() { factor.set(v); } }/>
                 })}
@@ -682,12 +747,12 @@ fn ConditionRuleEditor(
 
             <div class="cond-editor__match">
                 <span>"Applies to"</span>
-                <select class="ui-input ui-input--inline" on:change=move |ev| scope_mode.set(event_target_value(&ev))>
+                <select aria-label="Rule scope" class="ui-input ui-input--inline" on:change=move |ev| scope_mode.set(event_target_value(&ev))>
                     <option value="all_zones" selected=move || scope_mode.get() == "all_zones">"all zones"</option>
                     <option value="zones" selected=move || scope_mode.get() == "zones">"specific zones"</option>
                 </select>
                 {move || (scope_mode.get() == "zones").then(|| view! {
-                    <input type="text" class="ui-input ui-input--inline" placeholder="front_yard, side_yard"
+                    <input aria-label="Zone IDs" type="text" class="ui-input ui-input--inline" placeholder="front_yard, side_yard"
                         prop:value=move || scope_zones.get() on:input=move |ev| scope_zones.set(event_target_value(&ev))/>
                 })}
             </div>
@@ -696,15 +761,16 @@ fn ConditionRuleEditor(
                 {move || match would_fire() {
                     Some(true) => view! { <span class="cond-fire cond-fire--yes">"Would fire now"</span> }.into_any(),
                     Some(false) => view! { <span class="cond-fire cond-fire--no">"Would not fire now"</span> }.into_any(),
-                    None => view! { <span class="cond-fire">"Per-zone, evaluated live per zone"</span> }.into_any(),
+                    None => view! { <span class="cond-fire">"Needs a zone reading or missing weather data"</span> }.into_any(),
                 }}
             </div>
 
-            {move || { let e = error.get(); (!e.is_empty()).then(|| view! { <p class="source-editor__error">{e}</p> }) }}
+            </fieldset>
+            {move || { let e = error.get(); (!e.is_empty()).then(|| view! { <p class="source-editor__error" role="alert">{e}</p> }) }}
 
             <div class="settings-form-actions">
-                <Button variant="ghost" on_click=Callback::new(move |_| on_done.run(()))>"Cancel"</Button>
-                <Button variant="primary" on_click=Callback::new(on_save)>"Save rule"</Button>
+                <Button variant="ghost" disabled=Signal::derive(move || saving.get()) on_click=Callback::new(move |_| on_done.run(()))>"Cancel"</Button>
+                <Button variant="primary" loading=Signal::derive(move || saving.get()) on_click=Callback::new(on_save)>"Save rule"</Button>
             </div>
         </div>
     }
@@ -712,7 +778,7 @@ fn ConditionRuleEditor(
 
 #[cfg(test)]
 mod template_tests {
-    use super::RULE_TEMPLATES;
+    use super::{simple_conditions, RULE_TEMPLATES};
     use crate::engine::conditions::ConditionRule;
 
     #[test]
@@ -722,6 +788,32 @@ mod template_tests {
                 .unwrap_or_else(|e| panic!("template '{}' invalid: {e}", t.name));
             assert!(r.enabled, "{} should instantiate enabled", t.name);
         }
+    }
+
+    #[test]
+    fn every_template_opens_with_its_actual_conditions() {
+        for template in RULE_TEMPLATES {
+            let original: serde_json::Value = serde_json::from_str(template.json).unwrap();
+            let (mode, rows) = simple_conditions(original.get("condition")).unwrap();
+            assert_eq!(mode, "all");
+            assert_eq!(rows, vec![original["condition"].clone()]);
+        }
+    }
+
+    #[test]
+    fn nested_or_unsupported_conditions_cannot_be_silently_flattened() {
+        let compare =
+            serde_json::json!({"compare":{"metric":"wind_now_mph","op":"gt","value":12.0}});
+        assert!(simple_conditions(Some(
+            &serde_json::json!({"all":[compare.clone(),{"any":[compare.clone()]}]})
+        ))
+        .is_none());
+        assert!(simple_conditions(Some(&serde_json::json!({"not":compare.clone()}))).is_none());
+        assert!(simple_conditions(Some(&serde_json::json!({"any":[]}))).is_none());
+        assert_eq!(
+            simple_conditions(Some(&serde_json::json!({"any":[compare.clone()]}))),
+            Some(("any", vec![compare]))
+        );
     }
 }
 

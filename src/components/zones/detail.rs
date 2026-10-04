@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::components::irrigation::controls::post_action_body_then;
 use crate::components::ui::{
-    use_toast, Button, HelpHint, Icon, LineChart, Series, Sparkline, StatTile, Stepper,
+    use_toast, Button, HelpHint, Icon, LineChart, Series, StatTile, Stepper,
 };
 use crate::components::units_fmt::{
     deficit_amount_mm, deficit_value_mm, depth_phrase_mm, depth_unit, fmt_rain_rate_mm, temp_unit,
@@ -104,6 +104,7 @@ pub fn ZoneDetailView(
 
     // 30-day history for the watered-minutes chart.
     let history = RwSignal::new(HistoryWindow::default());
+    let history_loaded = RwSignal::new(false);
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
@@ -115,6 +116,7 @@ pub fn ZoneDetailView(
                 {
                     if let Ok(w) = resp.json::<HistoryWindow>().await {
                         history.set(w);
+                        history_loaded.set(true);
                     }
                 }
             });
@@ -346,9 +348,15 @@ pub fn ZoneDetailView(
             } else {
                 ((z.planned_run_seconds + 30) / 60).to_string()
             };
-            // No producer on either path (the v1 field is deprecated): a
-            // dash, not a fabricated zero.
-            let (today, today_unit) = ("-".to_string(), "");
+            // Use the same completed, unioned valve evidence as the chart.
+            // The deprecated snapshot field has no producer. A failed or
+            // pending history read remains unknown rather than claiming zero.
+            let (today, today_unit) = if history_loaded.get() {
+                let minutes = zone_day_buckets(&history.get(), &z.slug, 1, &tz)[0];
+                (format!("{minutes:.1}"), "min")
+            } else {
+                ("-".to_string(), "")
+            };
             // Bucket deficit is stored in mm; convert at the display boundary
             // through the shared deficit formatter (magnitude; the label
             // carries the direction, matching the soil panel's positive
@@ -438,7 +446,7 @@ pub fn ZoneDetailView(
                 _ if running => "RUNNING",
                 _ if zone_skipping => "SKIPPING",
                 _ if z.planned_run_seconds > 0 => "SCHEDULED",
-                _ if budget_held => "ON HOLD",
+                _ if budget_held => "SKIPPED",
                 _ => "IDLE",
             };
             let status_class = if pending_now.is_some() && running != pending_now.unwrap_or(false) {
@@ -529,6 +537,7 @@ pub fn ZoneDetailView(
                     view! { <p class="zone-detail__reason zone-detail__reason--suppressed">{body}</p> }
                 });
             let math = z.math.clone();
+            let current_plan = snap.get().water_plan.iter().find(|d| d.day_offset == 0).and_then(|d| d.zones.iter().find(|p| p.zone.replace('-', "_") == zslug.replace('-', "_"))).cloned();
             let chart_slug = zslug.clone();
             // Own copy of the deployment tz for the chart-label closure below.
             let chart_tz = tz.clone();
@@ -569,10 +578,7 @@ pub fn ZoneDetailView(
                                         "Soil model" {head_pill(true)}
                                     </h2>
                                     <p class="zone-detail__reason">
-                                        "The soil model governs this zone and is still \
-                                         establishing its initial water balance: the weekly plan sizes the \
-                                         minutes until enough water use, \
-                                         rain, and completed runs resolve the soil estimate."
+                                        "The soil model estimates a range while the starting water balance is uncertain. Water use, rain, and completed runs narrow that range; the current plan below explains whether watering is justified."
                                     </p>
                                 </section>
                             }
@@ -737,9 +743,9 @@ pub fn ZoneDetailView(
 
                     <div class="zone-detail__stats">
                         <StatTile label="Planned" value=planned unit="min" icon="droplet"/>
-                        <StatTile label="Today" value=today unit=today_unit icon="history" accent="var(--accent-good)".to_string()/>
+                        <StatTile label="Today" value=today unit=today_unit icon="history" accent="var(--chart-water)".to_string()/>
                         <StatTile label="Deficit" value=deficit unit=deficit_unit icon="gauge" accent="var(--accent-cool)".to_string()/>
-                        <StatTile label="Last run" value=last_run icon="calendar" accent="var(--accent-warm)".to_string()/>
+                        <StatTile label="Last run" value=last_run icon="calendar" accent="var(--text-dim)".to_string()/>
                     </div>
 
                     {soil_preview}
@@ -767,9 +773,9 @@ pub fn ZoneDetailView(
                                                 .map(|(lo, hi)| format!("target {lo:.0}-{hi:.0}%"))
                                                 .unwrap_or_default();
                                             let tone = match (pct, band) {
-                                                (p, Some((lo, _))) if p < lo => "var(--verdict-extend)",
-                                                (p, Some((_, hi))) if p >= hi => "var(--accent-cool)",
-                                                _ => "var(--verdict-run)",
+                                                (p, Some((lo, _))) if p < lo => "var(--accent-warn)",
+                                                (p, Some((_, hi))) if p >= hi => "var(--accent-warn)",
+                                                _ => "var(--status-online)",
                                             };
                                             view! {
                                                 <crate::components::ui::StatTile layout="compact" label="Moisture" value=format!("{pct:.0}") unit="%" detail=band_label accent=tone/>
@@ -784,7 +790,7 @@ pub fn ZoneDetailView(
                                         {z.soil_battery_pct.map(|b| view! {
                                             <crate::components::ui::StatTile layout="compact" label="Probe battery" value=format!("{b:.0}") unit="%"
                                                 detail=if b <= 20.0 { "replace soon" } else { "healthy" }
-                                                accent=if b <= 20.0 { "var(--verdict-skip)" } else { "var(--verdict-run)" }/>
+                                                accent=if b <= 20.0 { "var(--verdict-skip)" } else { "var(--status-online)" }/>
                                         })}
                                     </div>
                                     {soil_fc.as_ref().is_some_and(|f| f.status == "uncalibrated").then(|| view! {
@@ -792,8 +798,8 @@ pub fn ZoneDetailView(
                                     })}
                                     {predicted.map(|p| view! {
                                         <div class="zone-soil__forecast">
-                                            <span class="zone-soil__forecast-label">"7-day moisture projection (no watering)"</span>
-                                            <Sparkline points=p accent="var(--accent-cool)".to_string() height=44/>
+                                            <span class="zone-soil__forecast-label">"Soil moisture outlook"</span>
+                                            <crate::components::ui::line_chart::SoilProjectionChart points=p/>
                                         </div>
                                     })}
                                 </section>
@@ -817,7 +823,7 @@ pub fn ZoneDetailView(
                                     crate::timefmt::format_md(epoch, &chart_tz)
                                 })
                                 .collect();
-                            view! { <LineChart series=vec![Series::new("min", "var(--accent)", pts)] height=180 legend=false y_unit=" min".to_string() x_labels=labels/> }
+                            view! { <LineChart series=vec![Series::new("Recorded watering", "var(--chart-water)", pts)] height=180 y_unit=" min".to_string() x_labels=labels/> }
                         }}
                     </section>
 
@@ -848,7 +854,7 @@ pub fn ZoneDetailView(
                         }}
                     </section>
 
-                    {math.map(|m| view! { <ZoneMathPanel m model=model.clone() prefs=p/> })}
+                    {math.map(|m| view! { <ZoneMathPanel m model=model.clone() plan=current_plan.clone() prefs=p/> })}
                 </div>
             }
             .into_any()
@@ -909,13 +915,13 @@ pub(crate) fn soil_preview_lines(
                 // now, saturation): reflect the effective verdict, the
                 // same skip awareness the Planned tile carries.
                 let lead = if hold.is_empty() {
-                    "Holds today.".to_string()
+                    "No watering today.".to_string()
                 } else {
-                    format!("Holds today: {hold}.")
+                    format!("No watering today: {hold}.")
                 };
                 return (
                     with_dial(format!(
-                        "{lead} Waters about {mins} min once the hold clears, refilling \
+                        "{lead} Waters about {mins} min when conditions allow, refilling \
                          the {dep} deficit."
                     )),
                     None,
@@ -926,7 +932,7 @@ pub(crate) fn soil_preview_lines(
         if ceiling_binding {
             return (
                 with_dial(format!(
-                    "{verb} about {mins} min today toward the {dep} deficit, held to the \
+                    "{verb} about {mins} min today toward the {dep} deficit, limited by the \
                      weekly target."
                 )),
                 None,
@@ -935,7 +941,7 @@ pub(crate) fn soil_preview_lines(
         if session_capped {
             return (
                 with_dial(format!(
-                    "{verb} about {mins} min today toward the {dep} deficit, shorted by \
+                    "{verb} about {mins} min today toward the {dep} deficit, limited by \
                      the run cap; the rest carries to tomorrow."
                 )),
                 None,
@@ -949,7 +955,11 @@ pub(crate) fn soil_preview_lines(
         );
     }
     if due {
-        let verb = if governs { "Holds" } else { "Would hold" };
+        let verb = if governs {
+            "No watering"
+        } else {
+            "Would skip watering"
+        };
         // The rare due-and-zero shape with no wire reason and no ceiling
         // degrades to the bare verb rather than the tautology "the plan
         // holds today" explains nothing with.
@@ -970,7 +980,11 @@ pub(crate) fn soil_preview_lines(
         return (format!("{verb} today: {reason}."), None);
     }
     let raw = depth_phrase_mm(raw_mm, prefs);
-    let verb = if governs { "Holds" } else { "Would hold" };
+    let verb = if governs {
+        "No watering"
+    } else {
+        "Would skip watering"
+    };
     let status = format!("{verb} today; the {dep} deficit is under the {raw} trigger.");
     let next = etc_today_mm.filter(|e| *e > 0.0).map(|etc| {
         let days = ((raw_mm - depletion_mm).max(0.0) / etc).ceil().max(1.0) as i64;
@@ -984,84 +998,68 @@ pub(crate) fn soil_preview_lines(
     (status, next)
 }
 
-/// The panel is split because only some of its numbers reach the dispatch.
-/// Under the weekly model, throughput divides the session depth into
-/// seconds and the ceiling can shorten the result; the deficit, Kc, heat
-/// multiplier and capture efficiency feed ETc and the soil projection,
-/// not the run length. Under the soil model the deficit and the capture
-/// efficiency ARE the run length's inputs (gross = deficit / capture /
-/// throughput), so those two rows move above the line and the note says
-/// which arithmetic produced the minutes.
+/// Explain the active duration model and distinguish estimated soil water from
+/// a probe reading. Weekly mode uses session depth and application rate; soil
+/// mode also accounts for retained water in its runtime calculation.
 #[component]
-fn ZoneMathPanel(m: ZoneMath, model: String, prefs: UnitPrefs) -> impl IntoView {
-    // A zone with no run planned has nothing to compare against its ceiling,
-    // so the row states the zero and stops. The card says why the zone is at
-    // zero; repeating a cap here described a run that does not exist.
-    let cap = if m.scheduled_seconds == 0 {
-        String::new()
-    } else if m.cap_binding {
-        format!(" (capped at {} min)", m.max_duration_seconds / 60)
-    } else {
-        format!(" (under {} min cap)", m.max_duration_seconds / 60)
-    };
+fn ZoneMathPanel(
+    m: ZoneMath,
+    model: String,
+    plan: Option<crate::model::WaterPlanZone>,
+    prefs: UnitPrefs,
+) -> impl IntoView {
+    let soil = model == "soil";
+    let deficit = plan
+        .as_ref()
+        .and_then(|p| p.depletion_range_mm)
+        .filter(|(lo, hi)| (hi - lo).abs() > 0.1)
+        .map(|(lo, hi)| {
+            format!(
+                "{}–{} (estimated range)",
+                depth_phrase_mm(lo, prefs),
+                depth_phrase_mm(hi, prefs)
+            )
+        })
+        .unwrap_or_else(|| {
+            m.bucket_mm
+                .map(|v| deficit_amount_mm(v, prefs))
+                .unwrap_or_else(|| "Not yet resolved".into())
+        });
     let final_class = if m.cap_binding {
         "zone-detail__math-final zone-detail__math-final--capped"
     } else {
         "zone-detail__math-final"
     };
-    // Bucket deficit (mm source) and throughput (mm/hr source) convert at
-    // the display boundary; the engine math itself stays in mm. The
-    // deficit routes through the shared formatter (magnitude; the row
-    // label carries the direction) so this row and the Deficit tile above
-    // it print the same number. A dash marks the zones no bucket can be
-    // derived for (env-var zones), never a fabricated zero.
-    let deficit = match m.bucket_mm {
-        Some(v) => deficit_amount_mm(v, prefs),
-        None => "-".to_string(),
-    };
-    let throughput = fmt_rain_rate_mm(m.throughput_mm_hr, prefs);
-    // The soil-arithmetic layout and note require the bucket to actually
-    // exist: on the evidence-starved cold-start window the model tag
-    // says "soil" while the weekly allocator sized the minutes, and
-    // describing a deficit division that never ran beside a dashed
-    // Soil-deficit row was a lie on the first screens every adopter
-    // reads. The starved state gets the weekly layout plus a note that
-    // says which arithmetic ran and why.
-    let soil_governed = model == "soil" && m.bucket_mm.is_some();
-    let soil_starved = model == "soil" && m.bucket_mm.is_none();
-    let note = if soil_governed {
-        "These minutes refill the soil deficit above, adjusted for the season and \
-         held to this zone's cap."
-    } else if soil_starved {
-        "This zone is on the soil model but has no measured days yet, so the weekly \
-         plan sized these minutes. Soil takes over once a few days of evidence land."
+    let cap = if m.cap_binding {
+        format!(" · limited to {} min", m.max_duration_seconds / 60)
     } else {
-        "The weekly plan sized these minutes, adjusted for the season and held to \
-         this zone's cap. The soil deficit is shown for reference."
+        String::new()
     };
     view! {
         <section class="zone-detail__panel">
             <h2 class="zone-detail__panel-title">"Why this duration?"<HelpHint topic="zone-math"/></h2>
+            <p class="zone-detail__panel-note">{if soil { "A soil-water estimate, not a moisture-sensor reading. The model accounts for plant water use, rain, and recorded valve time." } else { "The weekly water budget sets the session depth; application rate converts that depth to minutes." }}</p>
             <dl class="zone-detail__math">
-                <div><dt>"Throughput"</dt><dd>{throughput}</dd></div>
-                {soil_governed.then(|| view! {
-                    <div><dt>"Soil deficit"</dt><dd>{deficit.clone()}</dd></div>
-                    <div><dt>"Capture efficiency"</dt><dd>{format!("{:.2}", m.capture_eff)}</dd></div>
-                })}
-                <div class=final_class><dt>"Scheduled"</dt><dd>{format!("{} min{cap}", m.scheduled_seconds / 60)}</dd></div>
-            </dl>
-            <h3 class="zone-detail__panel-subtitle">"Not part of this morning's minutes"</h3>
-            <p class="zone-detail__panel-note">{note}</p>
-            <dl class="zone-detail__math">
-                {(!soil_governed).then(|| view! {
-                    <div><dt>"Soil deficit"</dt><dd>{deficit.clone()}</dd></div>
-                })}
+                <div><dt>"Estimated water deficit"</dt><dd>{deficit}</dd></div>
+                {plan.as_ref().and_then(|p| p.capacity_mm).map(|v| view! { <div><dt>"Root-zone storage"</dt><dd>{depth_phrase_mm(v, prefs)}</dd></div> })}
+                {plan.as_ref().and_then(|p| p.trigger_mm).map(|v| view! { <div><dt>"Watering trigger"</dt><dd>{depth_phrase_mm(v, prefs)}</dd></div> })}
+                <div><dt>"Application rate"</dt><dd>{fmt_rain_rate_mm(m.throughput_mm_hr, prefs)}</dd></div>
+                <div><dt>"Water retained"</dt><dd>{format!("{:.0}% of applied water", m.capture_eff * 100.0)}</dd></div>
                 <div><dt>"Crop coefficient"</dt><dd>{format!("{:.2}", m.kc)}</dd></div>
-                <div><dt>"Additional ET adjustment"</dt><dd>{format!("{:.2}", m.heat_mult)}</dd></div>
-                {(!soil_governed).then(|| view! {
-                    <div><dt>"Capture efficiency"</dt><dd>{format!("{:.2}", m.capture_eff)}</dd></div>
-                })}
+                <div class=final_class><dt>"Current plan"</dt><dd>{format!("{:.1} min{cap}", m.scheduled_seconds as f64 / 60.0)}</dd></div>
             </dl>
+            {plan.map(|p| view! { <p class="zone-detail__reason">{p.water_need}</p> })}
+            <details>
+                <summary>"How the estimate works"</summary>
+                <p class="zone-detail__panel-note">"Deficit increases with weather-based reference water use × the plant's seasonal crop coefficient. Captured rain and completed watering reduce it. Soil texture and root depth set the storage capacity; the plant's allowed depletion sets the trigger."</p>
+                <p class="zone-detail__panel-note">{if soil {
+                    "Run minutes = planned net water depth ÷ (application rate × retained fraction) × 60, subject to run limits. The plan also considers forecast rain and the next allowed watering day, so it may refill only part of the deficit."
+                } else {
+                    "Run minutes = weekly session depth ÷ application rate × 60, subject to run limits. Soil-water estimates provide context and do not set this mode's duration."
+                }}</p>
+                <p class="zone-detail__panel-note">"Application rate describes depth across the zone, so area does not multiply runtime. Sun/shade is saved but does not currently adjust demand. A sensor adds moisture checks; this deficit remains a modeled estimate."</p>
+                <p class="zone-detail__panel-note">"A catalog sprinkler rate is an assumption. A catch-cup measurement can calibrate it; check the soil, plant and root-depth settings too if the modeled need disagrees with the yard."</p>
+            </details>
         </section>
     }
 }
@@ -1148,7 +1146,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Holds today; the 0.08\" deficit is under the 0.24\" trigger."
+            "No watering today; the 0.08\" deficit is under the 0.24\" trigger."
         );
         assert_eq!(
             next.as_deref(),
@@ -1168,7 +1166,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Would hold today; the 2.0 mm deficit is under the 6.0 mm trigger."
+            "Would skip watering today; the 2.0 mm deficit is under the 6.0 mm trigger."
         );
     }
 
@@ -1193,7 +1191,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Would hold today: forecast rain refills the deficit (3.2 of 5.1 mm expected)."
+            "Would skip watering today: forecast rain refills the deficit (3.2 of 5.1 mm expected)."
         );
         let (status, _) = soil_preview_lines(
             true,
@@ -1214,7 +1212,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Holds today: the morning window fits 1 of 3 zones that need water, most \
+            "No watering today: the morning window fits 1 of 3 zones that need water, most \
              depleted first."
         );
         // Due, zero seconds, no wire reason: the weekly ceiling at zero
@@ -1224,7 +1222,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Would hold today: the weekly target leaves no headroom this week."
+            "Would skip watering today: the weekly target leaves no headroom this week."
         );
     }
 
@@ -1241,7 +1239,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Waters about 26 min today toward the 0.20\" deficit, held to the weekly \
+            "Waters about 26 min today toward the 0.20\" deficit, limited by the weekly \
              target."
         );
         assert!(next.is_none());
@@ -1251,7 +1249,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Waters about 60 min today toward the 0.35\" deficit, shorted by the run \
+            "Waters about 60 min today toward the 0.35\" deficit, limited by the run \
              cap; the rest carries to tomorrow."
         );
         // The weekly-governed preview keeps the conditional verb.
@@ -1260,7 +1258,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Would water about 26 min today toward the 0.20\" deficit, held to the \
+            "Would water about 26 min today toward the 0.20\" deficit, limited by the \
              weekly target."
         );
     }
@@ -1288,7 +1286,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Waters about 21 min today toward the 0.20\" deficit, held to the weekly \
+            "Waters about 21 min today toward the 0.20\" deficit, limited by the weekly \
              target; the seasonal adjustment scaled the minutes."
         );
     }
@@ -1302,16 +1300,16 @@ mod tests {
         let (status, _) = soil_preview_lines(
             true, 0, true, None, false, false, None, 5.2, 4.5, None, false, p,
         );
-        assert_eq!(status, "Holds today.");
+        assert_eq!(status, "No watering today.");
         let (status, _) = soil_preview_lines(
             false, 0, true, None, false, false, None, 5.2, 4.5, None, false, p,
         );
-        assert_eq!(status, "Would hold today.");
+        assert_eq!(status, "Would skip watering today.");
     }
 
     /// The ladder's hold outranks the refill promise: a governed zone
     /// with planned seconds and a skip verdict says it holds today and
-    /// what happens once the hold clears, matching the SKIPPING pill on
+    /// what happens when conditions allow, matching the SKIPPING pill on
     /// the same page.
     #[test]
     fn soil_preview_reflects_a_ladder_hold() {
@@ -1332,7 +1330,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Holds today: Wind 28 mph now. Waters about 26 min once the hold clears, \
+            "No watering today: Wind 28 mph now. Waters about 26 min when conditions allow, \
              refilling the 0.20\" deficit."
         );
         assert!(next.is_none());
@@ -1353,7 +1351,7 @@ mod tests {
         );
         assert_eq!(
             status,
-            "Holds today. Waters about 26 min once the hold clears, refilling the \
+            "No watering today. Waters about 26 min when conditions allow, refilling the \
              0.20\" deficit."
         );
     }

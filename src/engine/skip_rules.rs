@@ -410,13 +410,13 @@ fn suspect_reason(q: &ZoneQuarantine) -> String {
 
 fn quarantine_reason(q: &ZoneQuarantine) -> String {
     format!(
-        "{}; watering held until the probe is reliable",
+        "{}; watering skipped until the probe is reliable",
         suspect_reason(q)
     )
 }
 
 const SOIL_PROBE_HOLD_REASON: &str =
-    "Soil probe unavailable or untrusted; watering held until the probe is reliable";
+    "Soil probe unavailable or untrusted; watering skipped until the probe is reliable";
 
 /// Inputs are scoped to one zone for its decision. The aggregate only holds
 /// here when every zone has a probe fault; final per-zone projection handles
@@ -776,7 +776,7 @@ pub fn evaluate_decisions(
                 if rule.outcome == "fired" && rule.overridden_by.is_none() {
                     rule.overridden_by = Some(hold.id.clone());
                     rule.overridden_detail = Some(hold.reason.clone());
-                    rule.detail.push_str("; watering held by user script");
+                    rule.detail.push_str("; watering skipped by user script");
                 }
             }
         }
@@ -788,7 +788,7 @@ pub fn evaluate_decisions(
                 hold.reason
             } else {
                 format!(
-                    "Additional script hold; an earlier gate already holds watering. {}",
+                    "Additional reason to skip; an earlier rule already prevents watering. {}",
                     hold.reason
                 )
             },
@@ -823,7 +823,7 @@ pub fn evaluate_decisions(
             }
         } else if running > 0 && (answer.skip_check.will_skip || held > 0) {
             let reason = if held > 0 {
-                format!("{running} of {} zones can water; {held} remain on hold. Check each zone for its reason.", answer.zones.len())
+                format!("{running} of {} zones can water; {held} will be skipped. Check each zone for its reason.", answer.zones.len())
             } else {
                 "All zones can water after their own safety checks.".into()
             };
@@ -1083,8 +1083,7 @@ pub fn decide_per_zone(
                     result.threshold = Some(z.target_min_pct);
                 }
             } else if yard_code == "restrictions" {
-                result.reason =
-                    format!("Exempt from the restriction holding the yard. ({yard_reason})");
+                result.reason = format!("Exempt from the watering restriction. ({yard_reason})");
                 result.source = "exempt".into();
                 result.reason_code = "restrictions".into();
             } else if z.governed_by_soil_model
@@ -1176,7 +1175,7 @@ fn force_run_block(
 /// The control + restriction gates ignore `disabled` (PROTECTED_RULES,
 /// hard-enforced); every weather/safety gate consults it.
 const PLANNING_FORECAST_HOLD_REASON: &str =
-    "Rain forecast unavailable for the watering plan's next 24 hours; watering held";
+    "Rain forecast unavailable for the watering plan's next 24 hours; watering skipped";
 fn planning_forecast_unavailable(i: &Inputs) -> bool {
     !i.soil_zones.is_empty()
         && i.soil_zones
@@ -1560,25 +1559,25 @@ fn rain_amount(value: Option<f64>) -> RainAmount {
 fn rain_now_reason(i: &Inputs) -> String {
     match i.rain_intensity_now_in_hr {
         Some(rate) => format!("Currently raining ({rate:.2} in/hr)"),
-        None => "Current rain estimate unavailable; watering held".into(),
+        None => "Current rain estimate unavailable; watering skipped".into(),
     }
 }
 fn rain_today_forecast_reason(i: &Inputs) -> String {
     match i.rain_today_forecast_in {
         Some(amount) => format!("Rain forecast today ({amount:.2}\" expected, not measured)"),
-        None => "Today's rain forecast unavailable; watering held".into(),
+        None => "Today's rain forecast unavailable; watering skipped".into(),
     }
 }
 fn rain_next_4h_reason(i: &Inputs) -> String {
     match i.rain_next_4h_in {
         Some(amount) => format!("Rain expected within 4h ({amount:.2}\" forecast)"),
-        None => "Rain forecast unavailable for the next 4 hours; watering held".into(),
+        None => "Rain forecast unavailable for the next 4 hours; watering skipped".into(),
     }
 }
 fn rain_3day_reason(i: &Inputs) -> String {
     match i.rain_3day_weighted_in {
         Some(amount) => format!("Heavy rain in next 3 days ({amount:.2}\" weighted)"),
-        None => "Rain forecast unavailable for the next 3 days; watering held".into(),
+        None => "Rain forecast unavailable for the next 3 days; watering skipped".into(),
     }
 }
 
@@ -1603,7 +1602,7 @@ fn tomorrow_prob_weight(i: &Inputs) -> f64 {
 /// forecast amount (which the gate weighted at full value).
 fn tomorrow_rain_reason(i: &Inputs) -> String {
     let Some(amount) = i.forecast_in else {
-        return "Tomorrow's rain forecast unavailable; watering held".into();
+        return "Tomorrow's rain forecast unavailable; watering skipped".into();
     };
     match i.rain_tomorrow_prob_pct {
         Some(p) => format!("Tomorrow rain ({amount:.2}\" × {p}% confidence)"),
@@ -1814,7 +1813,7 @@ fn post_soil(
     // meaningful rain in the forecast.
     // Above the heat advisory, and only just. The advisory returns
     // run_extended, so with the hold BELOW it a hot dry morning watered
-    // the yard with "All watering is on hold" switched on. Everything
+    // the yard with "Skip all watering is enabled" switched on. Everything
     // above this point is a weather SKIP, and a weather skip stays the
     // reported reason because it tells the owner more than the hold does
     // and both answers are "do not water".
@@ -1822,7 +1821,11 @@ fn post_soil(
     // The rule id stays `dry_run` so the gate catalog and any stored
     // decision traces are unaffected.
     if i.is_dry_run {
-        return ("skip", "All watering is on hold".to_string(), "dry_run");
+        return (
+            "skip",
+            "Skip all watering is enabled".to_string(),
+            "dry_run",
+        );
     }
 
     if !disabled.contains("heat_advisory") && heat_advisory_applies(i, p) {
@@ -2540,7 +2543,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         if planning_forecast_unavailable(&eff) {
             PLANNING_FORECAST_HOLD_REASON.into()
         } else {
-            "no scoped watering plan is held for missing rain evidence".into()
+            "No zone is waiting for missing rain data".into()
         },
         "skip",
         PLANNING_FORECAST_HOLD_REASON.into(),
@@ -2939,13 +2942,13 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         &mut decided,
         &disabled,
         "dry_run",
-        "Hold all watering",
+        "Skip all watering",
         "control",
         true,
         i.is_dry_run,
         format!("dry_run = {}", i.is_dry_run),
         "skip",
-        "All watering is on hold".to_string(),
+        "Skip all watering is enabled".to_string(),
     );
 
     // Heat advisory -> extend the run.
@@ -3736,27 +3739,27 @@ mod tests {
         ),
         (
             "skip",
-            "Today's rain forecast unavailable; watering held",
+            "Today's rain forecast unavailable; watering skipped",
             "rain_today_forecast",
         ),
         (
             "skip",
-            "Rain forecast unavailable for the next 4 hours; watering held",
+            "Rain forecast unavailable for the next 4 hours; watering skipped",
             "rain_next_4h",
         ),
         (
             "skip",
-            "Tomorrow's rain forecast unavailable; watering held",
+            "Tomorrow's rain forecast unavailable; watering skipped",
             "tomorrow_rain",
         ),
         (
             "skip",
-            "Rain forecast unavailable for the next 3 days; watering held",
+            "Rain forecast unavailable for the next 3 days; watering skipped",
             "rain_3day",
         ),
         (
             "skip",
-            "Current rain estimate unavailable; watering held",
+            "Current rain estimate unavailable; watering skipped",
             "rain_now",
         ),
         ("skip", PLANNING_FORECAST_HOLD_REASON, "planning_forecast"),
@@ -3798,7 +3801,7 @@ mod tests {
             "Heat advisory: running planned + 15% (peak 98°F)",
             "heat_advisory",
         ),
-        ("skip", "All watering is on hold", "dry_run"),
+        ("skip", "Skip all watering is enabled", "dry_run"),
         ("skip", "Paused (vacation mode)", "paused"),
         ("skip", "Manual override (skip tomorrow)", "override"),
         ("run", "", "override"),
@@ -4470,7 +4473,7 @@ mod tests {
         i.is_dry_run = true;
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
-        assert_eq!(s.reason, "All watering is on hold");
+        assert_eq!(s.reason, "Skip all watering is enabled");
     }
 
     #[test]
@@ -5608,7 +5611,7 @@ mod tests {
                 "dry_run",
                 |i| i.is_dry_run = true,
                 "skip",
-                "All watering is on hold",
+                "Skip all watering is enabled",
             ),
             // precedence: the earlier gate wins when two fire
             (
@@ -5915,7 +5918,7 @@ mod tests {
         i.is_dry_run = true;
         let s = evaluate_with(&i, &p);
         assert_eq!(s.verdict, "skip");
-        assert_eq!(s.reason, "All watering is on hold");
+        assert_eq!(s.reason, "Skip all watering is enabled");
 
         let mut i = base();
         i.pause_until_epoch = i.now_epoch() + 3600;
@@ -6313,7 +6316,7 @@ mod tests {
         assert_eq!(back.reason_code, "soil_probe");
         assert_eq!(back.source, "soil_quarantine");
         assert!(back.reason.contains("28% vs yard 73%"));
-        assert!(back.reason.contains("watering held"));
+        assert!(back.reason.contains("watering skipped"));
         assert!(!back.reason.contains("saturated"));
         assert_eq!(zv(&answer.zones, "front_yard").source, "soil_saturation");
         assert_eq!(
@@ -6336,7 +6339,7 @@ mod tests {
         assert_eq!(back.verdict, "skip");
         assert_eq!(back.reason_code, "soil_probe");
         assert_eq!(back.source, "soil_quarantine");
-        assert!(back.reason.contains("offline") && back.reason.contains("watering held"));
+        assert!(back.reason.contains("offline") && back.reason.contains("watering skipped"));
     }
 
     #[test]

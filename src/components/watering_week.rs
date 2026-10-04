@@ -250,7 +250,7 @@ fn WeekLegend() -> impl IntoView {
         ("skip", "Other skip"),
     ];
     view! {
-        <div class="wk-legend" aria-hidden="true">
+        <div class="wk-legend" aria-label="Watering outlook key">
             {items
                 .into_iter()
                 .map(|(m, l)| {
@@ -319,7 +319,7 @@ mod tests {
             "rain_3day",
             "planning_forecast",
         ] {
-            let mut unknown = dv("skip", "Rain forecast unavailable; watering held");
+            let mut unknown = dv("skip", "Rain forecast unavailable; watering skipped");
             unknown.reason_code = code.into();
             unknown.precip_in = None;
             assert_eq!(

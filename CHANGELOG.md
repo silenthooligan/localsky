@@ -2,6 +2,89 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-10-04
+
+LocalSky's first stable release includes the unreleased 0.9.4 app and Home
+Assistant work. Update the app, companion integration and HAOS app together to
+1.0.0. The API remains 2.4.0. Existing settings and history are preserved.
+
+### Added
+
+- Quick Run starts one, several or all zones with shared presets or individual
+  durations. The server runs the queue in sequence, even after closing the PWA.
+  Stop cancels remaining zones. Manual runs bypass weather skips and rain delays;
+  controller, duration and daily limits still apply.
+- An app-wide watering strip shows the active zone, Quick Run progress, measured
+  flow when available, and Stop. Failed or unconfirmed stops remain retryable.
+- Watering-start notifications offer Stop watering on supported browsers.
+  Notification actions require the current authenticated session and a matching
+  run; outdated alerts cannot stop a later LocalSky run. Enable notifications in
+  Settings and subscribe each device over HTTPS.
+
+### Changed
+
+- Stable 1.0.0 wording replaces beta labels. The Feedback button remains available.
+- Rule Lab leads with the outcome and deciding rule. A compact numbered path
+  shows evaluated checks; unevaluated checks expand on request.
+- Watering explanations say skipped, paused, or cannot start, with a reason.
+- Existing installations can keep Classic Blue or choose the new Field Green default.
+  Saved preferences are preserved; light/dark mode remains independent.
+- Setup offers current settings or a saved draft on re-entry, with consistent
+  appearance controls and responsive layouts.
+- Rule editing preserves failed edits, detects concurrent changes and retains
+  unknown readings. The simulator handles errors and stale responses.
+- Storm outlooks explain the conditions in plain language, with technical details
+  available on request. Temperature readings share clear degree and F/C labels.
+- Rain forecast review lives in History instead of an Irrigation footer banner.
+- Settings search finds sections and individual controls. History retention has
+  its own editor, confirmed shorter limits, and cleanup policies that update live.
+- Field Green and Slate visual styles work independently of light/dark mode. Shorter
+  History, Settings and zone copy distinguishes skipped watering from capped runs.
+- Source Freshness correctly displays active, watching, standby and disabled
+  sources; failed status requests show unavailable and retry automatically.
+
+- Stronger light/dark surface contrast and colored headers separate sections;
+  Weather cards align in rows beside the tall radar, with distinct condition strips.
+- Threshold bars retain the measurement color before the line and a separately
+  labelled excess color after it. The ET budget uses the same marker convention.
+- Daily history groups reasons by zone and links to that day's sessions. Run
+  history remains the detailed delivery record, with clearer view selection.
+- Zone explanations distinguish estimated soil water from sensor measurements,
+  show the current plan's inputs, and disclose unused sun/shade adjustments.
+
+- App styling now shares the website's warm paper / deep green palette, bundled
+  typography, clearer borders, and prominent LocalSky branding.
+- Watering and skipped-run colors agree across daily outlooks, the week, zones, and
+  History. Visible chart keys explain measurements, rain probability, and ET.
+- History charts support keyboard exploration; pressure shows a collecting
+  state until a trend exists and labels its actual observed range.
+- Weather cards reflow on phones, tablets, and desktop without squeezing
+  measurements behind the radar. Theme settings expose the selected choice.
+- Soil outlooks show labelled, dashed projections with their assumptions. Wind
+  bars use one scale and color; lightning explains its illustrative direction.
+- Mobile navigation and installed-app browser chrome follow the selected theme.
+
+### Fixed
+
+- HAOS setup saves work through Supervisor ingress in the default auth mode.
+  Direct callers cannot gain access by forging ingress headers.
+- Brand marks and setup grass photos load under the HA ingress prefix.
+- Station sensors appear when the station first reports after Home Assistant
+  setup, without requiring an integration reload.
+- More-menu navigation opens About at the top of the page in the PWA.
+- Radar resize callbacks stop when the map is removed during navigation.
+- Fresh HAOS installs open setup without inventing legacy HA controllers/zones
+  from Supervisor credentials. Existing saved configurations are preserved.
+- Supervisor stop/restart handles SIGTERM cleanly, including connected event
+  streams, instead of leaving the add-on in an error state.
+
+- Completed controller observations linked to automatic sessions now produce
+  a green "Watered today" hero instead of an unconfirmed morning warning.
+  Interrupted or unconfirmed runs retain their distinct state.
+- Zone detail's Today total now uses completed valve history; unavailable history
+  remains unknown instead of appearing as zero watering.
+- Long Weather watering states give their explanation a separate row on phones.
+
 ## [0.9.3] - 2026-09-22
 
 ### Fixed

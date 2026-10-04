@@ -581,9 +581,9 @@ mod tests {
                 scored_days: Some(4),
                 confirmed_days: Some(3),
                 min_scored_days: 3,
-                line: "Forecast rain prompted hold verdicts on 4 days in the last 30; rain followed on 3 of 4.".into(),
+                line: "Forecast rain prompted skip decisions on 4 days in the last 30; rain followed on 3 of 4.".into(),
                 reactive_days: Some(2),
-                reactive_line: "Hold verdicts for rain already falling or on the ground: \
+                reactive_line: "Recent rain prompted skip decisions on \
                                 2 days in the last 30."
                     .into(),
             },

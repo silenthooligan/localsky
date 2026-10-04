@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 
-/// One plotted line. `dashed` dims + dashes it (e.g. prior-year overlay).
+/// One plotted line. `dashed` changes its pattern while preserving contrast.
 #[derive(Clone)]
 pub struct Series {
     pub label: String,
@@ -34,6 +34,29 @@ impl Series {
     pub fn dashed(mut self) -> Self {
         self.dashed = true;
         self
+    }
+}
+
+/// Day zero is the current probe reading; subsequent points are the model's
+/// evidenced forecast prefix. Never invent missing days or imply watering.
+#[component]
+pub fn SoilProjectionChart(points: Vec<f64>) -> impl IntoView {
+    let labels = (0..points.len())
+        .map(|i| match i {
+            0 => "Today".to_string(),
+            1 => "Tomorrow".to_string(),
+            _ => format!("+{i} days"),
+        })
+        .collect();
+    let points = points
+        .into_iter()
+        .enumerate()
+        .map(|(i, value)| (i as f64, value))
+        .collect();
+    view! {
+        <LineChart series=vec![Series::new("Soil moisture projection", "var(--chart-soil)", points).dashed()]
+            height=160 y_unit="%" x_labels=labels/>
+        <p class="chart-note">"Starts at today's reading. Dashed line estimates rain and plant water use; watering is excluded. Missing forecast days are not drawn."</p>
     }
 }
 
@@ -108,7 +131,7 @@ pub fn LineChart(
     let empty = all.is_empty();
 
     // Accessible text alternative: the SVG stays aria-hidden and the
-    // scrub tooltip is pointer-only, so a visually-hidden role="img"
+    // summary is available without exploring, so a visually-hidden role="img"
     // node carries the data non-visually: per series the latest value
     // plus the observed min/max. Computed from props, so SSR and the
     // hydrate first frame render the identical string.
@@ -179,6 +202,22 @@ pub fn LineChart(
         let _ = &ev;
     };
     let on_leave = move |_| hover.set(None);
+    let steps = series
+        .first()
+        .map_or(1, |s| s.points.len().saturating_sub(1).max(1));
+    let on_key = move |ev: leptos::ev::KeyboardEvent| {
+        let current = hover.get_untracked().unwrap_or(0.0);
+        let next = match ev.key().as_str() {
+            "ArrowRight" => Some((current + 1.0 / steps as f64).min(1.0)),
+            "ArrowLeft" => Some((current - 1.0 / steps as f64).max(0.0)),
+            "Home" => Some(0.0),
+            "End" => Some(1.0),
+            "Escape" => None,
+            _ => return,
+        };
+        ev.prevent_default();
+        hover.set(next);
+    };
 
     let scrub = move || {
         let fx = hover.get()?;
@@ -208,17 +247,12 @@ pub fn LineChart(
         if rows.is_empty() {
             return None;
         }
-        // Flip the tooltip to the left of the crosshair past 60% so it
-        // never clips the right edge.
+        // CSS clamps the tooltip to the plot width, including narrow phones.
         let pct = fx * 100.0;
-        let tip_style = if fx > 0.6 {
-            format!("right:{:.1}%;", 100.0 - pct + 1.5)
-        } else {
-            format!("left:{:.1}%;", pct + 1.5)
-        };
+        let tip_style = format!("--chart-cursor:{pct:.1}%;");
         Some(view! {
             <div class="ui-line-chart__cross" style=format!("left:{pct:.2}%")></div>
-            <div class="ui-line-chart__tip" style=tip_style>
+            <div class="ui-line-chart__tip" style=tip_style aria-live="polite" aria-atomic="true">
                 {header.map(|h| view! { <div class="ui-line-chart__tip-head">{h}</div> })}
                 {rows.into_iter().map(|(label, color, val)| view! {
                     <div class="ui-line-chart__tip-row">
@@ -238,6 +272,11 @@ pub fn LineChart(
             // non-empty (some SR/browser pairs prune empty labelled spans).
             <span class="sr-only" role="img" aria-label=summary.clone()>{summary.clone()}</span>
             <div class="ui-line-chart__plot"
+                tabindex=if empty { -1 } else { 0 }
+                role="group"
+                aria-label="Explore chart values. Use left and right arrows, Home or End."
+                on:keydown=on_key
+                on:blur=move |_| hover.set(None)
                 on:pointermove=on_move
                 on:pointerleave=on_leave
             >
@@ -267,6 +306,7 @@ pub fn LineChart(
                 })}
                 {scrub}
             </div>
+            {empty.then(|| view! { <p class="ui-line-chart__empty">"No readings available for this period."</p> })}
             {(!empty && !x_ticks.is_empty()).then(|| view! {
                 <div class="ui-line-chart__xaxis">
                     {x_ticks.into_iter().map(|t| view! { <span>{t}</span> }).collect_view()}
@@ -307,7 +347,7 @@ fn bounds(pts: &[(f64, f64)]) -> (f64, f64, f64, f64) {
     // Pad the y-range a touch so peaks don't clip the top edge; never
     // pad below zero for non-negative data (a "-11 min" axis label is
     // nonsense).
-    let pad = (ymax - ymin) * 0.08;
+    let pad = ((ymax - ymin) * 0.08).max(if ymax == ymin { 1.0 } else { 0.0 });
     let padded_min = if ymin >= 0.0 {
         (ymin - pad).max(0.0)
     } else {

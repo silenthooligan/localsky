@@ -53,10 +53,10 @@
     font-weight: 600;
   }
   &--in &__v {
-    color: var(--accent-rain);
+    color: var(--chart-rain);
   }
   &--out &__v {
-    color: var(--accent-warm);
+    color: var(--chart-et);
   }
   // Net is the headline result: divider above it + the largest number.
   &--net {
@@ -72,36 +72,32 @@
     font-size: var(--text-h3);
   }
   &--net.is-drying &__v {
-    color: var(--accent-warm);
+    color: var(--chart-et);
   }
   &--net.is-wet &__v {
     color: var(--accent-good);
   }
 }
 .balance-bar {
-  display: flex;
+  position: relative;
   height: 12px;
   border-radius: 999px;
-  overflow: hidden;
+  overflow: visible;
   background: var(--bg-panel-soft);
   border: 1px solid var(--border);
 }
 .balance-bar__rain {
-  // Water family -> blue (rain gained today).
-  min-width: 0;
-  background: linear-gradient(90deg, var(--accent-rain), var(--brand-blue-700));
+  display: flex; height: 100%; min-width: 0; border-radius: inherit; overflow: hidden;
 }
-.balance-bar__et {
-  // Dry family -> amber (full-day ET budget).
-  flex: 1;
-  background: linear-gradient(90deg, var(--accent-warm), color-mix(in oklab, var(--accent-warm) 55%, #000));
-}
+.balance-bar__within { background: var(--chart-rain); flex-shrink: 0; }
+.balance-bar__surplus { background: var(--status-online); flex: 1; }
+.balance-bar__goal { position: absolute; top: -4px; bottom: -4px; width: 3px; transform: translateX(-1px); background: var(--chart-et); }
 .balance-status {
   font-family: var(--font-mono);
   font-size: var(--text-meta);
   color: var(--text-dim);
   &.is-drying {
-    color: var(--accent-warm);
+    color: var(--chart-et);
   }
 }
 
@@ -136,13 +132,13 @@
     color: var(--text-dim);
   }
   &.is-flagged {
-    background: color-mix(in oklab, var(--accent-warm) 14%, var(--surface-softer));
-    border-color: color-mix(in oklab, var(--accent-warm) 50%, transparent);
+    background: color-mix(in oklab, var(--chart-temperature) 14%, var(--surface-softer));
+    border-color: color-mix(in oklab, var(--chart-temperature) 50%, transparent);
     .stress-tile__v {
-      color: var(--accent-warm);
+      color: var(--chart-temperature);
     }
     .stress-tile__sub {
-      color: var(--accent-warm);
+      color: var(--chart-temperature);
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.06em;
@@ -183,13 +179,13 @@
   &.is-on {
     // Active rain -> water family (blue), tracking the rain accent.
     opacity: 1;
-    color: var(--accent-rain);
-    background: color-mix(in oklab, var(--accent-rain) 8%, transparent);
-    border-color: color-mix(in oklab, var(--accent-rain) 40%, transparent);
+    color: var(--chart-rain);
+    background: color-mix(in oklab, var(--chart-rain) 8%, transparent);
+    border-color: color-mix(in oklab, var(--chart-rain) 40%, transparent);
 
     .raining-dot {
-      background: var(--accent-rain);
-      box-shadow: 0 0 8px color-mix(in oklab, var(--accent-rain) 70%, transparent);
+      background: var(--chart-rain);
+      box-shadow: 0 0 8px color-mix(in oklab, var(--chart-rain) 70%, transparent);
       animation: pulse-scale 1.4s ease-in-out infinite;
     }
   }
@@ -286,7 +282,7 @@
 .rain-card-hint {
   font-family: var(--font-mono);
   font-size: 0.7rem;
-  color: var(--accent-rain);
+  color: var(--chart-rain);
   letter-spacing: 0.04em;
   min-height: 1em; // keep card heights aligned even when hint is empty
 }
@@ -360,38 +356,11 @@
 }
 
 .rain-bar-fill {
-  position: relative; // the ::before carry overlay needs it
-  height: 100%;
-  // Two-tone gauge: BLUE (--accent-rain = wet, still accumulating) from 0 up to
-  // where the threshold sits WITHIN the fill (--thr-pct, set per-bar by the
-  // RainBar component), then TEAL (--accent-good = satisfied / saturated) for
-  // the portion beyond the mark. Below threshold --thr-pct is 100% -> all blue;
-  // at/above threshold the teal segment shows the part that met the mark.
-  background: linear-gradient(
-    to right,
-    var(--accent-rain) 0 var(--thr-pct, 100%),
-    var(--accent-good) var(--thr-pct, 100%) 100%
-  );
-  border-radius: 999px;
-  // Glow color follows the SATISFIED fraction of the bar. --thr-pct is the
-  // blue-segment width (100% below threshold -> all blue; smaller once the
-  // mark is met as the teal segment grows). The glow base is blue mixed
-  // toward --accent-good by the teal fraction (100% - --thr-pct), so a fully
-  // satisfied bar reads teal, an accumulating one stays blue, and a partway
-  // bar lands in between -- the glow always matches the dominant segment.
-  --rain-bar-glow: color-mix(
-    in oklab,
-    var(--accent-good) calc(100% - var(--thr-pct, 100%)),
-    var(--accent-rain)
-  );
-  box-shadow: 0 0 8px color-mix(in oklab, var(--rain-bar-glow) 40%, transparent);
-  transition: width 400ms ease-out;
+  position: relative; display: flex; height: 100%; border-radius: inherit; overflow: hidden;
+  transition: width var(--motion-base);
 }
-
-// Measured-carry segment: rain that already FELL (today, measured) but still
-// counts toward this day's skip decision. A hatched leading stripe over the
-// first --carry-pct of the fill distinguishes "already in the ground" from
-// forecast rain, without changing the two-tone threshold semantics behind it.
+.rain-bar-before { background: var(--chart-rain); flex-shrink: 0; }
+.rain-bar-excess { background: var(--verdict-skip); flex: 1; }
 .rain-bar-fill::before {
   content: "";
   position: absolute;
@@ -420,7 +389,7 @@
   // Neutral reference tick (where the skip threshold sits). Was amber, which
   // collided with the "drying out" meaning; a threshold marker is not a
   // dry-state signal, so it is a quiet hairline now.
-  background: var(--elev-border-strong);
+  background: var(--text-dim);
   border-radius: 1px;
   transform: translateX(-1px);
 }
@@ -433,15 +402,11 @@
 }
 
 .rain-bar-above {
-  // Crossing the skip threshold means enough rain is expected to skip the run
-  // -- the "outlook MET" state. The two-tone fill gradient now expresses this
-  // (blue up to the mark, teal beyond), so no per-state fill override is needed.
-  // The value text still goes BLUE (wet) -- the teal lives only in the bar's
-  // beyond-threshold segment.
-  .rain-bar-value {
-    color: var(--accent-rain);
-  }
+  .rain-bar-threshold { background: var(--verdict-skip); }
+  .rain-bar-value, .rain-bar-state { color: var(--verdict-skip); }
+  .rain-bar-state { font-weight: 700; }
 }
+.balance-bar.is-covered { border-color: var(--status-online); }
 
 .kv-grid {
   display: grid;
@@ -467,8 +432,8 @@
     font-weight: 700;
   }
   .v-pos { color: var(--accent-good); }
-  .v-neg { color: var(--accent-warm); }
-  .v-warn { color: var(--accent-warm); }
+  .v-neg { color: var(--chart-et); }
+  .v-warn { color: var(--accent-warn); }
 }
 
 // ------------------------------------------------------------------
@@ -491,11 +456,11 @@
 .forecast-title,
 .forecast-section-title {
   margin: 0;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-bright);
 }
 
 .forecast-section-meta {
@@ -633,7 +598,7 @@
 
   .daily-card-rain-amt {
     font-size: 0.78rem;
-    color: var(--accent-rain);
+    color: var(--chart-rain);
     font-weight: 600;
   }
   .daily-card-rain-pct {
@@ -660,8 +625,8 @@
     border: 1px solid color-mix(in oklab, var(--accent-warn, #e5c07b) 45%, transparent);
   }
   &--soaker {
-    color: var(--accent-rain);
-    border: 1px solid color-mix(in oklab, var(--accent-rain) 45%, transparent);
+    color: var(--chart-rain);
+    border: 1px solid color-mix(in oklab, var(--chart-rain) 45%, transparent);
   }
 }
 
@@ -684,6 +649,8 @@
     letter-spacing: 0.08em;
   }
   .v {
+    margin: 0;
+    white-space: nowrap;
     color: var(--text);
     font-weight: 600;
   }
@@ -710,22 +677,22 @@
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
   border-radius: var(--radius);
-  background: rgba(0, 0, 0, 0.18);
-  padding: 0.4rem 0;
+  background: var(--bg-panel-soft);
+  padding: var(--space-2) 0;
 }
 
 .hourly-svg {
   display: block;
-  height: 220px;
+  height: 234px;
 }
 
 .hourly-band-temp {
   // Temperature band: warm tint (the temperature visual axis).
-  fill: color-mix(in oklab, var(--accent-warm) 4%, transparent);
+  fill: color-mix(in oklab, var(--chart-temperature) 4%, transparent);
 }
 .hourly-band-rain {
   // Rain band: water family -> blue tint.
-  fill: color-mix(in oklab, var(--accent-rain) 4%, transparent);
+  fill: color-mix(in oklab, var(--chart-rain) 4%, transparent);
 }
 .hourly-band-label {
   font-family: var(--font-mono);
@@ -757,16 +724,16 @@
 }
 .hourly-temp-line {
   fill: none;
-  stroke: var(--accent-warm);
+  stroke: var(--chart-temperature);
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
-  filter: drop-shadow(0 0 4px color-mix(in oklab, var(--accent-warm) 40%, transparent));
+
 }
 .hourly-rain-bar {
   // Rain probability bars: water family -> blue.
-  fill: var(--accent-rain);
-  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--accent-rain) 30%, transparent));
+  fill: var(--chart-rain);
+
 }
 
 // ------------------------------------------------------------------
@@ -1317,8 +1284,8 @@
   }
 
   &.sk-row-tripped {
-    .sk-mark { color: var(--accent-warm); }
-    .sk-value { color: var(--accent-warm); }
+    .sk-mark { color: var(--chart-temperature); }
+    .sk-value { color: var(--chart-temperature); }
   }
   &.sk-row-muted {
     .sk-mark, .sk-value { color: var(--text-faint); }
@@ -1511,7 +1478,7 @@ html[data-no-irrigation="true"] {
   box-shadow: var(--shadow-1);
 }
 .override-seg__btn--skip.is-active { background: var(--accent-warn); }
-.override-seg__btn--run.is-active { background: var(--accent-good); }
+.override-seg__btn--run.is-active { background: var(--verdict-run); }
 
 // Compact variant inside a zone card / zone-detail.
 .override-ctl--compact .override-seg { padding: 3px; gap: 3px; }

@@ -95,6 +95,27 @@ self.addEventListener('fetch', (event) => {
 
 // ---- Web Push ----
 
+// Keep every navigation and command on this installation's origin/scope.
+function appUrl(path) {
+  const root = new URL(self.registration.scope);
+  const url = new URL(String(path || '/irrigation').replace(/^\/+/, ''), root);
+  return url.origin === root.origin && url.pathname.startsWith(root.pathname)
+    ? url.href : new URL('irrigation', root).href;
+}
+
+async function openApp(path) {
+  const target = appUrl(path);
+  const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of all) {
+    if (client.url.startsWith(self.registration.scope)) {
+      await client.focus();
+      if ('navigate' in client) await client.navigate(target);
+      return;
+    }
+  }
+  await self.clients.openWindow(target);
+}
+
 self.addEventListener('push', (event) => {
   let payload = {};
   try {
@@ -105,33 +126,55 @@ self.addEventListener('push', (event) => {
   const title = payload.title || 'LocalSky';
   const options = {
     body: payload.body || '',
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
+    icon: appUrl('/icons/icon-192.png'),
+    badge: appUrl('/icons/icon-192.png'),
     tag: payload.tag || 'localsky',
-    data: payload.url || '/irrigation',
+    data: { url: payload.url || '/irrigation', stop: payload.stop || null },
     renotify: !!payload.renotify,
+    requireInteraction: !!payload.stop,
+    actions: payload.stop ? [{ action: 'stop-watering', title: 'Stop watering' }, { action: 'open', title: 'Open LocalSky' }] : [],
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const target = event.notification.data || '/irrigation';
+  // Older notifications used a string. An ordinary tap never sends a command.
+  const data = event.notification.data;
+  const target = typeof data === 'string' ? data : data?.url || '/irrigation';
   event.waitUntil((async () => {
-    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const client of all) {
+    if (event.action === 'stop-watering' && data?.stop) {
+      const abort = new AbortController();
+      const timeout = setTimeout(() => abort.abort(), 30000);
+      let status = 0;
       try {
-        const u = new URL(client.url);
-        if (u.origin === self.location.origin) {
-          await client.focus();
-          if ('navigate' in client) {
-            client.navigate(target).catch(() => {});
-          }
-          return;
+        const response = await fetch(appUrl('/api/v1/irrigation/notification-stop'), {
+          method: 'POST', credentials: 'same-origin', redirect: 'error',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data.stop), signal: abort.signal,
+        });
+        status = response.status;
+        const result = await response.json();
+        if (!response.ok || result.ok !== true) {
+          throw new Error(response.status === 409 ? 'This notification is no longer current. Check watering in LocalSky.' : 'Open LocalSky to reconnect or sign in, then retry Stop.');
         }
-      } catch {}
+        await self.registration.showNotification('Stop sent', {
+          body: result.scope === 'device' ? 'The controller received Stop for all its zones. Remaining queued zones were cancelled.' : 'The controller received Stop. Remaining queued zones were cancelled.',
+          tag: 'localsky-stop-result', icon: appUrl('/icons/icon-192.png'),
+          data: { url: '/irrigation' },
+        });
+        return;
+      } catch {
+        await self.registration.showNotification(status === 409 ? 'Run already changed' : 'Stop wasn’t confirmed', {
+          body: status === 409 ? 'This alert is no longer current. Open LocalSky to check watering.' : 'Open LocalSky to reconnect or sign in, then retry Stop.',
+          tag: 'localsky-stop-result', icon: appUrl('/icons/icon-192.png'),
+          requireInteraction: true, data: { url: '/irrigation' },
+        });
+        await openApp('/irrigation');
+        return;
+      } finally { clearTimeout(timeout); }
     }
-    await self.clients.openWindow(target);
+    await openApp(target);
   })());
 });
 

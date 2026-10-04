@@ -5,7 +5,7 @@
 // catalog_covers_every_traced_gate test pins it to the traced ladder.
 
 pub const RESTART_REQUIRED_REASON: &str =
-    "New watering held until LocalSky restarts to apply configuration changes";
+    "Watering cannot start until LocalSky restarts to apply configuration changes";
 
 /// Catalog of every built-in gate in the decision ladder, in evaluation
 /// order: `(id, label, description, protected)`. The description is a
@@ -17,49 +17,49 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
         (
             "restart_required",
             "Restart required",
-            "Watering stays held after a change to startup configuration until LocalSky restarts. This safety hold cannot be disabled or overridden.",
+            "Restart LocalSky to apply startup changes before watering can resume.",
             true,
         ),
         (
             "override",
             "Manual override",
-            "Your manual run or skip override for tomorrow always applies. This operator control cannot be disabled.",
+            "Your manual choice to run or skip tomorrow takes priority.",
             true,
         ),
         (
             "pause_until",
             "Vacation pause (timed)",
-            "A timed vacation pause always blocks watering until it expires. This operator control cannot be disabled.",
+            "Watering is paused until the date you set.",
             true,
         ),
         (
             "paused",
             "Vacation pause",
-            "The vacation pause toggle always blocks watering while it is on. This operator control cannot be disabled.",
+            "Watering is paused until you turn Vacation pause off.",
             true,
         ),
         (
             "restrictions",
             "Watering restrictions",
-            "Configured legal or HOA watering restrictions are always enforced. This compliance gate cannot be disabled.",
+            "Watering must follow your configured legal or HOA restrictions.",
             true,
         ),
         (
             "live_data",
             "Live weather availability",
-            "Always on: when there is no station data and no forecast, the engine fails safe with a skip rather than deciding on fabricated values. This safety gate cannot be disabled.",
+            "Watering is skipped when both station data and the forecast are unavailable.",
             true,
         ),
         (
             "soil_probe",
             "Soil probe availability",
-            "A configured probe that is missing or untrusted holds its zone until a reliable reading returns. This data hold cannot be disabled or waived by Force.",
+            "A zone with an unavailable or unreliable soil probe cannot water until readings recover. Force cannot bypass this check.",
             true,
         ),
         (
             "planning_forecast",
             "Watering-plan rain availability",
-            "Automatic watering needs complete next-24h rain evidence to plan a session. Missing evidence holds only that zone and cannot be waived by Force.",
+            "A zone needs a complete rain forecast for the next 24 hours before automatic watering can start. Force cannot bypass this check.",
             true,
         ),
         (
@@ -107,13 +107,13 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
         (
             "rain_today_forecast",
             "Rain forecast today",
-            "Watering can run on a day the forecast expects rain but no gauge has measured any yet. This is the modelled twin of \"Already wet today\": it exists so an install with no rain gauge still holds after expected rain, and it says on the card that the figure is expected rather than measured. A soil-governed zone rides through it, because its deficit has already counted that rain.",
+            "Watering can run despite rain expected today. Soil-based schedules already account for this rain in their water balance.",
             false,
         ),
         (
             "observed_rain",
             "Observed recent rain",
-            "Watering can run even after heavy measured rain has fallen over the recent window (today plus the configured past days). This sensor-independent backstop normally skips the morning after a soaking even when a soil probe is offline.",
+            "Watering can run despite heavy rain measured over your configured recent-rain window.",
             false,
         ),
         (
@@ -148,8 +148,8 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
         ),
         (
             "dry_run",
-            "Hold all watering",
-            "Holds every run while it is on, so nothing waters. If you want LocalSky to keep deciding and show you what it would do without watering, set your controller to Watch only instead. This control cannot be disabled.",
+            "Skip all watering",
+            "Skips every run while it is on. If you want LocalSky to keep deciding and show you what it would do without watering, set your controller to Watch only instead. This control cannot be disabled.",
             true,
         ),
         (
@@ -394,11 +394,11 @@ mod prose_tests {
             "planning_forecast",
         ] {
             assert_eq!(
-                GateFamily::of(code, "Rain forecast unavailable; watering held"),
+                GateFamily::of(code, "Rain forecast unavailable; watering skipped"),
                 GateFamily::NoData
             );
             assert_eq!(
-                skip_phrase(code, "Rain forecast unavailable; watering held"),
+                skip_phrase(code, "Rain forecast unavailable; watering skipped"),
                 "unavailable weather or sensor data"
             );
         }

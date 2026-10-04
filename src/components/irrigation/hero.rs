@@ -375,7 +375,7 @@ pub fn WateringDecisions(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
         <div class="watering-decisions">
                 <super::plan::WateringPlan snap/>
                 {move || snap.get().force_overrode_guard.map(|guard| view! {
-                    <p class="hero-forced-warn" role="status">{format!("Force bypasses {guard}. Safety checks, watering restrictions, and active holds still apply.")}</p>
+                    <p class="hero-forced-warn" role="status">{format!("Force bypasses {guard}. Safety checks, watering restrictions, and pauses still apply.")}</p>
                 })}
                 <section class="decision-live">
                     <header class="decision-section-heading"><h2>"Current decision and zone needs"</h2><span class="decision-live__badge">"Live"</span><p>"Conditions now · today’s recorded outcome is above."</p></header>

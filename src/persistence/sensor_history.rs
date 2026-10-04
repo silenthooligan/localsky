@@ -38,7 +38,7 @@ pub struct Reading {
 pub struct SensorHistoryStore {
     conn: Arc<Mutex<Connection>>,
     /// Days of history to keep; 0 disables pruning.
-    retention_days: u32,
+    retention: Arc<arc_swap::ArcSwap<crate::config::schema::PersistenceConfig>>,
     /// Epoch of the last piggybacked prune (shared across clones).
     last_prune_epoch: Arc<AtomicI64>,
 }
@@ -47,7 +47,9 @@ impl SensorHistoryStore {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self {
             conn,
-            retention_days: crate::config::schema::default_retention_days(),
+            retention: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::config::schema::PersistenceConfig::default(),
+            )),
             // Start the prune clock at construction so boot doesn't pay
             // a potentially large DELETE before serving traffic; the
             // first pass lands one interval after start.
@@ -56,8 +58,21 @@ impl SensorHistoryStore {
     }
 
     /// Override the retention window ([persistence].retention_days).
-    pub fn with_retention_days(mut self, days: u32) -> Self {
-        self.retention_days = days;
+    pub fn with_retention_days(self, days: u32) -> Self {
+        self.retention
+            .store(Arc::new(crate::config::schema::PersistenceConfig {
+                retention_days: days,
+                ..Default::default()
+            }));
+        self
+    }
+
+    /// Use the same live policy as config saves and the watering cleanup loop.
+    pub fn with_retention_policy(
+        mut self,
+        policy: Arc<arc_swap::ArcSwap<crate::config::schema::PersistenceConfig>>,
+    ) -> Self {
+        self.retention = policy;
         self
     }
 
@@ -156,7 +171,8 @@ impl SensorHistoryStore {
     /// slot so concurrent writers don't stampede). Failures only warn;
     /// pruning must never fail an ingest.
     async fn maybe_prune(&self) {
-        if self.retention_days == 0 {
+        let retention_days = self.retention.load().retention_days;
+        if retention_days == 0 {
             return;
         }
         let now = chrono::Utc::now().timestamp();
@@ -171,7 +187,7 @@ impl SensorHistoryStore {
         {
             return;
         }
-        let cutoff = now - i64::from(self.retention_days) * 86_400;
+        let cutoff = now - i64::from(retention_days) * 86_400;
         match self.prune_older_than(cutoff).await {
             Ok(n) if n > 0 => {
                 tracing::debug!(rows = n, cutoff, "sensor_history retention prune");
@@ -837,6 +853,48 @@ mod tests {
         .unwrap();
         let series = s.series("k".into(), 0, i64::MAX, 100).await.unwrap();
         assert_eq!(series.len(), 2, "retention 0 keeps everything");
+    }
+
+    #[tokio::test]
+    async fn live_retention_change_reaches_existing_store_clones() {
+        use crate::config::schema::PersistenceConfig;
+        let now = chrono::Utc::now().timestamp();
+        let policy = Arc::new(arc_swap::ArcSwap::from_pointee(PersistenceConfig {
+            retention_days: 0,
+            ..Default::default()
+        }));
+        let s = fresh_store().await.with_retention_policy(policy.clone());
+        let writer = s.clone();
+        s.last_prune_epoch.store(0, Ordering::Relaxed);
+        let row = |epoch| Reading {
+            epoch,
+            source_id: "src".into(),
+            key: "k".into(),
+            value: 1.0,
+        };
+        writer.insert(row(now - 10 * 86_400)).await.unwrap();
+        assert_eq!(
+            s.series("k".into(), 0, i64::MAX, 100).await.unwrap().len(),
+            1
+        );
+        policy.store(Arc::new(PersistenceConfig {
+            retention_days: 1,
+            ..Default::default()
+        }));
+        writer.insert(row(now)).await.unwrap();
+        let kept = s.series("k".into(), 0, i64::MAX, 100).await.unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].epoch, now);
+        policy.store(Arc::new(PersistenceConfig {
+            retention_days: 0,
+            ..Default::default()
+        }));
+        s.last_prune_epoch.store(0, Ordering::Relaxed);
+        writer.insert(row(now - 20 * 86_400)).await.unwrap();
+        assert_eq!(
+            s.series("k".into(), 0, i64::MAX, 100).await.unwrap().len(),
+            2
+        );
     }
 
     #[tokio::test]

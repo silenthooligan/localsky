@@ -182,13 +182,24 @@ fn today(s: &IrrigationSnapshot, history: Option<&Result<HistoryWindow, String>>
         None => {
             return status(
                 "Loading today",
-                "Checking the morning record.",
+                "Loading today's watering activity.",
                 "off",
                 "cloud-sun",
             )
         }
     };
     if let Some(record) = recorded_morning(&history.runs, s.last_refresh_epoch, &s.timezone) {
+        if record.state == super::daily::MorningState::Watered {
+            return status(
+                "Watered today",
+                format!(
+                    "{} total · Completed automatic cycles, excluding soak waits.",
+                    record.headline
+                ),
+                "complete",
+                "check-circle",
+            );
+        }
         let detail = if record.headline.contains("check run details")
             || record.headline.contains("awaiting")
         {
@@ -227,10 +238,10 @@ fn today(s: &IrrigationSnapshot, history: Option<&Result<HistoryWindow, String>>
             }
             "scheduled" | "scheduled_legacy" => {
                 return status(
-                    "Morning recorded",
-                    "Open the Daily log to check watering delivery.",
+                    "Watering not confirmed",
+                    "Today's schedule was saved, but completed runs are not available. Check watering history.",
                     "off",
-                    "alert-triangle",
+                    "clock",
                 )
             }
             "missed_window" => {
@@ -258,8 +269,8 @@ fn today(s: &IrrigationSnapshot, history: Option<&Result<HistoryWindow, String>>
         return result;
     }
     status(
-        "No morning record",
-        "No automatic watering outcome recorded yet.",
+        "No watering yet",
+        "Today's automatic watering has not been recorded yet.",
         "off",
         "cloud-sun",
     )
@@ -276,6 +287,7 @@ pub fn IrrigationOverview(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView
     view! {
         <section class="next-run-hero irrigation-overview"
             class:hero-run=move || current.get().tone == "run"
+            class:hero-complete=move || current.get().tone == "complete"
             class:hero-skip=move || current.get().tone == "skip"
             class:hero-off=move || current.get().tone == "off">
             <div class="irrigation-overview__today">
@@ -295,7 +307,7 @@ pub fn IrrigationOverview(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView
             })}
             <nav class="irrigation-overview__links" aria-label="Watering details">
                 <a href=crate::base::url("/irrigation/decisions")>"Watering decisions →"</a>
-                <a href=crate::base::url("/history?view=daily")>"Daily log →"</a>
+                <a href=crate::base::url("/history?view=daily")>"Today's activity →"</a>
             </nav>
         </section>
     }
@@ -312,7 +324,7 @@ mod tests {
             short_reasons(
                 [(
                     "rain_today_forecast",
-                    "Rain forecast unavailable; watering held"
+                    "Rain forecast unavailable; watering skipped"
                 )]
                 .into_iter()
             ),
