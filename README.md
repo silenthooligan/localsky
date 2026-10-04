@@ -22,7 +22,7 @@ progress and Stop across the app, Field Green and Classic Blue theme choices,
 and clearer setup, Settings and watering decisions. Feedback remains available
 in the app. [Release notes](https://github.com/silenthooligan/localsky/releases/tag/v1.0.0)
 
-![Irrigation overview with today's outcome, tomorrow's projection, and zone controls](docs/assets/screenshots/irrigation-desktop.png)
+![LocalSky irrigation dashboard with Quick Run and zone controls](docs/assets/screenshots/irrigation-desktop.png)
 
 ## Start here
 
