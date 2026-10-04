@@ -1,6 +1,6 @@
 # LocalSky guide
 
-Service 0.9.4; API 2.4.0.
+Service 1.0.0; API 2.4.0.
 
 
 ---
@@ -10,7 +10,7 @@ Source: https://localsky.io/docs/introduction.html
 # The LocalSky guide
 
 <div class="ls-doc-hero">
-<p class="ls-eyebrow">THE LOCALSKY GUIDE · v0.9.4</p>
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.0.0</p>
 <p class="ls-doc-tagline">Know your weather.<br><em>Understand your watering.</em></p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
@@ -618,7 +618,15 @@ Subscribe each browser or installed web app that should receive notifications. D
 
 Web Push needs a VAPID keypair so the push service can verify that notifications are signed by your LocalSky instance. The keypair is generated once and reused for the life of the deployment.
 
-LocalSky loads the keypair from environment variables at startup:
+Enable Web Push in **Settings → Notifications**, save, then select **Subscribe this device** on each phone or browser. Setup generates the keypair. Allow notifications when the browser asks.
+
+Watering notifications offer **Stop watering** on supported browsers. This stops the current run and cancels the remaining Quick Run queue. An ordinary tap opens the app. If the alert is old, the connection is lost, or sign-in has expired, LocalSky reports that Stop was not confirmed and opens the watering controls. The phone must be able to reach your instance; a notification is not an offline remote control.
+
+While the app is open, a watering strip stays available across pages with the current zone and **Stop**. Quick Run also shows approximate time remaining and queue progress. The strip stays visible when a stop needs attention.
+
+### Manual key configuration
+
+For deployments managed through environment variables, LocalSky supports the following fallback when no Web Push keypair is saved in configuration:
 
 | Variable | What it is |
 |---|---|
@@ -626,7 +634,7 @@ LocalSky loads the keypair from environment variables at startup:
 | `VAPID_PUBLIC_KEY` | The matching public key as **unpadded base64url** (87 characters): the raw 65-byte uncompressed P-256 point, the same `applicationServerKey` format browsers use. Padded or standard base64 is rejected at startup with a log warning |
 | `VAPID_SUBJECT` | Optional contact URI (`mailto:` or `https:`) the push service can use to reach you. Defaults to the LocalSky project URL |
 
-If the variables are missing or the key file is unreadable, the dispatcher logs one warning at startup and silently drops every event; the rest of the app keeps running.
+If neither configuration nor environment provides a readable keypair, Web Push is unavailable; other notification channels continue working.
 
 ### 1. Generate the keypair
 
@@ -670,7 +678,7 @@ chmod 440 ./localsky-keys/vapid-private.pem
 
 Restart the container after setting the variables; the keypair is read once at startup.
 
-The `[notifications.web_push]` block you may see in `localsky.toml` or `GET /api/v1/config` (`vapid_public`, `vapid_private_path`, `vapid_subject`) mirrors these env vars so the settings UI can display them. Setting the TOML block alone does not enable push; the environment variables are the live configuration path.
+The `[notifications.web_push]` block in `localsky.toml` (`vapid_public`, `vapid_private_path`, `vapid_subject`) takes precedence over these environment variables.
 
 ### 3. Verify the server side
 
@@ -1281,6 +1289,20 @@ self-contained board with no broker and the richest wizard experience.
 Source: https://localsky.io/docs/zones.html
 
 # Set up zones
+
+## Quick Run
+
+Open **Quick Run** on Irrigation or Zones to water once without changing your
+schedule. Select one zone, several, or **Select all**. Choose a minutes preset,
+adjust individual times if needed, then review the total and tap **Start Quick Run**.
+
+Zones run one at a time. You can close the app and return to **View Quick Run**
+to see progress or **Stop Quick Run**, which cancels the remaining zones too.
+Quick Run bypasses rain delays and weather skips; your run-time and daily
+watering limits still apply. The app will ask you to stop existing watering first.
+
+If LocalSky restarts or a controller fails, remaining zones are cancelled.
+History shows controller-reported watering separately from the requested run.
 
 A zone is one planted area controlled by one valve. Its plants, soil, sprinkler rate, and controller binding tell LocalSky how to plan and deliver water.
 
@@ -2696,7 +2718,7 @@ Back up, update the server, then update the Home Assistant companion if you use 
 
 Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v0.9.4`.
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.0.0`.
 
 ## Docker Compose
 
@@ -3461,7 +3483,7 @@ Source: https://localsky.io/docs/api.html
 
 # API reference
 
-LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **0.9.2** uses response contract **2.4.0**. The path prefix and contract version are independent.
+LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.0** uses response contract **2.4.0**. The path prefix and contract version are independent.
 
 Start with the [API quick start](api-quickstart.md), or download the [OpenAPI read profile](openapi.json). The profile covers selected read operations; the reference below also documents control and administration.
 
@@ -3627,9 +3649,40 @@ Use snapshots for current state and projections. Use history for recorded outcom
 | `decision_trace` | Compared rules, reasons, and evidence |
 | `water_budgets` | Zone allocation and soil-model details |
 | `water_plan` | Progressive daily projections |
-| `restart_required`, `restart_reasons` | Saved changes that hold watering until restart |
+| `restart_required`, `restart_reasons` | Saved changes that pause watering until restart |
 
 A zone's `running` value must be read with `running_known`. `ledger_running` records LocalSky's outstanding run tracking; it is not a substitute for controller confirmation. Nullable flow and soil fields remain unknown when unavailable.
+
+## One-time Quick Run
+
+**GET /quick-run** returns availability, configured zones with `max_seconds`,
+and the latest run's status. **POST /quick-run** starts a sequential manual run:
+
+```json
+{"request_id":"unique-client-request-id","zones":[{"zone":"front_yard","seconds":300},{"zone":"back_yard","seconds":600}]}
+```
+
+Reuse the request ID only to retry the same request after a lost response.
+An existing ID returns its saved run, including after restart; a different
+selection with that ID is rejected. Every zone is validated before starting.
+Requests allow 1 to 128 distinct configured zones, up to six hours total, subject
+to per-zone limits and controller duration precision. A running session rejects
+other run commands. Weather skips and rain delays do not block this explicit
+manual action; daily watering caps and restart requirements still apply.
+
+**POST /quick-run/stop** with `{"id":"run-session-id"}` cancels remaining zones
+and asks the server to stop the current zone. Poll status until `stopped` or
+`failed`; accepting the stop request does not prove the controller stopped.
+Controllers with device-wide stop support stop their whole device.
+When `stop_unconfirmed` is true, another stop request retries **all-controller
+Stop** and only clears the flag once every controller acknowledges it.
+
+Phases are `starting`, `running`, `finishing`, `stopping`, `finished`, `stopped`,
+`failed`, and `interrupted`. The first four are active. Restarted queues are
+`interrupted` and never resume automatically. Status and requested durations
+describe commands, not measured water. Existing controller observations supply
+History. Both POST routes require the same authorization and Origin checks as
+`/action`; the public demo denies them.
 
 ## Future plan
 
@@ -3708,6 +3761,17 @@ Threshold writes accept `max_wind_mph` (0 to 50), `min_temp_f` (20 to 70), and `
 
 Successful dispatch responses include `ok`, the dispatch target, and, where available, `confirm_within_s`. Check subsequent reported state. If a request times out, inspect state before retrying a run.
 
+## Notification Stop
+
+`POST /notification-stop` accepts the `zone` and `run_id` included in a watering
+notification. Normal authentication and Origin checks apply; the run ID is not
+an access token. The server rejects expired or replaced runs with `409` and does
+not change current watering. A valid Stop also cancels the remaining queue.
+
+A `200` response with `ok: true` means the controller accepted Stop. `scope`
+reports `zone` or `device`; controllers without individual zone stops stop the
+whole device. `502` means Stop was not confirmed and can be retried from the app.
+
 ## Command failures
 
 | Code | Meaning |
@@ -3718,7 +3782,7 @@ Successful dispatch responses include `ok`, the dispatch target, and, where avai
 | `controller_unsupported` | Operation unsupported |
 | `controller_unreachable` | Controller connection or upstream operation failed |
 
-Preserve the response status, code, diagnostic, and request ID. Additional policy failures can hold a run. Do not translate every refusal into a retry.
+Preserve the response status, code, diagnostic, and request ID. Additional policy failures can prevent a run. Do not translate every refusal into a retry.
 
 **POST /simulate** evaluates a what-if scenario without dispatch. Tuning dismissals use **POST /tuning/dismiss** and **POST /tuning/undismiss**. The retired shadow routes report disabled; `run_sequence_now` is no longer an accepted action.
 
