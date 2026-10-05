@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions
+    url: https://github.com/silenthooligan/localsky/discussions/categories/q-a
+    about: Setup and usage questions.
   - name: Documentation
     url: https://docs.localsky.io
     about: Configuration reference, API, engine internals, irrigation walk-through.
