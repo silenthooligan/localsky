@@ -280,6 +280,12 @@ impl WizardStore {
         if !wp.vapid_public.trim().is_empty() {
             return;
         }
+        // Enabling a resumed draft must not rotate a legacy env-managed
+        // identity that existing browser subscriptions already trust.
+        if let Some(existing) = crate::push::dispatcher::environment_key_config() {
+            *wp = existing;
+            return;
+        }
         let private_path = Self::default_vapid_private_path();
         match crate::push::dispatcher::generate_vapid_keypair(&private_path) {
             Ok(public_b64u) => {

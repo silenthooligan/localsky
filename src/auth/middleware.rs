@@ -641,7 +641,7 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
     // caller is refused. State-changing methods only (a GET never reaches
     // these handlers).
     if !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET) {
-        let is_push_sub = path == "/api/push/subscribe" || path == "/api/push/unsubscribe";
+        let is_push_sub = path.starts_with("/api/push/");
         let is_photo_upload = path == "/api/zones/photo";
         if is_push_sub || is_photo_upload {
             return true;
@@ -1300,6 +1300,11 @@ mod tests {
         // fill disk). Both prefixes; POST only.
         assert!(is_privileged_path(&Method::POST, "/api/push/subscribe"));
         assert!(is_privileged_path(&Method::POST, "/api/v1/push/subscribe"));
+        assert!(is_privileged_path(&Method::POST, "/api/push/preferences"));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/push/preferences/read"
+        ));
         assert!(is_privileged_path(&Method::POST, "/api/push/unsubscribe"));
         assert!(is_privileged_path(&Method::POST, "/api/zones/photo"));
         assert!(is_privileged_path(&Method::POST, "/api/v1/zones/photo"));

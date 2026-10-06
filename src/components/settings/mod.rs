@@ -28,6 +28,7 @@ pub mod home_assistant;
 pub mod llm;
 pub mod location;
 pub mod notifications;
+pub mod pwa_notifications;
 pub mod radar;
 pub mod restrictions;
 pub mod schedules;

@@ -191,11 +191,13 @@ test('installed worker exposes Stop and sends one authenticated, scoped command'
   await sw.emit('push', { data: { json: () => ({ title: 'Back Yard started', stop: stopData }) } });
   expect(sw.notifications[0].actions.map((a: any) => a.action)).toEqual(['stop-watering', 'open']);
   expect(sw.notifications[0].icon).toBe('https://sky.example/ingress/icons/icon-192.png');
+  expect(sw.notifications[0].badge).toBe('https://sky.example/ingress/icons/notification-badge-96.png');
   await sw.emit('notificationclick', click());
   expect(sw.requests).toHaveLength(1);
   expect(sw.requests[0]).toMatchObject({ url: 'https://sky.example/ingress/api/v1/irrigation/notification-stop', method: 'POST', credentials: 'same-origin', redirect: 'error' });
   expect(JSON.parse(sw.requests[0].body)).toEqual(stopData);
   expect(sw.notifications.at(-1).title).toBe('Stop sent');
+  expect(sw.notifications.at(-1).badge).toBe(sw.notifications[0].badge);
   expect(sw.opened).toEqual([]);
 });
 
@@ -208,7 +210,34 @@ for (const failure of ['offline', 'unauthorized', 'stale', 'invalid-success']) t
   await sw.emit('notificationclick', click());
   expect(sw.requests).toHaveLength(1);
   expect(sw.notifications.at(-1).title).toBe(failure === 'stale' ? 'Run already changed' : 'Stop wasn’t confirmed');
+  expect(sw.notifications.at(-1).badge).toBe('https://sky.example/icons/notification-badge-96.png');
   expect(sw.opened).toEqual(['https://sky.example/irrigation']);
+});
+
+test('Android notification badge has a transparent background and visible logo detail', async ({ page }) => {
+  await page.goto('/about');
+  const badge = await page.evaluate(async () => {
+    const img = new Image();
+    img.src = '/icons/notification-badge-96.png';
+    await img.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width; canvas.height = img.height;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
+    const pixels = ctx.getImageData(0, 0, img.width, img.height).data;
+    let solid = 0, clear = 0, colored = 0, border = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const alpha = pixels[i + 3], x = (i / 4) % img.width, y = Math.floor(i / 4 / img.width);
+      if (alpha > 200) solid++;
+      if (alpha === 0) clear++;
+      if (alpha > 0 && (pixels[i] !== 255 || pixels[i + 1] !== 255 || pixels[i + 2] !== 255)) colored++;
+      if ((x === 0 || y === 0 || x === img.width - 1 || y === img.height - 1) && alpha > 0) border++;
+    }
+    return { width: img.width, height: img.height, solid, clear, colored, border };
+  });
+  expect(badge).toMatchObject({ width: 96, height: 96, colored: 0, border: 0 });
+  expect(badge.solid).toBeGreaterThan(600);
+  expect(badge.clear).toBeGreaterThan(4500);
 });
 
 test('ordinary and legacy notification taps never water or stop; external links stay in the app', async ({ request }) => {

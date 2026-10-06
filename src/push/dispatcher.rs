@@ -7,16 +7,17 @@
 // immediately so the subscription list stays clean; other transient
 // errors are logged and the row is preserved for the next attempt.
 //
-// VAPID config is resolved once at startup, CONFIG FIRST then env:
+// VAPID config is resolved at delivery, CONFIG FIRST then env:
 // `notifications.web_push` in /data/localsky.toml (what the wizard's Web
 // Push toggle writes, with an auto-generated keypair) wins; a legacy
 // VAPID_* env trio is the fallback for v0.1 continuity deployments. Missing
-// both = dispatcher logs once and drops every event silently, which keeps
-// the rest of the app running while the user enables push.
+// both = browser delivery is unavailable; shared channels still work.
 
+use crate::notification_preferences::EventKind;
 use crate::push::store::{self, StoredSubscription};
 use anyhow::Result;
 use base64::Engine;
+use chrono::Timelike;
 use futures::FutureExt;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -44,9 +45,17 @@ pub enum PushEvent {
         slug: String,
         duration_min: u32,
     },
-    /// Daily verdict computed (sent once per day on first verdict
-    /// computation). `verdict` = "skip" | "run" | "run_extended".
+    /// Optional outlook admitted once per local day at the configured time.
+    /// The delivery claim survives restarts. `verdict` is the current outlook.
     DailyVerdict { verdict: String, reason: String },
+    /// A durable, once-per-local-day outlook for exactly one device.
+    DeviceOutlook {
+        endpoint: String,
+        date_local: String,
+        reason: String,
+    },
+    /// Measured weather crossing a threshold; never an official warning.
+    Weather { kind: EventKind, body: String },
     /// A configured soil probe stopped producing valid readings (see
     /// the refresher's probe-fault detection). Sent once per probe per
     /// process lifetime. `since_epoch` is the last valid reading; None
@@ -132,6 +141,44 @@ struct PushPayload {
     url: String,
 }
 
+fn allowed_for_device(
+    ev: &PushEvent,
+    sub: &StoredSubscription,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> bool {
+    let minute = now.hour() * 60 + now.minute();
+    let kind = match ev {
+        PushEvent::ZoneStarted { .. } => EventKind::WateringStarted,
+        PushEvent::ZoneStopped { .. } => EventKind::WateringFinished,
+        PushEvent::DispatchFailed { .. } | PushEvent::ControllerOffline { .. } => {
+            EventKind::WateringProblem
+        }
+        PushEvent::ValveUnclosed { .. } | PushEvent::FlowWithoutCommand { .. } => {
+            EventKind::UrgentEquipment
+        }
+        PushEvent::SoilProbeFault { .. } | PushEvent::SoilProbeSuspect { .. } => {
+            EventKind::SoilSensor
+        }
+        PushEvent::SourceOffline { .. } => EventKind::WeatherSource,
+        PushEvent::TuningReportReady { .. } => EventKind::Tuning,
+        PushEvent::RunCapRaised { .. } | PushEvent::InferredTargetsPlanned { .. } => {
+            EventKind::Configuration
+        }
+        PushEvent::Weather { kind, .. } => *kind,
+        PushEvent::DailyVerdict { .. } => return false,
+        PushEvent::DeviceOutlook {
+            endpoint,
+            date_local,
+            ..
+        } => {
+            return endpoint == &sub.endpoint
+                && date_local == &now.format("%Y-%m-%d").to_string()
+                && sub.preferences.outlook_due(minute)
+        }
+    };
+    sub.preferences.allows(kind, minute)
+}
+
 #[derive(Clone)]
 pub struct PushDispatcher {
     sender: mpsc::Sender<PushEvent>,
@@ -160,7 +207,6 @@ impl PushDispatcher {
 /// HA refresher captures and emits into.
 pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher {
     let (tx, mut rx) = mpsc::channel::<PushEvent>(64);
-    let cfg = VapidConfig::from_config_or_env();
 
     tokio::spawn(async move {
         // Build the WebPush client once. isahc-client uses the same
@@ -173,12 +219,6 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
             }
         };
 
-        if cfg.is_none() {
-            tracing::warn!(
-                "push: no VAPID keypair configured (neither notifications.web_push in the config nor VAPID_* env), dispatcher running, but every event will be dropped silently. Enable Web Push in setup, or set VAPID_* env, to activate."
-            );
-        }
-
         // Restart-on-panic supervisor. A panic while handling one event
         // (payload serialization, webpush internals) would otherwise kill the
         // dispatcher for the whole process lifetime, silently dropping every
@@ -188,6 +228,19 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
         loop {
             let outcome = std::panic::AssertUnwindSafe(async {
                 while let Some(ev) = rx.recv().await {
+                    let preferences = sinks_config();
+                    // Recheck at delivery: disabling summaries or leaving the
+                    // scheduled window also suppresses anything in the queue.
+                    if matches!(ev, PushEvent::DailyVerdict { .. }) {
+                        use chrono::Timelike;
+                        let now = crate::timeutil::now_local();
+                        if !preferences
+                            .daily_outlook
+                            .due_at(now.hour() * 60 + now.minute())
+                        {
+                            continue;
+                        }
+                    }
                     // Every enabled sink first, read from the on-disk config
                     // at delivery so a saved ntfy topic or Slack webhook
                     // takes effect without a restart. Events are rare; the
@@ -195,7 +248,7 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
                     if let Some(sink_event) =
                         crate::notifications::from_push_event(&ev, chrono::Utc::now().timestamp())
                     {
-                        let fanout = crate::notifications::Fanout::from_config(&sinks_config());
+                        let fanout = crate::notifications::Fanout::from_config(&preferences);
                         if !fanout.is_empty() {
                             fanout.deliver(&sink_event).await;
                         }
@@ -204,7 +257,11 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
                         tracing::debug!("push: history db not configured; dropping event");
                         continue;
                     };
-                    let Some(cfg) = cfg.as_ref() else {
+                    if !preferences.web_push_enabled || matches!(ev, PushEvent::DailyVerdict { .. })
+                    {
+                        continue;
+                    }
+                    let Some(cfg) = VapidConfig::from_config_or_env() else {
                         continue;
                     };
 
@@ -234,7 +291,12 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
                     };
 
                     for sub in subs {
-                        let result = send_one(&client, cfg, &sub, body.as_bytes()).await;
+                        // Evaluate just before each send, including the date and
+                        // summary window, so queued work cannot escape quiet hours.
+                        if !allowed_for_device(&ev, &sub, crate::timeutil::now_local()) {
+                            continue;
+                        }
+                        let result = send_one(&client, &cfg, &sub, body.as_bytes()).await;
                         match result {
                             Ok(()) => {
                                 tracing::debug!(
@@ -279,7 +341,7 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
 /// The notifications block of the on-disk config, the same way the VAPID
 /// keypair is read: the dispatcher is spawned before the boot config is
 /// loaded and a saved change should apply without a restart.
-fn sinks_config() -> crate::config::schema::Notifications {
+pub(crate) fn sinks_config() -> crate::config::schema::Notifications {
     let config_path =
         std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
     crate::config::loader::load_from_path(std::path::Path::new(&config_path))
@@ -289,6 +351,14 @@ fn sinks_config() -> crate::config::schema::Notifications {
 
 fn render_payload(ev: &PushEvent) -> PushPayload {
     match ev {
+        PushEvent::DeviceOutlook { reason, .. } => PushPayload {
+            title: "Today's watering outlook".into(), body: reason.clone(),
+            tag: "daily-verdict".into(), url: "/irrigation".into(),
+        },
+        PushEvent::Weather { kind, body } => PushPayload {
+            title: kind.label().into(), body: body.clone(),
+            tag: format!("weather-{kind:?}"), url: "/".into(),
+        },
         PushEvent::DispatchFailed {
             zone_name,
             zone_slug,
@@ -352,19 +422,14 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             duration_min,
         } => PushPayload {
             title: format!("{name} done"),
-            body: format!("Ran for {duration_min} min."),
+            body: crate::notifications::ran_for(*duration_min),
             tag: format!("zone-{slug}"),
             url: format!("/zones/{slug}"),
         },
-        PushEvent::DailyVerdict { verdict, reason } => {
-            let title = match verdict.as_str() {
-                "skip" => "Skipping today",
-                "run_extended" => "Running extended today",
-                _ => "Running today",
-            }
-            .to_string();
+        PushEvent::DailyVerdict { reason, .. } => {
+            let title = "Today's watering outlook".to_string();
             let body = if reason.is_empty() {
-                "Skip-check verdict ready.".to_string()
+                "See today's zone plans in LocalSky.".to_string()
             } else {
                 reason.clone()
             };
@@ -516,6 +581,9 @@ async fn send_one(
     };
 
     let mut msg = WebPushMessageBuilder::new(&info);
+    // Never replay stale activity or a daytime alert in quiet hours when a
+    // phone reconnects. The app retains current status and run history.
+    msg.set_ttl(0);
     msg.set_payload(ContentEncoding::Aes128Gcm, body);
     msg.set_vapid_signature(sig);
 
@@ -541,6 +609,18 @@ struct VapidConfig {
     /// Base64url-encoded public key (raw or DER form, decided by the
     /// generator). Stored only for the /api/push/vapid-key endpoint.
     public_key_b64u: String,
+}
+
+/// Preserve a working legacy environment identity when the wizard adopts an
+/// existing installation. Only the public key and private-file path enter the
+/// draft; the private PEM is never returned to the browser.
+pub(crate) fn environment_key_config() -> Option<crate::config::schema::WebPushConfig> {
+    let existing = VapidConfig::from_env()?;
+    Some(crate::config::schema::WebPushConfig {
+        vapid_public: existing.public_key_b64u,
+        vapid_private_path: std::env::var("VAPID_PRIVATE_KEY_PATH").ok()?,
+        vapid_subject: existing.subject,
+    })
 }
 
 impl VapidConfig {
@@ -697,6 +777,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delivery_filters_target_device_date_quiet_hours_and_explicit_opt_out() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::west_opt(4 * 3600).unwrap();
+        let morning = tz.with_ymd_and_hms(2026, 10, 5, 9, 0, 0).unwrap();
+        let midnight = tz.with_ymd_and_hms(2026, 10, 5, 0, 0, 0).unwrap();
+        let mut sub = StoredSubscription {
+            endpoint: "phone".into(),
+            p256dh: "key".into(),
+            auth: "auth".into(),
+            preferences: Default::default(),
+        };
+        let event = PushEvent::DeviceOutlook {
+            endpoint: "phone".into(),
+            date_local: "2026-10-05".into(),
+            reason: "plan".into(),
+        };
+        assert!(!allowed_for_device(&event, &sub, morning));
+        sub.preferences.daily_outlook.enabled = true;
+        assert!(allowed_for_device(&event, &sub, morning));
+        assert!(!allowed_for_device(&event, &sub, midnight));
+        assert!(!allowed_for_device(
+            &event,
+            &sub,
+            morning + chrono::Duration::days(1)
+        ));
+        sub.endpoint = "tablet".into();
+        assert!(!allowed_for_device(&event, &sub, morning));
+        assert!(!allowed_for_device(
+            &PushEvent::DailyVerdict {
+                verdict: "run".into(),
+                reason: "plan".into()
+            },
+            &sub,
+            morning
+        ));
+        let urgent = PushEvent::FlowWithoutCommand { gpm: 1.0 };
+        assert!(allowed_for_device(&urgent, &sub, midnight));
+        sub.preferences.quiet_hours.allow_urgent = false;
+        assert!(!allowed_for_device(&urgent, &sub, midnight));
+        sub.preferences.enabled = false;
+        assert!(!allowed_for_device(&urgent, &sub, morning));
+        assert!(crate::notifications::from_push_event(&event, morning.timestamp()).is_none());
+    }
+
+    #[test]
     fn inferred_targets_payload_names_the_zones_and_the_fields() {
         let p = render_payload(&PushEvent::InferredTargetsPlanned {
             zones: vec!["Back Yard".into(), "Side Bed".into()],
@@ -769,5 +894,16 @@ mod tests {
         assert_eq!(bytes[0], 0x04, "uncompressed point prefix");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finished_push_names_a_short_run_honestly() {
+        let short = render_payload(&PushEvent::ZoneStopped {
+            name: "Back Yard Shrubs".into(),
+            slug: "back_yard_shrubs".into(),
+            duration_min: 0,
+        });
+        assert_eq!(short.title, "Back Yard Shrubs done");
+        assert_eq!(short.body, "Ran for less than a minute.");
     }
 }

@@ -38,8 +38,6 @@ pub(crate) struct PushEdges {
     prev_zone_running: std::collections::HashMap<String, bool>,
     notification_action_sent: std::collections::HashSet<String>,
     zone_started_at: std::collections::HashMap<String, i64>,
-    /// Daily verdict push fires once per local day; the date is the key.
-    last_verdict_day: Option<String>,
     /// A probe fault pushes at most once per probe per process lifetime.
     probe_fault_notified: std::collections::HashSet<String>,
     /// A quarantine pushes once per episode: the set latches the zones
@@ -102,6 +100,23 @@ pub(crate) async fn observe(
         return;
     }
     edges.last_refresh_seen = snap.last_refresh_epoch;
+    let notification_config = crate::push::dispatcher::sinks_config();
+    if notification_config.web_push_enabled {
+        crate::notifications::daily_outlook::consider_devices(
+            &deps.push,
+            snap,
+            deps.history_conn.as_ref(),
+            crate::timeutil::now_local(),
+        )
+        .await;
+    }
+    crate::notifications::weather::observe(
+        &deps.push,
+        &deps.tempest_store,
+        deps.history_conn.as_ref(),
+        Utc::now().timestamp(),
+    )
+    .await;
     if let Some(db) = deps.history_conn.as_ref() {
         // Zones whose running state is a dry-run controller's pretend
         // water this tick: the observer records those rows as source
@@ -203,6 +218,14 @@ pub(crate) async fn observe(
         deps.forecast_store.snapshot().last_refresh_epoch,
         &deps.controllers,
     );
+    crate::notifications::daily_outlook::consider(
+        &deps.push,
+        snap,
+        deps.history_conn.as_ref(),
+        &notification_config.daily_outlook,
+        crate::timeutil::now_local(),
+    )
+    .await;
     // Per-tick engine metrics from the authoritative snapshot (verdict
     // mix and degraded rate are the core health signals).
     crate::metrics::inc("localsky_refresh_total", String::new());
@@ -343,8 +366,6 @@ pub(crate) fn parse_quarantine_reason(reason: &str) -> Option<(Option<f64>, f64)
 
 /// Walk the snapshot and emit push events on edge transitions:
 /// - ZoneStarted/ZoneStopped on each zone's running flag flip.
-/// - DailyVerdict once per local day, the first time we see a non-empty
-///   verdict for that day.
 /// - SoilProbeFault when a probe first appears in soil_probe_faults
 ///   (once per probe per process lifetime via `probe_fault_notified`).
 /// - SoilProbeSuspect when a zone's verdict source becomes "soil_quarantine"
@@ -364,7 +385,6 @@ pub(crate) fn emit_push_events(
         prev_zone_running: prev_running,
         notification_action_sent: action_sent,
         zone_started_at: started_at,
-        last_verdict_day,
         probe_fault_notified,
         quarantined_zones,
         forecast_stale_notified,
@@ -491,34 +511,6 @@ pub(crate) fn emit_push_events(
     // out (so a later re-quarantine notifies again), entries we just notified
     // are now latched so the 10s poll cadence doesn't re-fire every tick.
     *quarantined_zones = now_quarantined;
-
-    // Daily verdict fires once per local day. The "today" label is the
-    // local-date YYYY-MM-DD; on the first refresh after midnight rolls
-    // we emit one event with the new verdict.
-    // The once-a-day dedupe rolls on the CONFIGURED-timezone date.
-    let today = crate::timeutil::now_local().format("%Y-%m-%d").to_string();
-    let verdict = snap.skip_check.verdict.clone();
-    if !verdict.is_empty() && last_verdict_day.as_deref() != Some(today.as_str()) {
-        // Carry honest confidence into the morning push. When the
-        // decision ran on substituted inputs (stale station and/or aged forecast,
-        // folded into the trace's degraded flag), say so up front so the
-        // notification is never more confident than the data behind it.
-        let degraded = snap
-            .decision_trace
-            .as_ref()
-            .map(|t| t.degraded)
-            .unwrap_or(false);
-        let base = snap.skip_check.reason.clone();
-        let reason = match (degraded, base.is_empty()) {
-            (true, true) => {
-                "Decided on backup data (lower confidence until live data returns).".to_string()
-            }
-            (true, false) => format!("Decided on backup data (lower confidence). {base}"),
-            (false, _) => base,
-        };
-        push.emit(crate::push::PushEvent::DailyVerdict { verdict, reason });
-        *last_verdict_day = Some(today);
-    }
 }
 
 #[cfg(test)]

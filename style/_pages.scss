@@ -301,7 +301,7 @@
 }
 .ha-hero--ok .ha-hero__icon { color: var(--status-online); border-color: color-mix(in oklab, var(--status-online) 35%, transparent); }
 .ha-hero__text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.ha-hero__row { display: flex; align-items: center; gap: var(--space-3); }
+.ha-hero__row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
 .ha-hero__row strong { font-size: var(--text-h3); color: var(--text-bright); }
 .ha-hero__text p { margin: 0; color: var(--text-dim); line-height: 1.5; max-width: 64ch; }
 
@@ -313,7 +313,8 @@
   white-space: nowrap;
 }
 .ha-chip__dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.ha-chip--on { color: var(--status-online); border-color: color-mix(in oklab, var(--status-online) 40%, transparent); background: color-mix(in oklab, var(--status-online) 10%, var(--elev-2)); }
+.ha-chip--on { color: var(--text-bright); border-color: color-mix(in oklab, var(--status-online) 40%, transparent); background: color-mix(in oklab, var(--status-online) 10%, var(--elev-2)); }
+.ha-chip--on .ha-chip__dot { background: var(--status-online); }
 .ha-chip--warn { color: var(--text-bright); border-color: color-mix(in oklab, var(--verdict-wind) 40%, transparent); background: color-mix(in oklab, var(--verdict-wind) 10%, var(--elev-2)); }
 .ha-chip--warn .ha-chip__dot { background: var(--verdict-wind); }
 .ha-chip--off { color: var(--text-faint); border-color: var(--elev-border-strong); background: var(--elev-2); }

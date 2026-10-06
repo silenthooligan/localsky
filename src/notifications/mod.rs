@@ -15,6 +15,12 @@
 pub mod sinks;
 
 #[cfg(feature = "ssr")]
+pub(crate) mod daily_outlook;
+
+#[cfg(feature = "ssr")]
+pub(crate) mod weather;
+
+#[cfg(feature = "ssr")]
 pub use fanout::{from_push_event, headline as fanout_headline, Fanout};
 
 #[cfg(feature = "ssr")]
@@ -151,7 +157,9 @@ mod fanout {
                 description: format!("The soil probe on {zone_name} ({zone_slug}) has stopped reporting."),
                 at_epoch: now_epoch,
             },
-            PushEvent::SoilProbeSuspect { .. }
+            PushEvent::DeviceOutlook { .. }
+            | PushEvent::Weather { .. }
+            | PushEvent::SoilProbeSuspect { .. }
             | PushEvent::TuningReportReady { .. }
             | PushEvent::RunCapRaised { .. }
             | PushEvent::InferredTargetsPlanned { .. } => return None,
@@ -172,11 +180,11 @@ mod fanout {
                 ..
             } => (
                 format!("{zone_slug} finished"),
-                format!("Ran for {} min.", actual_duration_s / 60),
+                super::ran_for(actual_duration_s / 60),
             ),
-            NotificationEvent::DailyVerdict {
-                verdict, reason, ..
-            } => (format!("Today: {verdict}"), reason.clone()),
+            NotificationEvent::DailyVerdict { reason, .. } => {
+                ("Today's watering outlook".into(), reason.clone())
+            }
             NotificationEvent::SkipExplained { reason, .. } => {
                 ("Skipped today".into(), reason.clone())
             }
@@ -194,6 +202,17 @@ mod fanout {
                 ..
             } => (format!("LocalSky {severity}"), description.clone()),
         }
+    }
+}
+
+/// Finished-run wording shared by push and the sinks. A run stopped within
+/// its first minute rounds to zero, which read as if nothing had watered.
+#[cfg(feature = "ssr")]
+pub(crate) fn ran_for(minutes: u32) -> String {
+    if minutes == 0 {
+        "Ran for less than a minute.".into()
+    } else {
+        format!("Ran for {minutes} min.")
     }
 }
 
@@ -328,5 +347,18 @@ mod tests {
                 "notifications.{f} has no reader in the sinks, the push dispatcher or the MQTT publisher"
             );
         }
+    }
+
+    #[test]
+    fn a_run_stopped_in_its_first_minute_does_not_read_as_zero() {
+        assert_eq!(ran_for(0), "Ran for less than a minute.");
+        assert_eq!(ran_for(12), "Ran for 12 min.");
+        let (_, body) = fanout_headline(&NotificationEvent::ZoneStopped {
+            zone_slug: "back_yard_shrubs".into(),
+            controller_id: "opensprinkler".into(),
+            actual_duration_s: 0,
+            at_epoch: 0,
+        });
+        assert_eq!(body, "Ran for less than a minute.");
     }
 }

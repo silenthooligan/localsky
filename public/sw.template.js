@@ -29,6 +29,7 @@ const PRECACHE = [
   '/manifest.webmanifest',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
+  '/icons/notification-badge-96.png',
 ];
 
 // Cache a precache entry only when the response is a real 200 and was not
@@ -116,6 +117,15 @@ async function openApp(path) {
   await self.clients.openWindow(target);
 }
 
+// Android masks the small badge to one color. The full app tile has an opaque
+// background, which becomes a square; use the transparent LocalSky mark here.
+function notificationBrand() {
+  return {
+    icon: appUrl('/icons/icon-192.png'),
+    badge: appUrl('/icons/notification-badge-96.png'),
+  };
+}
+
 self.addEventListener('push', (event) => {
   let payload = {};
   try {
@@ -126,8 +136,7 @@ self.addEventListener('push', (event) => {
   const title = payload.title || 'LocalSky';
   const options = {
     body: payload.body || '',
-    icon: appUrl('/icons/icon-192.png'),
-    badge: appUrl('/icons/icon-192.png'),
+    ...notificationBrand(),
     tag: payload.tag || 'localsky',
     data: { url: payload.url || '/irrigation', stop: payload.stop || null },
     renotify: !!payload.renotify,
@@ -160,14 +169,14 @@ self.addEventListener('notificationclick', (event) => {
         }
         await self.registration.showNotification('Stop sent', {
           body: result.scope === 'device' ? 'The controller received Stop for all its zones. Remaining queued zones were cancelled.' : 'The controller received Stop. Remaining queued zones were cancelled.',
-          tag: 'localsky-stop-result', icon: appUrl('/icons/icon-192.png'),
+          tag: 'localsky-stop-result', ...notificationBrand(),
           data: { url: '/irrigation' },
         });
         return;
       } catch {
         await self.registration.showNotification(status === 409 ? 'Run already changed' : 'Stop wasn’t confirmed', {
           body: status === 409 ? 'This alert is no longer current. Open LocalSky to check watering.' : 'Open LocalSky to reconnect or sign in, then retry Stop.',
-          tag: 'localsky-stop-result', icon: appUrl('/icons/icon-192.png'),
+          tag: 'localsky-stop-result', ...notificationBrand(),
           requireInteraction: true, data: { url: '/irrigation' },
         });
         await openApp('/irrigation');

@@ -2,6 +2,36 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-05
+
+### Added
+
+- Per-device PWA notification settings: watering activity, equipment and sensor
+  problems, weather changes, tuning suggestions and configuration notices.
+- Quiet hours default to 10 PM to 7 AM in the LocalSky location timezone. Enabled
+  urgent equipment alerts bypass them by default; both choices are editable.
+- Optional measured rain, high wind, freezing/high temperature and nearby
+  lightning alerts, with persistent condition tracking and repeat limits.
+- Each device can opt into one daily watering outlook at its chosen time.
+  Preferences and daily delivery limits survive server restarts and reconnects.
+
+### Fixed
+
+- Routine watering outlooks are now opt-in and off by default. An optional
+  daily summary uses a chosen local time, persists its daily delivery record
+  across restarts, and skips missed windows instead of alerting at midnight.
+  Offline phones do not receive delayed outlooks. Actual watering and equipment
+  alerts respect each device's categories and quiet hours.
+- Android notifications use a transparent LocalSky logo badge instead of the
+  opaque app tile, including Stop confirmations and errors.
+- Web Push shows runtime readiness, including environment-provided keys; the
+  server delivery switch now works without removing keys or device preferences.
+- Offline devices do not receive stale notification backlogs.
+- A watering run stopped within its first minute is reported as "Ran for less
+  than a minute." instead of "Ran for 0 min."
+- Device settings retain unsaved changes after a failed save and report read
+  failures instead of showing editable defaults.
+
 ## [1.0.0] - 2026-10-04
 
 LocalSky's first stable release includes the unreleased 0.9.4 app and Home

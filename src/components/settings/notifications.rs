@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::{SettingsResult, StatusHero};
+use crate::components::settings_ui::SettingsResult;
 use crate::components::ui::{Button, FormField, Panel, SecretInput, Toggle};
 
 #[component]
@@ -21,50 +21,11 @@ pub fn SettingsNotifications() -> impl IntoView {
 
     let slack_webhook = RwSignal::new(String::new());
 
-    let web_push_enabled = RwSignal::new(false);
-
-    // This device's push subscription. Read from the browser on mount;
-    // Subscribe asks for permission, subscribes against the server's
-    // VAPID key and registers the endpoint; Unsubscribe tears both down.
-    let device_state = RwSignal::new(DeviceState::Unknown);
-    let device_busy = RwSignal::new(false);
-    let device_msg = RwSignal::new(String::new());
-    #[cfg(feature = "hydrate")]
-    {
-        leptos::task::spawn_local(async move {
-            device_state.set(read_device_state().await);
-        });
-    }
-    let on_subscribe = move |_| {
-        device_busy.set(true);
-        device_msg.set(String::new());
-        #[cfg(feature = "hydrate")]
-        leptos::task::spawn_local(async move {
-            match crate::push_client::subscribe().await {
-                Ok(()) => device_msg.set("This device will get alerts.".into()),
-                Err(e) => device_msg.set(e),
-            }
-            device_state.set(read_device_state().await);
-            device_busy.set(false);
-        });
-        #[cfg(not(feature = "hydrate"))]
-        device_busy.set(false);
-    };
-    let on_unsubscribe = move |_| {
-        device_busy.set(true);
-        device_msg.set(String::new());
-        #[cfg(feature = "hydrate")]
-        leptos::task::spawn_local(async move {
-            match crate::push_client::unsubscribe().await {
-                Ok(()) => device_msg.set("This device stopped getting alerts.".into()),
-                Err(e) => device_msg.set(e),
-            }
-            device_state.set(read_device_state().await);
-            device_busy.set(false);
-        });
-        #[cfg(not(feature = "hydrate"))]
-        device_busy.set(false);
-    };
+    let web_push_enabled = RwSignal::new(true);
+    let channels_loaded = RwSignal::new(false);
+    let server_revision = RwSignal::new(0u32);
+    let daily_outlook_enabled = RwSignal::new(false);
+    let daily_outlook_time = RwSignal::new("09:00".to_string());
 
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
@@ -74,17 +35,26 @@ pub fn SettingsNotifications() -> impl IntoView {
     {
         Effect::new(move |_| {
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(d) = fetch_notifications().await {
-                    mqtt_host.set(d.mqtt_host);
-                    mqtt_port.set(d.mqtt_port);
-                    mqtt_username.set(d.mqtt_username);
-                    mqtt_password.set(d.mqtt_password);
-                    mqtt_discovery_prefix.set(d.mqtt_discovery_prefix);
-                    mqtt_publish_enabled.set(d.mqtt_publish_enabled);
-                    ntfy_base_url.set(d.ntfy_base_url);
-                    ntfy_topic.set(d.ntfy_topic);
-                    slack_webhook.set(d.slack_webhook);
-                    web_push_enabled.set(d.web_push_enabled);
+                match fetch_notifications().await {
+                    Ok(d) => {
+                        mqtt_host.set(d.mqtt_host);
+                        mqtt_port.set(d.mqtt_port);
+                        mqtt_username.set(d.mqtt_username);
+                        mqtt_password.set(d.mqtt_password);
+                        mqtt_discovery_prefix.set(d.mqtt_discovery_prefix);
+                        mqtt_publish_enabled.set(d.mqtt_publish_enabled);
+                        ntfy_base_url.set(d.ntfy_base_url);
+                        ntfy_topic.set(d.ntfy_topic);
+                        slack_webhook.set(d.slack_webhook);
+                        web_push_enabled.set(d.web_push_enabled);
+                        daily_outlook_enabled.set(d.daily_outlook_enabled);
+                        daily_outlook_time.set(d.daily_outlook_time);
+                        channels_loaded.set(true);
+                    }
+                    Err(e) => {
+                        result_msg.set(e);
+                        result_ok.set(false);
+                    }
                 }
             });
         });
@@ -107,12 +77,15 @@ pub fn SettingsNotifications() -> impl IntoView {
             ntfy_topic: ntfy_topic.get(),
             slack_webhook: slack_webhook.get(),
             web_push_enabled: web_push_enabled.get(),
+            daily_outlook_enabled: daily_outlook_enabled.get(),
+            daily_outlook_time: daily_outlook_time.get(),
         };
         #[cfg(feature = "hydrate")]
         {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_notifications(payload).await {
                     Ok(()) => {
+                        server_revision.update(|n| *n += 1);
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
@@ -134,106 +107,50 @@ pub fn SettingsNotifications() -> impl IntoView {
         }
     };
 
-    // Status hero: how many channels are actually wired up. Shares the HA page's
-    // hero look so the integration pages read as one family.
-    let active_count = move || {
-        let mut n = 0;
-        if !mqtt_host.get().trim().is_empty() && mqtt_publish_enabled.get() {
-            n += 1;
-        }
-        if !ntfy_base_url.get().trim().is_empty() && !ntfy_topic.get().trim().is_empty() {
-            n += 1;
-        }
-        if !slack_webhook.get().trim().is_empty() {
-            n += 1;
-        }
-        if web_push_enabled.get() {
-            n += 1;
-        }
-        n
-    };
-    let hero_chip = move || {
-        let n = active_count();
-        if n == 0 {
-            "Off".to_string()
-        } else {
-            format!("{n} active")
-        }
-    };
-    let hero_meaning = move || {
-        let n = active_count();
-        if n == 0 {
-            "No channels set up yet, so run/skip alerts go nowhere. Turn on a channel below."
-                .to_string()
-        } else {
-            format!(
-                "{n} channel{} will receive run/skip + verdict alerts. Each is independent.",
-                if n == 1 { "" } else { "s" }
-            )
-        }
-    };
-
     view! {
         <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Notifications"</h1>
                 <p class="settings-page__subtitle">
-                    "Where alerts go: zone start and stop, the daily verdict, "
-                    "and anomalies. Each channel is independent."
+                    "Choose what reaches this device and when."
                 </p>
             </header>
 
-            <StatusHero
-                icon="bell"
-                title="Notifications"
-                ok=Signal::derive(move || active_count() > 0)
-                chip=Signal::derive(hero_chip)
-                meaning=Signal::derive(hero_meaning)
-            />
+            <super::pwa_notifications::PwaNotifications server_revision=server_revision/>
+            <details class="pwa-shared-channels">
+                <summary>"Server and shared channels"</summary>
+                <p class="settings-page__subtitle">"These settings apply to the whole LocalSky installation. Device choices above apply only to Web Push."</p>
+                <fieldset class="pwa-preferences__fields" disabled=move || !channels_loaded.get() || saving.get()>
+                <legend class="sr-only">"Shared channel settings"</legend>
+            <Panel title="Shared channel outlook".to_string() help_topic="notifications">
+                <Toggle
+                    checked=daily_outlook_enabled
+                    label="Daily outlook for ntfy and Slack".to_string()
+                    helptext="Optional. One summary per day; forecast changes stay in the app.".to_string()
+                />
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Summary time".to_string()
+                        helptext="Uses the timezone in Settings > Location. Missed summaries are skipped.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input type="time" class="ui-input" aria-label="Summary time"
+                            prop:value=move || daily_outlook_time.get()
+                            disabled=move || !daily_outlook_enabled.get()
+                            on:input=move |ev| daily_outlook_time.set(event_target_value(&ev))
+                        />
+                    </FormField>
+                </div>
+                <p class="settings-page__subtitle">"Applies to ntfy and Slack. Each PWA device chooses its own outlook above."</p>
+            </Panel>
 
             <Panel title="Web Push".to_string() help_topic="notifications">
                 <Toggle
                     checked=web_push_enabled
                     label="Send push alerts".to_string()
-                    helptext="Save to enable alerts, then subscribe each device.".to_string()
+                    helptext="Enable or pause delivery to all PWA devices. Your server keys and device choices are kept.".to_string()
                 />
-                <div class="push-device">
-                    <p class="settings-page__subtitle">"Get watering start and finish alerts. Use Stop from supported notifications, or tap the alert to open LocalSky."</p>
-                    <div class="push-device__status">
-                        <span class="push-device__label">"This device"</span>
-                        <span class="push-device__state">{move || device_state.get().label()}</span>
-                    </div>
-                    <div class="push-device__actions">
-                        {move || match device_state.get() {
-                            DeviceState::Subscribed => view! {
-                                <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    disabled=Signal::derive(move || device_busy.get())
-                                    on_click=Callback::new(on_unsubscribe)
-                                >
-                                    "Unsubscribe"
-                                </Button>
-                            }.into_any(),
-                            DeviceState::Unsupported | DeviceState::Blocked => ().into_any(),
-                            _ => view! {
-                                <Button
-                                    variant="primary"
-                                    size="sm"
-                                    disabled=Signal::derive(move || device_busy.get())
-                                    on_click=Callback::new(on_subscribe)
-                                >
-                                    "Subscribe this device"
-                                </Button>
-                            }.into_any(),
-                        }}
-                    </div>
-                    {move || {
-                        let m = device_msg.get();
-                        (!m.is_empty()).then(|| view! { <p class="push-device__msg">{m}</p> })
-                    }}
-                </div>
             </Panel>
 
             <Panel title="MQTT (HA discovery)".to_string() help_topic="notifications">
@@ -367,14 +284,16 @@ pub fn SettingsNotifications() -> impl IntoView {
             <div class="settings-actions">
                 <Button
                     variant="primary"
-                    disabled=Signal::derive(move || saving.get())
+                    disabled=Signal::derive(move || saving.get() || !channels_loaded.get())
                     on_click=Callback::new(on_save)
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
                 </Button>
             </div>
 
+            </fieldset>
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
+            </details>
         </div>
     }
 }
@@ -392,6 +311,8 @@ struct NotificationsDraft {
     ntfy_topic: String,
     slack_webhook: String,
     web_push_enabled: bool,
+    daily_outlook_enabled: bool,
+    daily_outlook_time: String,
 }
 
 #[cfg(feature = "hydrate")]
@@ -403,10 +324,6 @@ async fn fetch_notifications() -> Result<NotificationsDraft, String> {
         .unwrap_or(serde_json::Value::Null);
 
     let mqtt = n.get("mqtt").cloned().unwrap_or(serde_json::Value::Null);
-    let web_push = n
-        .get("web_push")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
     let ntfy = n.get("ntfy").cloned().unwrap_or(serde_json::Value::Null);
     let slack = n.get("slack").cloned().unwrap_or(serde_json::Value::Null);
 
@@ -427,7 +344,21 @@ async fn fetch_notifications() -> Result<NotificationsDraft, String> {
         ntfy_base_url: get_str(&ntfy, "base_url").to_string(),
         ntfy_topic: get_str(&ntfy, "topic").to_string(),
         slack_webhook: get_str(&slack, "webhook_url").to_string(),
-        web_push_enabled: !web_push.is_null(),
+        web_push_enabled: n
+            .get("web_push_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        daily_outlook_enabled: n
+            .get("daily_outlook")
+            .and_then(|d| d.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        daily_outlook_time: n
+            .get("daily_outlook")
+            .and_then(|d| d.get("time"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("09:00")
+            .to_string(),
     })
 }
 
@@ -438,6 +369,13 @@ fn get_str<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
 
 #[cfg(feature = "hydrate")]
 async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
+    let outlook = crate::config::schema::DailyOutlook {
+        enabled: d.daily_outlook_enabled,
+        time: d.daily_outlook_time.clone(),
+    };
+    if outlook.minute_of_day().is_none() {
+        return Err("Choose a valid summary time.".into());
+    }
     let mut cfg = crate::components::config_client::get_config().await?;
 
     let mqtt = if d.mqtt_host.is_empty() {
@@ -450,7 +388,7 @@ async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
             "password": if d.mqtt_password.is_empty() { serde_json::Value::Null } else { serde_json::json!(d.mqtt_password) },
             "discovery_prefix": d.mqtt_discovery_prefix,
             "publish_enabled": d.mqtt_publish_enabled,
-            "subscribe_enabled": false,
+            "subscribe_enabled": cfg.pointer("/notifications/mqtt/subscribe_enabled").cloned().unwrap_or(serde_json::json!(false)),
         })
     };
 
@@ -460,7 +398,7 @@ async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
         serde_json::json!({
             "base_url": d.ntfy_base_url,
             "topic": d.ntfy_topic,
-            "auth_token": serde_json::Value::Null,
+            "auth_token": cfg.pointer("/notifications/ntfy/auth_token").cloned().unwrap_or(serde_json::Value::Null),
         })
     };
 
@@ -471,6 +409,8 @@ async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
     };
 
     let notifications = serde_json::json!({
+        "daily_outlook": outlook,
+        "web_push_enabled": d.web_push_enabled,
         "mqtt": mqtt,
         "ntfy": ntfy,
         "slack": slack,
@@ -483,45 +423,4 @@ async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
     crate::components::config_client::put_config(&cfg)
         .await
         .map(|_| ())
-}
-
-/// What the browser says about this device's subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
-enum DeviceState {
-    /// Not read yet (server render, or the query is in flight).
-    Unknown,
-    /// The browser has no push support or no service worker (plain HTTP).
-    Unsupported,
-    /// Notifications are blocked in the browser; only the browser can lift it.
-    Blocked,
-    NotSubscribed,
-    Subscribed,
-}
-
-impl DeviceState {
-    fn label(self) -> &'static str {
-        match self {
-            DeviceState::Unknown => "Checking",
-            DeviceState::Unsupported => "Not available here (push needs HTTPS)",
-            DeviceState::Blocked => "Blocked in the browser",
-            DeviceState::NotSubscribed => "Not subscribed",
-            DeviceState::Subscribed => "Subscribed",
-        }
-    }
-}
-
-#[cfg(feature = "hydrate")]
-async fn read_device_state() -> DeviceState {
-    match crate::push_client::permission_state() {
-        Err(_) => DeviceState::Unsupported,
-        Ok(p) if p == "denied" => DeviceState::Blocked,
-        Ok(_) => {
-            if crate::push_client::is_subscribed().await {
-                DeviceState::Subscribed
-            } else {
-                DeviceState::NotSubscribed
-            }
-        }
-    }
 }

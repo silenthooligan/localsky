@@ -1,6 +1,6 @@
 # API reference
 
-LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.0** uses response contract **2.4.0**. The path prefix and contract version are independent.
+LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.1** uses response contract **2.4.0**. The path prefix and contract version are independent.
 
 Start with the [API quick start](api-quickstart.md), or download the [OpenAPI read profile](openapi.json). The profile covers selected read operations; the reference below also documents control and administration.
 
@@ -54,3 +54,25 @@ API major versions signal breaking response changes; minor versions add compatib
 ## Client tooling
 
 [Python client](examples/localsky_client.py) · [JavaScript client](examples/localsky-client.mjs) · [OpenAPI](openapi.json) · [AI integration guide](ai-integrations.md) · [llms.txt](llms.txt)
+
+
+## PWA notification preferences
+
+Both `/api/v1/push` and the legacy `/api/push` prefix expose these routes:
+
+| Method | Route | Behavior |
+|---|---|---|
+| GET | `/status` | `ready`, `enabled` and effective `timezone`; no private keys |
+| GET | `/vapid-key` | Public application-server key, or 503 when unavailable |
+| POST | `/subscribe` | Idempotent registration; existing choices are preserved |
+| POST | `/unsubscribe` | Remove a subscription |
+| POST | `/preferences/read` | Read choices for the supplied subscription |
+| POST | `/preferences` | Validate and save choices for the supplied subscription |
+
+Preference requests require `endpoint` plus `keys: {p256dh, auth}` matching the
+stored subscription. A save also includes `preferences: {enabled, events,
+quiet_hours: {enabled, start, end, allow_urgent}, daily_outlook: {enabled, time}}`.
+Times use `HH:MM` in the returned location timezone. Invalid times or an enabled
+outlook inside quiet hours return 422; unmatched credentials return 404. These
+POST routes retain the normal owner/LAN authorization and Origin checks. The
+API does not expose a subscription list or another device's keys.

@@ -182,7 +182,14 @@ fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'stati
         ("email", "Email"),
     ]
     .iter()
-    .filter(|(key, _)| notif.get(*key).map(|v| !v.is_null()).unwrap_or(false))
+    .filter(|(key, _)| {
+        notif.get(*key).map(|v| !v.is_null()).unwrap_or(false)
+            && (*key != "web_push"
+                || notif
+                    .get("web_push_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true))
+    })
     .map(|(_, label)| *label)
     .collect();
     let notif_text = if channels.is_empty() {

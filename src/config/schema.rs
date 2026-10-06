@@ -2412,9 +2412,13 @@ pub struct OpenaiCompatConfig {
 
 // ----- Notifications -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Notifications {
+    #[serde(default = "default_true")]
+    pub web_push_enabled: bool,
+    #[serde(default)]
+    pub daily_outlook: DailyOutlook,
     #[serde(default)]
     pub web_push: Option<WebPushConfig>,
     #[serde(default)]
@@ -2423,6 +2427,62 @@ pub struct Notifications {
     pub ntfy: Option<NtfyConfig>,
     #[serde(default)]
     pub slack: Option<SlackConfig>,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            web_push_enabled: true,
+            daily_outlook: Default::default(),
+            web_push: None,
+            mqtt: None,
+            ntfy: None,
+            slack: None,
+        }
+    }
+}
+
+/// Routine forecasts are opt-in; watering and equipment alerts are independent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+#[serde(default)]
+pub struct DailyOutlook {
+    pub enabled: bool,
+    pub time: String,
+}
+
+impl Default for DailyOutlook {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            time: "09:00".into(),
+        }
+    }
+}
+
+impl DailyOutlook {
+    pub fn minute_of_day(&self) -> Option<u32> {
+        let bytes = self.time.as_bytes();
+        if bytes.len() != 5
+            || bytes[2] != b':'
+            || ![bytes[0], bytes[1], bytes[3], bytes[4]]
+                .iter()
+                .all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        let hour = u32::from(bytes[0] - b'0') * 10 + u32::from(bytes[1] - b'0');
+        let minute = u32::from(bytes[3] - b'0') * 10 + u32::from(bytes[4] - b'0');
+        (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+    }
+
+    /// No late catch-up after downtime, and no spill into another local date.
+    pub fn due_at(&self, minute: u32) -> bool {
+        self.enabled
+            && self
+                .minute_of_day()
+                .is_some_and(|start| minute >= start && minute < start + 15)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -24,6 +24,7 @@
 @use "controls"; // stop-all, mobile nav, mobile irrigation views
 @use "radar"; // radar and its Leaflet overrides
 @use "forms"; // photo field, form fields, settings forms
+@use "notification_preferences";
 @use "primitives"; // the v2 UI kit: Button, StatTile, Sparkline, Toast
 @use "pages"; // sensors and the shared zone detail
 @use "features"; // Rule Lab, Simulator, History

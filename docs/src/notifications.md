@@ -3,13 +3,45 @@
 Choose which channels should receive run, decision, and device alerts in **Settings > Notifications**. Events include:
 
 - **Zone started** and **zone stopped**, with the duration.
-- **Daily verdict** once per day, the first time the morning's decision is made (skip, run, run extended, with the reason).
+- **Daily watering outlook**, only if you enable it, once at your chosen local time.
 - **A zone that did not start** because the controller refused the command, and **a controller that is not answering** when the morning needed it.
 - **A valve that may still be open**: its shutoff was due and the controller has not confirmed closing it. LocalSky keeps retrying; this is the one notification worth walking outside for.
 - **Water moving with nothing running**, when a flow meter is connected.
-- **A weather source that went quiet**, and **a soil probe that stopped reporting**.
+- **A forecast source that went quiet**, and **a soil probe that stopped reporting**.
 
 Three channels deliver them: **Web Push** to a subscribed browser or the installed app, **ntfy** to any topic on any ntfy server, and **Slack** through an incoming webhook. Enable any or all under Settings, then Notifications; the wizard asks for the ntfy and Slack URLs on a new install. The Home Assistant MQTT block on the same page is a different feature, the discovery publisher for entities and sensor states; see the [HACS integration](hacs.md) page. The dashboard-only nudges (a tuning report is ready, a run cap was raised) go to Web Push alone.
+
+## Device choices and quiet hours
+
+Open **Settings > Notifications** in each phone or browser and select **Connect this device**. Choices are saved on your LocalSky server for that subscription, so they apply while the PWA is closed and survive server restarts. Reconnecting an existing subscription keeps its choices. Disconnecting removes that subscription; use **Notifications on this device** to pause delivery and retain your preferences.
+
+Watering starts, finishes, equipment problems, soil sensor problems, an offline forecast source and watering configuration changes are enabled by default. Weather alerts, weekly tuning suggestions and daily outlooks are opt-in. Each switch explains its trigger.
+
+**Quiet hours** default to **10 PM to 7 AM**, using the timezone displayed on the page (your LocalSky location, not a traveling phone's timezone). Routine alerts during quiet hours are skipped. Enabled **urgent equipment alerts** bypass quiet hours by default: a valve that may still be open, or measured flow with no zone commanded on. You can turn off that exception. Pausing the device or disabling the urgent category silences those alerts too.
+
+Web Push messages are not retained for offline delivery. An offline phone will not receive a backlog when it reconnects. Browser permission, OS settings and connectivity still control final delivery and sound.
+
+## Weather alerts
+
+These optional PWA alerts use **fresh measured readings**, not forecast estimates or storm-potential scores. They are not official weather warnings and require a source that provides the relevant measurement.
+
+| Choice | Trigger | Clears when |
+|---|---|---|
+| Rain starts | Station rain rate becomes positive | Station rain rate returns to zero |
+| High wind | Sustained wind reaches 25 mph / 40 km/h | Wind falls to 20 mph / 32 km/h |
+| Freezing temperature | Air temperature reaches 32°F / 0°C or lower | Temperature rises to 34°F / 1°C |
+| High temperature | Air temperature reaches 95°F / 35°C | Temperature falls to 90°F / 32°C |
+| Nearby lightning | A detector reports a strike within 10 miles / 16 km | No nearby detection for 30 minutes |
+
+Conditions must clear before another alert, with at least one hour between alerts of each kind. The state is saved across restarts. The first rain/wind/temperature reading establishes a baseline; nearby lightning can notify immediately. Stale readings and forecast-filled values do not trigger alerts. Conditions that begin during quiet hours do not produce a catch-up notification afterwards.
+
+## Daily outlook
+
+**Daily watering outlook on this device** is off by default, including on upgrade. Enable it and choose a time outside quiet hours (9 AM by default). Your plan remains available in the app at any time.
+
+Each device gets at most one outlook per local day. This limit survives restarts and forecast changes. LocalSky skips a missed 15-minute delivery window rather than sending an old outlook later. Zone plans may change before watering starts.
+
+**Server and shared channels > Shared channel outlook** separately controls the optional summary for ntfy and Slack. PWA preferences and quiet hours do not change those channels.
 
 ## ntfy and Slack
 
@@ -21,7 +53,7 @@ Subscribe each browser or installed web app that should receive notifications. D
 
 Web Push needs a VAPID keypair so the push service can verify that notifications are signed by your LocalSky instance. The keypair is generated once and reused for the life of the deployment.
 
-Enable Web Push in **Settings → Notifications**, save, then select **Subscribe this device** on each phone or browser. Setup generates the keypair. Allow notifications when the browser asks.
+If the page says setup is needed, enable Web Push in **Setup** to generate the server keypair. Under **Settings > Notifications > Server and shared channels**, **Send push alerts** enables or pauses server delivery without removing keys. Then **Connect this device** on each phone or browser and allow notifications when asked. Runtime readiness includes keys supplied through environment variables.
 
 Watering notifications offer **Stop watering** on supported browsers. This stops the current run and cancels the remaining Quick Run queue. An ordinary tap opens the app. If the alert is old, the connection is lost, or sign-in has expired, LocalSky reports that Stop was not confirmed and opens the watering controls. The phone must be able to reach your instance; a notification is not an offline remote control.
 
@@ -79,7 +111,7 @@ chown 10001:10001 ./localsky-keys/vapid-private.pem
 chmod 440 ./localsky-keys/vapid-private.pem
 ```
 
-Restart the container after setting the variables; the keypair is read once at startup.
+Restart the container after changing its environment variables.
 
 The `[notifications.web_push]` block in `localsky.toml` (`vapid_public`, `vapid_private_path`, `vapid_subject`) takes precedence over these environment variables.
 
@@ -93,9 +125,9 @@ A configured instance returns `{ "public_key": "BNJxRy7..." }`. A `503` with `{ 
 
 ### 4. Subscribe a device
 
-Open the dashboard on each phone / laptop / tablet that should receive notifications. Go to **Settings -> Notifications -> Web Push** and tap **Subscribe this device**. The browser asks for notification permission; allow it. The dashboard registers a push endpoint with the public key, and saves the subscription for delivery.
+Open the dashboard on each phone / laptop / tablet that should receive notifications. Go to **Settings > Notifications** and tap **Connect this device**. The browser asks for notification permission; allow it. The dashboard registers a push endpoint with the public key, and saves the subscription for delivery.
 
-To stop receiving on a device: tap **Unsubscribe** in the same panel, or clear the site data in the browser. Endpoints that a browser has revoked are pruned automatically the next time a push to them fails.
+To remove a device: tap **Disconnect** in the same panel, or clear the site data in the browser. To pause alerts and keep your choices, turn off **Notifications on this device** instead. Endpoints that a browser has revoked are pruned automatically the next time a push to them fails.
 
 ### Troubleshooting
 
@@ -109,6 +141,7 @@ To stop receiving on a device: tap **Unsubscribe** in the same panel, or clear t
 |---|---|
 | Zone started | A zone's running state flips from off to on |
 | Zone stopped | A zone's running state flips from on to off (carries the run duration in minutes) |
-| Daily verdict | The first verdict computation of each day (skip / run / run extended, with the reason text) |
+| Daily watering outlook | Opt-in; once per local day at your chosen time, with no restart repeats or late catch-up |
 
-There is no general quiet-hours policy. Repeated state changes can produce repeated notifications; investigate a flapping controller rather than relying on notification grouping to hide it.
+Routine forecast updates stay in the app. Actual watering events and equipment
+alerts are independent of the optional daily outlook schedule.

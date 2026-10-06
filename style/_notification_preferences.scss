@@ -1,0 +1,25 @@
+.pwa-preferences {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  .ha-chip { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
+  &__fields { border: 0; padding: 0; margin: 0; display: grid; gap: 1rem; min-width: 0; }
+  &__connection { display: flex; flex-wrap: wrap; gap: .65rem; }
+  &__times { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); gap: 1rem; max-width: 28rem; }
+  &__times label, &__summary-time { display: grid; gap: .4rem; min-width: 0; font-weight: 600; }
+  &__summary-time { max-width: 13.5rem; }
+  input[type="time"] { width: 100%; min-width: 0; box-sizing: border-box; min-height: 44px; }
+  &__note { color: var(--text); line-height: 1.6; margin: 0 0 .75rem; }
+  &__error { color: var(--text); border-inline-start: 3px solid var(--accent-danger); padding: .75rem 1rem; overflow-wrap: anywhere; }
+  &__details { margin-top: 1rem; line-height: 1.6; }
+  &__details summary { cursor: pointer; min-height: 44px; align-content: center; font-weight: 600; }
+  .ui-toggle { padding-block: .9rem; }
+  .ui-toggle + .ui-toggle { border-top: 1px solid var(--border); }
+  .settings-actions { flex-wrap: wrap; }
+}
+.pwa-shared-channels {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+  > summary { cursor: pointer; min-height: 48px; align-content: center; font-size: 1.1rem; font-weight: 700; }
+  > p { margin-block: .5rem 1rem; }
+}

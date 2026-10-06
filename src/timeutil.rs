@@ -40,6 +40,12 @@ fn configured_tz() -> Option<chrono_tz::Tz> {
     CONFIGURED_TZ.get().copied().flatten()
 }
 
+pub fn timezone_label() -> String {
+    configured_tz()
+        .map(|tz| tz.to_string())
+        .unwrap_or_else(|| format!("Server time (UTC{})", now_local().offset()))
+}
+
 /// Current wall-clock in the configured timezone, as a fixed-offset DateTime so
 /// it composes with chrono regardless of source. Falls back to the system local
 /// time when no timezone is configured/resolvable.

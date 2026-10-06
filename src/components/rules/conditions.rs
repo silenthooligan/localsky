@@ -122,7 +122,7 @@ async fn persist_rules(
 /// Human one-liner for a stored rule's condition + action (list view).
 fn rule_summary(rule: &serde_json::Value) -> String {
     let Some((joiner, rows)) = simple_conditions(rule.get("condition")) else {
-        return "Nested condition — configuration file editing".to_string();
+        return "Nested condition: edit in the configuration file".to_string();
     };
     let joiner = if joiner == "any" { " OR " } else { " AND " };
     let parts: Vec<String> = rows

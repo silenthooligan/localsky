@@ -61,7 +61,13 @@ pub fn NotificationsStep() -> impl IntoView {
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
 
-                push_enabled.set(notif.get("web_push").map(|v| !v.is_null()).unwrap_or(false));
+                push_enabled.set(
+                    notif.get("web_push").is_some_and(|v| !v.is_null())
+                        && notif
+                            .get("web_push_enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true),
+                );
 
                 let mqtt = notif
                     .get("mqtt")
@@ -118,15 +124,12 @@ pub fn NotificationsStep() -> impl IntoView {
         if !loaded.get_untracked() {
             return;
         }
-        let web_push = if push {
-            serde_json::json!({
-                "vapid_public": "",
-                "vapid_private_path": "",
-                "vapid_subject": "",
-            })
-        } else {
-            serde_json::Value::Null
-        };
+        let web_push = retained_push_config(
+            draft
+                .get_untracked()
+                .pointer("/config/notifications/web_push"),
+            push,
+        );
         let mqtt = if mqtt_on && !host.is_empty() {
             serde_json::json!({
                 "host": host,
@@ -165,6 +168,7 @@ pub fn NotificationsStep() -> impl IntoView {
             };
             for (key, next) in [
                 ("web_push", web_push),
+                ("web_push_enabled", serde_json::json!(push)),
                 ("mqtt", mqtt),
                 ("ntfy", ntfy),
                 ("slack", slack),
@@ -266,5 +270,29 @@ pub fn NotificationsStep() -> impl IntoView {
                 next=next_step_href("notifications")
             />
         </div>
+    }
+}
+
+fn retained_push_config(existing: Option<&serde_json::Value>, enabled: bool) -> serde_json::Value {
+    if let Some(config) = existing.filter(|v| !v.is_null()) {
+        return config.clone();
+    }
+    if enabled {
+        serde_json::json!({ "vapid_public": "", "vapid_private_path": "", "vapid_subject": "" })
+    } else {
+        serde_json::Value::Null
+    }
+}
+
+#[cfg(test)]
+mod notification_key_tests {
+    use super::*;
+    #[test]
+    fn revisiting_or_pausing_setup_retains_the_subscription_keypair() {
+        let keys = serde_json::json!({ "vapid_public": "existing-public-key", "vapid_private_path": "/data/existing.pem", "vapid_subject": "https://example.test" });
+        assert_eq!(retained_push_config(Some(&keys), true), keys);
+        assert_eq!(retained_push_config(Some(&keys), false), keys);
+        assert!(retained_push_config(None, false).is_null());
+        assert_eq!(retained_push_config(None, true)["vapid_public"], "");
     }
 }

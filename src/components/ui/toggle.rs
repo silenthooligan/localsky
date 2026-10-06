@@ -7,6 +7,9 @@ use leptos::prelude::*;
 #[component]
 pub fn Toggle(
     checked: RwSignal<bool>,
+    /// Stable DOM ID for client-only controls alongside server-rendered toggles.
+    #[prop(optional, into)]
+    id: String,
     /// Visible label rendered to the left of the switch.
     #[prop(into)]
     label: String,
@@ -20,7 +23,11 @@ pub fn Toggle(
     #[prop(optional)]
     on_change: Option<Callback<bool>>,
 ) -> impl IntoView {
-    let id = format!("toggle-{}", uuid_like());
+    let id = if id.is_empty() {
+        format!("toggle-{}", uuid_like())
+    } else {
+        id
+    };
     let label_owned = label;
     let help_owned = helptext.clone();
     view! {

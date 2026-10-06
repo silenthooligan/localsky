@@ -17,10 +17,12 @@ LocalSky brings your weather, soil conditions, and irrigation into one app. It d
 
 Run it on your own server, NAS, Raspberry Pi, or Home Assistant OS. Use your existing supported controller and sensors. Home Assistant is optional. There is no LocalSky cloud account or subscription.
 
-**LocalSky 1.0.0 is the first stable release.** It adds Quick Run, watering
-progress and Stop across the app, Field Green and Classic Blue theme choices,
-and clearer setup, Settings and watering decisions. Feedback remains available
-in the app. [Release notes](https://github.com/silenthooligan/localsky/releases/tag/v1.0.0)
+**LocalSky 1.0.1 adds per-device notification settings.** Choose which alerts
+each phone or browser receives, set quiet hours, and opt into a daily watering
+outlook. The first stable release, 1.0.0, added Quick Run, watering progress and
+Stop across the app, Field Green and Classic Blue theme choices, and clearer
+setup, Settings and watering decisions. Feedback remains available in the app.
+[Release notes](https://github.com/silenthooligan/localsky/releases/tag/v1.0.1)
 
 ![LocalSky irrigation dashboard with Quick Run and zone controls](docs/assets/screenshots/irrigation-desktop.png)
 

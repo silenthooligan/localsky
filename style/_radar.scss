@@ -630,21 +630,6 @@
 }
 
 // Action row at the bottom of a settings form (Save / Reset).
-.push-device {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--elev-border);
-}
-.push-device__status { display: flex; flex-direction: column; gap: 2px; min-width: 12rem; }
-.push-device__label { font-size: var(--text-caption); font-weight: 600; color: var(--text-dim); }
-.push-device__state { color: var(--text); }
-.push-device__actions { margin-left: auto; }
-.push-device__msg { flex-basis: 100%; margin: 0; font-size: var(--text-meta); color: var(--text-dim); }
-
 .settings-actions {
   display: flex;
   gap: 0.6rem;

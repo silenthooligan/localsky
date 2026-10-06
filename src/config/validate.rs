@@ -62,6 +62,12 @@ impl ValidationReport {
 
 pub fn validate(cfg: &Config) -> ValidationReport {
     let mut r = ValidationReport::default();
+    if cfg.notifications.daily_outlook.minute_of_day().is_none() {
+        r.error(
+            "notification_time_invalid",
+            "Daily outlook time must use HH:MM (00:00 to 23:59).".into(),
+        );
+    }
     if let Err(detail) = super::schema::ForecastTrack::validate_all(&cfg.forecast_tracks) {
         r.error("forecast_tracks_invalid", detail);
     }

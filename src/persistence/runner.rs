@@ -139,6 +139,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "quick_runs",
         sql: include_str!("migrations/M0024_quick_runs.sql"),
     },
+    Migration {
+        version: "M0025",
+        name: "notification_delivery",
+        sql: include_str!("migrations/M0025_notification_delivery.sql"),
+    },
+    Migration {
+        version: "M0026",
+        name: "push_preferences",
+        sql: include_str!("migrations/M0026_push_preferences.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -321,6 +331,8 @@ mod tests {
                 "M0022".to_string(),
                 "M0023".to_string(),
                 "M0024".to_string(),
+                "M0025".to_string(),
+                "M0026".to_string(),
             ]
         );
     }

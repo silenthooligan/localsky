@@ -1165,7 +1165,7 @@ async fn get_state(State(s): State<WizardApiState>) -> impl IntoResponse {
 /// live config (license already accepted on the original run), so the
 /// wizard becomes an editor over the existing setup instead of a wipe.
 async fn post_seed_current(State(s): State<WizardApiState>) -> impl IntoResponse {
-    let cfg = match s.config_store.load().await {
+    let mut cfg = match s.config_store.load().await {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1178,6 +1178,9 @@ async fn post_seed_current(State(s): State<WizardApiState>) -> impl IntoResponse
                 .into_response()
         }
     };
+    if cfg.notifications.web_push.is_none() {
+        cfg.notifications.web_push = crate::push::dispatcher::environment_key_config();
+    }
     let draft = WizardDraft {
         current_step: crate::config::wizard::WizardStep::Location,
         config: cfg,

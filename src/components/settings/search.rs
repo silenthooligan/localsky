@@ -8,6 +8,7 @@ struct SearchEntry {
 }
 
 const CONTROLS: &[SearchEntry] = &[
+    SearchEntry { label: "Device notifications", section: "notifications", description: "Weather and watering alerts, quiet hours and optional daily outlook", keywords: "pwa push alerts notification midnight quiet schedule morning forecast summary per device rain wind heat freeze lightning" },
     SearchEntry { label: "History retention", section: "history", description: "How long to keep sensor readings and watering records", keywords: "storage cleanup delete pruning days logs database data" },
     SearchEntry { label: "Source freshness", section: "advanced#source-freshness", description: "Connection status and last reading for each source", keywords: "offline online active standby health weather" },
     SearchEntry { label: "Nerd mode & kiosk mode", section: "advanced", description: "Detailed readings and controls for shared screens", keywords: "simple detail read only readonly" },

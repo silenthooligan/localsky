@@ -78,6 +78,53 @@ async function readable(page: Page, include = '#main-content') {
   expect(axe.violations.filter(v => ['serious', 'critical'].includes(v.impact ?? ''))).toEqual([]);
 }
 
+for (const width of [390, 1440]) test(`daily outlook is opt-in and saves without losing channel credentials at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await appearance(page, 'field', width === 390 ? 'dark' : 'light');
+  await info(page, true);
+  let saved: any = {
+    notifications: {
+      mqtt: { host: 'mqtt.example', port: 1883, username: '', password: '', discovery_prefix: 'ha', publish_enabled: true, subscribe_enabled: true },
+      ntfy: { base_url: 'https://ntfy.example', topic: 'garden', auth_token: 'retained-fixture-token' },
+      slack: null, web_push: null,
+    },
+  };
+  let writes = 0;
+  await page.route(/\/api\/(v1\/)?config$/, async route => {
+    if (route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON();
+      writes++;
+      return route.fulfill({ json: { ok: true, restart_required: false, restart_reasons: [] } });
+    }
+    return route.fulfill({ json: saved });
+  });
+  await ready(page, '/settings/notifications');
+  await page.getByText('Server and shared channels', { exact: true }).click();
+  const toggle = page.getByRole('switch', { name: /^Daily outlook for ntfy and Slack/ });
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  const input = page.locator('input[type="time"]');
+  await expect(input).toHaveValue('09:00');
+  await expect(input).toBeDisabled();
+  await toggle.click();
+  await expect(input).toBeEnabled();
+  await input.fill('10:30');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => writes).toBe(1);
+  expect(saved.notifications.daily_outlook).toEqual({ enabled: true, time: '10:30' });
+  expect(saved.notifications.ntfy.auth_token).toBe('retained-fixture-token');
+  expect(saved.notifications.mqtt.subscribe_enabled).toBe(true);
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-hydrated', 'true');
+  await page.getByText('Server and shared channels', { exact: true }).click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'true');
+  await expect(input).toHaveValue('10:30');
+  await readable(page);
+  await toggle.click();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => writes).toBe(2);
+  expect(saved.notifications.daily_outlook).toEqual({ enabled: false, time: '10:30' });
+});
+
 for (const width of [390, 1440]) {
   test(`rain decision history stays out of the current irrigation status at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });

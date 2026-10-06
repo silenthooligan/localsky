@@ -36,6 +36,7 @@ pub mod forecast;
 pub mod gates_catalog;
 pub mod history;
 pub mod model;
+pub mod notification_preferences;
 pub mod radar_catalog;
 pub mod reason_render;
 // The controller-station shapes. Ungated on purpose: dispatch (runtime),

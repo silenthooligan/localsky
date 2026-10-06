@@ -74,7 +74,7 @@ fn kinds(events: &[PushEvent]) -> Vec<&'static str> {
 
 /// Storing a snapshot is what drives the observers: a zone going from
 /// idle to running pushes ZoneStarted, back to idle pushes ZoneStopped
-/// with the run's length, and the day's verdict pushes once.
+/// with the run's length. A routine outlook requires separate opt-in.
 #[tokio::test]
 async fn a_stored_snapshot_drives_the_push_edges() {
     let store = Arc::new(IrrigationStore::new());
@@ -84,7 +84,10 @@ async fn a_stored_snapshot_drives_the_push_edges() {
 
     store.store(snap(&[("front", false)]));
     let first = drain(&mut rx).await;
-    assert_eq!(kinds(&first), vec!["verdict"], "{first:?}");
+    assert!(
+        first.is_empty(),
+        "A startup forecast must not notify: {first:?}"
+    );
 
     store.store(snap(&[("front", true)]));
     let started = drain(&mut rx).await;

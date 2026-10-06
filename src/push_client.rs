@@ -37,6 +37,11 @@ fn err_to_string(v: &wasm_bindgen::JsValue) -> String {
 /// aren't available (e.g. iOS Safari without an installed PWA).
 pub fn permission_state() -> Result<String, String> {
     let win = web_sys::window().ok_or("no window")?;
+    if !win.is_secure_context()
+        || !js_sys::Reflect::has(&win.navigator(), &"serviceWorker".into()).unwrap_or(false)
+    {
+        return Err("Use HTTPS or the installed PWA to enable notifications.".into());
+    }
     // Notification.permission is a static property on the Notification
     // constructor, accessed via Reflect because web-sys doesn't expose
     // a static accessor consistently across versions.
@@ -87,10 +92,14 @@ pub async fn fetch_vapid_key() -> Result<String, String> {
 
 pub async fn current_subscription() -> Result<Option<PushSubscription>, String> {
     let win = web_sys::window().ok_or("no window")?;
+    if !win.is_secure_context()
+        || !js_sys::Reflect::has(&win.navigator(), &"serviceWorker".into()).unwrap_or(false)
+    {
+        return Err("Open the installed PWA or use HTTPS to manage notifications.".into());
+    }
     let sw = win.navigator().service_worker();
-    let reg = JsFuture::from(sw.ready().map_err(|e| err_to_string(&e))?)
-        .await
-        .map_err(|e| err_to_string(&e))?;
+    let ready = sw.ready().map_err(|e| err_to_string(&e))?;
+    let reg = bounded(async { JsFuture::from(ready).await.map_err(|e| err_to_string(&e)) }).await?;
     let reg: web_sys::ServiceWorkerRegistration = reg
         .dyn_into()
         .map_err(|_| "ready did not return registration")?;
@@ -127,9 +136,8 @@ pub async fn subscribe() -> Result<(), String> {
 
     let win = web_sys::window().ok_or("no window")?;
     let sw = win.navigator().service_worker();
-    let reg = JsFuture::from(sw.ready().map_err(|e| err_to_string(&e))?)
-        .await
-        .map_err(|e| err_to_string(&e))?;
+    let ready = sw.ready().map_err(|e| err_to_string(&e))?;
+    let reg = bounded(async { JsFuture::from(ready).await.map_err(|e| err_to_string(&e)) }).await?;
     let reg: web_sys::ServiceWorkerRegistration = reg
         .dyn_into()
         .map_err(|_| "ready did not return registration")?;
@@ -219,4 +227,77 @@ fn extract_key(
 
 fn b64u(bytes: Vec<u8>) -> Result<String, String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub async fn bounded<T>(
+    future: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match futures::future::select(
+        Box::pin(future),
+        Box::pin(gloo_timers::future::TimeoutFuture::new(8_000)),
+    )
+    .await
+    {
+        futures::future::Either::Left((value, _)) => value,
+        _ => Err("Notification connection timed out. Open the PWA and try again.".into()),
+    }
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub struct PushStatus {
+    pub ready: bool,
+    pub enabled: bool,
+    pub timezone: String,
+}
+
+pub async fn status() -> Result<PushStatus, String> {
+    bounded(async {
+        let response = Request::get("/api/push/status")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.ok() {
+            return Err("Could not check notification delivery. Try again.".into());
+        }
+        response.json().await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+pub async fn preferences(
+    update: Option<&crate::notification_preferences::PushPreferences>,
+) -> Result<Option<crate::notification_preferences::PushPreferences>, String> {
+    bounded(async {
+        let Some(sub) = current_subscription().await? else {
+            return Ok(None);
+        };
+        let mut body = json!({ "endpoint": sub.endpoint(), "keys": {
+            "p256dh": b64u(extract_key(&sub, web_sys::PushEncryptionKeyName::P256dh)?)?,
+            "auth": b64u(extract_key(&sub, web_sys::PushEncryptionKeyName::Auth)?)?,
+        }});
+        let path = if let Some(prefs) = update {
+            body["preferences"] = serde_json::to_value(prefs).map_err(|e| e.to_string())?;
+            "/api/push/preferences"
+        } else {
+            "/api/push/preferences/read"
+        };
+        let response = Request::post(path)
+            .json(&body)
+            .map_err(|e| e.to_string())?
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let ok = response.ok();
+        let value: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        if !ok {
+            return Err(value["error"]
+                .as_str()
+                .unwrap_or("Could not load or save notification choices.")
+                .into());
+        }
+        serde_json::from_value(value["preferences"].clone())
+            .map(Some)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }

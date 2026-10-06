@@ -222,9 +222,6 @@ pub fn build(
         "/push",
         crate::push::router(crate::push::api::PushState {
             history_conn: history.clone(),
-            // Resolved on the first request, not here: the wizard writes
-            // the keypair during this same boot.
-            vapid_public_key: Arc::new(std::sync::OnceLock::new()),
         }),
     );
     let app = mount_both(app, "/location", api::location::router(cfg_store.clone()));
