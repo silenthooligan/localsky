@@ -132,7 +132,7 @@ def outputs():
         page = (DOCS/filename).read_text(encoding='utf-8')
         page = page.replace('{{LOCALSKY_VERSION}}', package).replace('{{LOCALSKY_API_VERSION}}', version)
         page = re.sub(r'\{\{LOCALSKY_DB_MIGRATIONS\}\}', str(len(list((ROOT/'src/persistence/migrations').glob('M*.sql')))), page)
-        page = page.replace('{{LOCALSKY_SKIP_RULES}}', str((ROOT/'src/gates_catalog.rs').read_text().count('        (\n')))
+        page = page.replace('{{LOCALSKY_SKIP_RULES}}', str(len(re.findall(r'^ {8}\($', (ROOT/'src/gates_catalog.rs').read_text(), re.M))))
         full.append(f'\n---\n\nSource: https://localsky.io/docs/{filename[:-3]}.html\n\n{page}')
     index += ['', '## Connector files', '- [OpenAPI read profile](https://localsky.io/docs/openapi.json)', '- [Full guide text](https://localsky.io/docs/llms-full.txt)', '']
     return {'openapi.json': json.dumps(profile(version), indent=2, ensure_ascii=False)+'\n', 'llms.txt': '\n'.join(index), 'llms-full.txt': '\n'.join(full)}

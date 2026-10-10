@@ -28,7 +28,7 @@ def main():
             'LOCALSKY_VERSION': tomllib.loads((ROOT/'Cargo.toml').read_text())['package']['version'],
             'LOCALSKY_API_VERSION': re.search(r'pub const API_VERSION: &str = "([^"]+)"', (ROOT/'src/api/info.rs').read_text()).group(1),
             'LOCALSKY_DB_MIGRATIONS': str(len(list((ROOT/'src/persistence/migrations').glob('M*.sql')))),
-            'LOCALSKY_SKIP_RULES': str((ROOT/'src/gates_catalog.rs').read_text().count('        (\n')),
+            'LOCALSKY_SKIP_RULES': str(len(re.findall(r'^ {8}\($', (ROOT/'src/gates_catalog.rs').read_text(), re.M))),
         }
         for page in (ROOT/'docs/src').glob('*.md'):
             text = page.read_text(encoding='utf-8')
