@@ -233,6 +233,54 @@ async function fixedReadings(page: Page, change: (responses: Record<string, any>
   });
 }
 
+for (const [style, theme, width] of [
+  ['field', 'light', 320], ['field', 'dark', 1440],
+  ['slate', 'dark', 390], ['slate', 'light', 1440],
+  ['classic', 'light', 390], ['classic', 'hc', 1440],
+] as const) {
+  test(`sky evidence is readable and keyboard accessible ${style} ${theme} ${width}`, async ({page}) => {
+    await page.setViewportSize({width, height:900});
+    await page.emulateMedia({reducedMotion:'reduce'});
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.addInitScript(({style, theme}) => {
+      localStorage.setItem('style',style); localStorage.setItem('theme',theme);
+    },{style,theme});
+    await fixedReadings(page, responses => {
+      const current = responses['/api/snapshot'];
+      current.sky = {...current.sky, condition:'overcast', cover_basis:'measured_sunlight', cloud_cover_pct:null};
+      current.wet_bulb_f = null;
+      current.feels_like_f = null;
+      responses['/api/location'] = {lat:69.65, lon:18.96, located:true, zoom:8};
+      const forecast = responses['/api/forecast/snapshot'];
+      // Polar winter: even midday is night. Browser timezone is irrelevant.
+      for (const [i,hour] of forecast.hourly.entries()) {
+        hour.time_epoch = Date.parse('2026-12-21T00:00:00Z')/1000 + i*3600;
+        hour.weather_code = 2;
+      }
+    });
+    await page.goto('/');
+    await expect(page.locator('html')).toHaveAttribute('data-hydrated','true');
+    await expect(page.locator('.hero-condition')).toHaveText('Overcast');
+    const evidence=page.locator('.hero-sky-evidence');
+    const summary=evidence.locator('summary');
+    await summary.focus(); await page.keyboard.press('Enter');
+    await expect(evidence).toHaveAttribute('open','');
+    await expect(evidence.locator('p')).toContainText('not a cloud-cover measurement');
+    await expect(page.locator('.hero-source')).toContainText('Temperature via');
+    await expect(page.locator('.hero').getByText('Temperature unavailable',{exact:true})).toHaveCount(2);
+    // The moon path is used for a partly-cloudy polar winter hour.
+    await expect(page.locator('.hourly-glyph').first()).toHaveAttribute('aria-label','Partly cloudy, nighttime');
+    await expect(page.locator('.hourly-glyph').nth(12)).toHaveAttribute('aria-label','Partly cloudy, nighttime');
+    await page.evaluate(()=>document.fonts.ready);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    const axe=await new AxeBuilder({page}).include('.hero').withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();
+    expect(axe.violations).toEqual([]);
+    expect(errors).toEqual([]);
+    await page.screenshot({path:test.info().outputPath(`sky-${style}-${theme}-${width}.png`),fullPage:true});
+  });
+}
+
 for (const [width, style, theme, scale] of [
   [320, 'field', 'light', 'f'], [390, 'field', 'dark', 'c'],
   [1440, 'field', 'light', 'f'], [1440, 'slate', 'dark', 'c'],

@@ -56,7 +56,11 @@ async fn elevation(
         q.lat, q.lon
     );
     let client = reqwest::Client::new();
-    let res = client.get(&url).send().await;
+    let res = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await;
     match res {
         Ok(r) => match r.json::<serde_json::Value>().await {
             // Open-Meteo returns {"elevation":[123.0]} (meters).

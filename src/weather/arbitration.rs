@@ -90,6 +90,8 @@ pub(super) fn field_owner_key(
         RapidWindBearingDeg => "rapid_wind_dir",
         BatteryV => "battery_v",
         PrecipType => "precip_type",
+        CloudCoverPct => "cloud_cover_pct",
+        VisibilityMi => "visibility_mi",
         RainTypeStr | ForecastDaily | ForecastHourly => return None,
     })
 }
@@ -173,10 +175,17 @@ impl LiveWeatherStore {
     /// while the gauge-corrected accumulation keeps its deliberately wide window.
     #[cfg(feature = "ssr")]
     pub(super) fn max_age_for_field(&self, label: &str, field_key: &str) -> i64 {
-        if field_key == "rain_intensity_in_hr"
-            && self.rain_natures.load().get(label) == Some(&crate::model::RainNature::RadarQpe)
+        let nature = self.rain_natures.load().get(label).copied();
+        if field_key == "rain_intensity_in_hr" && nature == Some(crate::model::RainNature::RadarQpe)
         {
             crate::config::region::MAX_AGE_MRMS_RATE_S as i64
+        } else if matches!(field_key, "cloud_cover_pct" | "visibility_mi")
+            && nature == Some(crate::model::RainNature::Measured)
+        {
+            // A station's hourly sky report stays current for a report cycle,
+            // so it is not handed to a model's estimate every half hour.
+            self.max_age_for(label)
+                .max(crate::config::region::MAX_AGE_OBSERVED_SKY_S as i64)
         } else {
             self.max_age_for(label)
         }

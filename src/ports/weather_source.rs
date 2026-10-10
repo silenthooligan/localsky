@@ -66,6 +66,12 @@ pub enum WeatherField {
     RainLastMinIn,
     /// Precipitation type code: 0 none, 1 rain, 2 hail.
     PrecipType,
+    /// Current sky cover, percent (0 clear to 100 overcast). From a sky
+    /// sensor, a nearby station's cloud report, or a model's current
+    /// analysis. Absent is unknown, never clear.
+    CloudCoverPct,
+    /// Current horizontal visibility, miles.
+    VisibilityMi,
 }
 
 impl WeatherField {
@@ -104,6 +110,8 @@ impl WeatherField {
             BatteryV => "battery_v",
             RainLastMinIn => "rain_in_last_min",
             PrecipType => "precip_type",
+            CloudCoverPct => "cloud_cover_pct",
+            VisibilityMi => "visibility_mi",
         }
     }
 
@@ -146,6 +154,8 @@ impl WeatherField {
             BatteryV => "Station battery",
             RainLastMinIn => "Rain last minute",
             PrecipType => "Precipitation type",
+            CloudCoverPct => "Cloud cover",
+            VisibilityMi => "Visibility",
         }
     }
 
@@ -194,6 +204,8 @@ pub const ALL: &[WeatherField] = &[
     WeatherField::BatteryV,
     WeatherField::RainLastMinIn,
     WeatherField::PrecipType,
+    WeatherField::CloudCoverPct,
+    WeatherField::VisibilityMi,
 ];
 
 #[cfg(test)]

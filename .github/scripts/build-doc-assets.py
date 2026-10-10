@@ -47,7 +47,21 @@ def profile(version):
     schemas['CurrentWeatherSample'] = obj(sample, list(sample))
     weather = {key: number for key in ['air_temp_f', 'rh_pct', 'wind_avg_mph', 'wind_gust_mph', 'rain_in_today', 'rain_intensity_in_hr']}
     weather.update({key: integer for key in ['last_packet_epoch', 'air_temp_live_epoch', 'wind_live_epoch', 'rh_live_epoch', 'rain_live_epoch']})
-    weather.update({'source_label': text, 'has_live_station': boolean})
+    weather.update({'source_label': text, 'has_live_station': boolean, 'cloud_cover_pct': nn, 'visibility_mi': nn})
+    weather.update({'feels_like_f': nn, 'wet_bulb_f': nn, 'dew_point_f': nn})
+    conditions = ['clear', 'mostly_clear', 'partly_cloudy', 'mostly_cloudy', 'overcast', 'fog', 'low_visibility', 'light_rain', 'rain', 'heavy_rain', 'snow', 'wintry_mix', 'hail', 'thunderstorm', 'unknown']
+    sky = {
+        'condition': scalar('string', enum=conditions),
+        'phase': scalar('string', True, enum=['day', 'night', 'dawn', 'dusk', None]),
+        'is_day': scalar('boolean', True),
+        'cloud_cover_pct': scalar('integer', True, minimum=0, maximum=100),
+        'cover_basis': scalar('string', enum=['measured_sunlight', 'observation', 'model', 'forecast', 'none']),
+        'precipitating': boolean,
+        'windy': boolean,
+        'at_epoch': integer,
+    }
+    schemas['Sky'] = obj(sky, list(sky), description='The current condition, judged when the snapshot is served from fresh readings, the sun at the site and the forecast hour. Precipitation appears only when observed; unknown means no sky evidence.')
+    weather['sky'] = ref('Sky')
     schemas['WeatherSnapshot'] = obj(weather, description='Selected legacy weather fields. Numeric values require their field-specific observation/validity context; zero alone is not evidence of a measurement. Additional fields are retained.')
     hour = {'time_epoch': integer, 'temp_f': nn, 'precip_in': nn, 'precip_probability': scalar('integer', True, minimum=0, maximum=100)}
     schemas['WindowHour'] = obj(hour, list(hour))

@@ -177,6 +177,12 @@ struct RawGridResponse {
 struct RawGridProperties {
     #[serde(rename = "quantitativePrecipitation")]
     qpf: Option<QpfBlock>,
+    /// Sky cover, percent, per interval. The hourly feed has none.
+    #[serde(rename = "skyCover", default)]
+    sky_cover: Option<QpfBlock>,
+    /// Horizontal visibility, meters, per interval.
+    #[serde(default)]
+    visibility: Option<QpfBlock>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +254,35 @@ struct ObservationProperties {
     /// not report (dry hour or no gauge) -> skipped, never emitted as 0.
     #[serde(rename = "precipitationLastHour")]
     precipitation_last_hour: Option<Measured>,
+    /// The station ceilometer's cloud layers (CLR, FEW, SCT, BKN, OVC, VV).
+    #[serde(rename = "cloudLayers", default)]
+    cloud_layers: Option<Vec<CloudLayer>>,
+    /// Horizontal visibility, meters.
+    #[serde(default)]
+    visibility: Option<Measured>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudLayer {
+    #[serde(default)]
+    amount: Option<String>,
+}
+
+/// Sky cover, percent, from a station's cloud layers: the most-covered layer
+/// decides, at the middle of its okta band. An empty or missing report says
+/// nothing about the sky, so it is not read as clear.
+fn layers_cover_pct(layers: &[CloudLayer]) -> Option<f64> {
+    layers
+        .iter()
+        .filter_map(|l| match l.amount.as_deref()? {
+            "SKC" | "CLR" | "NCD" | "NSC" => Some(0.0),
+            "FEW" => Some(19.0),
+            "SCT" => Some(44.0),
+            "BKN" => Some(75.0),
+            "OVC" | "VV" => Some(100.0),
+            _ => None,
+        })
+        .reduce(f64::max)
 }
 
 /// One NWS measured quantity: `{ "value": <number|null>, "unitCode": "wmoUnit:degC" }`.
@@ -768,7 +803,29 @@ fn map_current_observation(props: &ObservationProperties) -> Vec<(WeatherField, 
         }
     }
 
+    // The sky the station saw. Cover from the ceilometer; visibility in meters.
+    if let Some(pct) = props.cloud_layers.as_deref().and_then(layers_cover_pct) {
+        fields.push((WeatherField::CloudCoverPct, pct));
+    }
+    if let Some(meters) = props
+        .visibility
+        .as_ref()
+        .filter(|m| m.unit_code.as_deref().is_some_and(|u| u.ends_with(":m")))
+        .and_then(|m| m.value)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+    {
+        fields.push((WeatherField::VisibilityMi, meters * 0.000_621_371));
+    }
+
     fields
+}
+
+/// The value of a gridpoint series for the interval containing `at`.
+fn grid_value_at(block: &QpfBlock, at: i64) -> Option<f64> {
+    block.values.iter().find_map(|v| {
+        let (start, end) = parse_qpf_interval(v.valid_time.as_deref()?)?;
+        (start <= at && at < end).then_some(v.value).flatten()
+    })
 }
 
 /// Parse an RFC3339/ISO-8601 timestamp (NWS `startTime`, e.g.
@@ -877,10 +934,10 @@ fn wind_dir_to_deg(s: Option<&str>) -> u32 {
 
 /// Loosely map an NWS `shortForecast` phrase to a WMO weather code. NWS
 /// has no machine code in /forecast, so we keyword-match the human text.
-/// Anything we can't classify returns 0 (the UI has a glyph fallback);
+/// Anything we can't classify stays unknown (the UI has a glyph fallback);
 /// we deliberately do NOT block on a perfect WMO table.
 fn wmo_from_short(s: Option<&str>) -> u32 {
-    let Some(s) = s else { return 0 };
+    let Some(s) = s else { return u32::MAX };
     let t = s.to_ascii_lowercase();
     // Order matters: check the more specific / severe phrases first.
     if t.contains("thunder") {
@@ -895,7 +952,7 @@ fn wmo_from_short(s: Option<&str>) -> u32 {
         63 // rain, moderate
     } else if t.contains("drizzle") {
         51 // drizzle, light
-    } else if t.contains("fog") || t.contains("haze") {
+    } else if t.contains("fog") {
         45 // fog
     } else if t.contains("mostly cloudy") || t.contains("overcast") {
         3 // overcast
@@ -903,10 +960,10 @@ fn wmo_from_short(s: Option<&str>) -> u32 {
         2 // partly cloudy
     } else if t.contains("cloud") {
         3 // overcast / cloudy
-    } else {
-        // "sunny" / "clear" / "fair" and anything unmapped: clear-sky / fallback
-        // (WMO 0; the glyph registry treats 0 as clear).
+    } else if t.contains("sunny") || t.contains("clear") || t == "fair" {
         0
+    } else {
+        u32::MAX
     }
 }
 
@@ -1049,7 +1106,7 @@ fn parse_hourly(periods: &[ForecastPeriod]) -> Vec<HourlyEntry> {
                 .and_then(|o| o.value)
                 .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
                 .map(|rh| rh.round() as u32),
-            cloud_cover_pct: 0,
+            cloud_cover_pct: None,
             ..Default::default()
         })
         .collect()
@@ -1098,6 +1155,32 @@ impl Nws {
                     h.time_epoch,
                     h.time_epoch.saturating_add(3600),
                 );
+            }
+        }
+        // Sky cover and visibility ride the same gridpoint data; each hour
+        // takes the interval covering its middle.
+        if let Some(grid) = qpf.map(|r| &r.properties) {
+            let sky = grid
+                .sky_cover
+                .as_ref()
+                .filter(|b| b.uom.as_deref() == Some("wmoUnit:percent"));
+            let visibility = grid
+                .visibility
+                .as_ref()
+                .filter(|b| b.uom.as_deref() == Some("wmoUnit:m"));
+            for h in &mut hourly {
+                let mid = h.time_epoch.saturating_add(1800);
+                if let Some(pct) = sky.and_then(|b| grid_value_at(b, mid)) {
+                    h.cloud_cover_pct = Some(pct.round().clamp(0.0, 100.0) as u32);
+                }
+                if h.visibility_ft <= 0.0 {
+                    if let Some(m) = visibility
+                        .and_then(|b| grid_value_at(b, mid))
+                        .filter(|m| *m > 0.0)
+                    {
+                        h.visibility_ft = m * 3.280_84;
+                    }
+                }
             }
         }
         let mut snap = ForecastSnapshot {
@@ -1152,6 +1235,9 @@ impl WeatherSource for Nws {
         // RainIntensityInHr). A live in/hr rate over the last hour, so it ranks
         // as a current scalar in the per-field CURRENT picker.
         fields.insert(WeatherField::RainIntensityInHr);
+        // The station's reported sky: ceilometer cloud layers and visibility.
+        fields.insert(WeatherField::CloudCoverPct);
+        fields.insert(WeatherField::VisibilityMi);
         // FORECAST capabilities (drive is_forecast() picker + forecast bridge).
         fields.insert(WeatherField::ForecastDaily);
         fields.insert(WeatherField::ForecastHourly);
@@ -1187,7 +1273,9 @@ impl WeatherSource for Nws {
             | WeatherField::WindGustMph
             | WeatherField::WindBearingDeg
             | WeatherField::PressureInHg
-            | WeatherField::RainIntensityInHr => 35,
+            | WeatherField::RainIntensityInHr
+            | WeatherField::CloudCoverPct
+            | WeatherField::VisibilityMi => 35,
             _ => i32::MIN,
         }
     }
@@ -1501,7 +1589,9 @@ mod tests {
         assert_eq!(wmo_from_short(Some("Chance Showers And Thunderstorms")), 95);
         assert_eq!(wmo_from_short(Some("Light Rain")), 61);
         assert_eq!(wmo_from_short(Some("Snow")), 73);
-        assert_eq!(wmo_from_short(None), 0);
+        assert_eq!(wmo_from_short(None), u32::MAX);
+        assert_eq!(wmo_from_short(Some("Haze")), u32::MAX);
+        assert_eq!(wmo_from_short(Some("Unrecognized conditions")), u32::MAX);
     }
 
     // Minimal literal sample of an NWS /forecast response: one daytime
@@ -2025,5 +2115,71 @@ mod tests {
         let snapshot = nws_test().build_snapshot(&fc, None, Some(&qpf), now);
         assert_eq!(snapshot.daily[0].precip_sum_in, Some(0.0));
         assert_eq!(snapshot.daily[1].precip_sum_in, None);
+    }
+
+    #[test]
+    fn station_cloud_layers_and_visibility_reach_the_bus() {
+        let props = report(
+            1_900_000_000,
+            serde_json::json!({
+                "cloudLayers": [
+                    {"base": {"value": 600, "unitCode": "wmoUnit:m"}, "amount": "FEW"},
+                    {"base": {"value": 1800, "unitCode": "wmoUnit:m"}, "amount": "BKN"}
+                ],
+                "visibility": {"value": 1609.34, "unitCode": "wmoUnit:m"}
+            }),
+        );
+        let fields = map_current_observation(&props);
+        let get = |f| fields.iter().find(|(g, _)| *g == f).map(|(_, v)| *v);
+        assert_eq!(get(WeatherField::CloudCoverPct), Some(75.0));
+        assert!((get(WeatherField::VisibilityMi).unwrap() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn an_empty_cloud_report_is_not_a_clear_sky() {
+        assert_eq!(layers_cover_pct(&[]), None);
+        let clear = [CloudLayer {
+            amount: Some("CLR".into()),
+        }];
+        assert_eq!(layers_cover_pct(&clear), Some(0.0));
+        let obscured = [CloudLayer {
+            amount: Some("VV".into()),
+        }];
+        assert_eq!(layers_cover_pct(&obscured), Some(100.0));
+        let props = report(1_900_000_000, serde_json::json!({"cloudLayers": []}));
+        assert!(map_current_observation(&props)
+            .iter()
+            .all(|(f, _)| *f != WeatherField::CloudCoverPct));
+    }
+
+    #[test]
+    fn gridpoint_sky_cover_fills_the_hourly_forecast() {
+        let fc: ForecastResponse = serde_json::from_str(FORECAST_SAMPLE).unwrap();
+        let hourly: ForecastResponse = serde_json::from_str(HOURLY_SAMPLE).unwrap();
+        let first = nws_test()
+            .build_snapshot(&fc, Some(&hourly), None, 1_700_000_000)
+            .hourly[0]
+            .time_epoch;
+        let start = chrono::DateTime::from_timestamp(first, 0)
+            .unwrap()
+            .to_rfc3339();
+        let grid: RawGridResponse = serde_json::from_value(serde_json::json!({"properties": {
+            "skyCover": {"uom": "wmoUnit:percent", "values": [
+                {"validTime": format!("{start}/PT2H"), "value": 82}
+            ]},
+            "visibility": {"uom": "wmoUnit:m", "values": [
+                {"validTime": format!("{start}/PT2H"), "value": 800}
+            ]}
+        }}))
+        .unwrap();
+        let snap = nws_test().build_snapshot(&fc, Some(&hourly), Some(&grid), 1_700_000_000);
+        assert_eq!(snap.hourly[0].cloud_cover_pct, Some(82));
+        assert!((snap.hourly[0].visibility_ft - 2624.67).abs() < 1.0);
+        // Hours the grid does not cover stay unknown rather than clear.
+        assert!(snap
+            .hourly
+            .iter()
+            .skip(2)
+            .all(|h| h.cloud_cover_pct.is_none()));
     }
 }

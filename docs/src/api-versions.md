@@ -29,6 +29,14 @@ These compatibility fields were deprecated during API 1 and remain in API 2.0.0.
 
 ## Migration notes
 
+**2.5.0** (LocalSky 1.0.2). The weather snapshot (`GET /snapshot`, `/stream`)
+adds `sky`: the current condition judged at serving time from every fresh
+reading the deployment has, the sun's position at the site and the forecast
+hour. It also adds `cloud_cover_pct` and `visibility_mi`, current values from
+whichever source reports them, null when none does. In the forecast, hourly
+`cloud_cover_pct` is now null when the provider gave no sky cover; it was
+previously 0, which read as a clear sky. See [Weather and forecasts](api-weather.md).
+
 **2.3.0** (LocalSky 0.9.1) adds extra forecast tracks, inclusive forecast-window queries, and the hourly forecast archive. See [Weather and forecasts](api-weather.md).
 
 

@@ -46,5 +46,8 @@ expression: "TempestSnapshot::default()"
   "rh_live_epoch": 0,
   "rain_live_epoch": 0,
   "has_live_station": false,
-  "rain_today_suspect_source": null
+  "rain_today_suspect_source": null,
+  "cloud_cover_pct": null,
+  "visibility_mi": null,
+  "sky": null
 }

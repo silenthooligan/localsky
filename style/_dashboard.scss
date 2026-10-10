@@ -199,6 +199,29 @@
   font-weight: 600;
 }
 
+.hero-sky-evidence {
+  color: var(--text-soft);
+  font-size: var(--text-meta);
+  line-height: var(--leading-normal);
+  max-width: 38ch;
+  summary {
+    cursor: pointer;
+    padding-block: var(--space-2);
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+    &:focus-visible { @include focus-ring(2px); }
+  }
+  p {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-inline-start: 2px solid var(--accent);
+    background: var(--bg-panel-soft);
+    border-radius: var(--radius-sm);
+    overflow-wrap: anywhere;
+  }
+}
+
 // Provenance chip on the hero headline: "via {source}". A SOURCE-identity
 // micro-link that deep-links to the data-sources page so the reading's origin
 // is legible at the point of consumption. Entity-source tinting + a quiet

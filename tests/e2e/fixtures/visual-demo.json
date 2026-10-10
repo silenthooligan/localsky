@@ -346,6 +346,7 @@
       "rh_live_epoch": 1789089400,
       "rain_live_epoch": 1789089400,
       "has_live_station": true,
+      "sky": {"condition": "clear", "phase": "day", "is_day": true, "cloud_cover_pct": null, "cover_basis": "measured_sunlight", "precipitating": false, "windy": false, "at_epoch": 1789089400},
       "rain_today_suspect_source": null
     },
     "/api/irrigation/snapshot": {

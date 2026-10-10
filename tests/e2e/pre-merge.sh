@@ -34,6 +34,8 @@ fail() {
   exit 1
 }
 cleanup
+# Bootstrap failures must also remove these isolated fixtures and their network.
+trap cleanup EXIT
 docker network create "$NET" >/dev/null
 docker run -d --name "$APP" --network "$NET" \
   --tmpfs /data \
@@ -72,6 +74,14 @@ done
 # the visual fixture. Install and verify them before comparing baselines.
 PW=localsky-e2e-pw
 docker rm -f "$PW" >/dev/null 2>&1 || true
+if ! docker image inspect "$PW_IMG" >/dev/null 2>&1; then
+  pulled=0
+  for attempt in 1 2 3; do
+    if docker pull "$PW_IMG"; then pulled=1; break; fi
+    [ "$attempt" = 3 ] || sleep 2
+  done
+  [ "$pulled" = 1 ] || fail "browser image could not be downloaded after three attempts"
+fi
 docker create --name "$PW" --network "$NET" --ipc=host -w /e2e \
   -e CI=true -e FRESH_INSTALL=1 -e BASE_URL="http://${APP}:8090" \
   -e DEMO_BASE_URL="http://${DEMO}:8090" \

@@ -78,6 +78,10 @@ struct CurrentBlock {
     // not a measurement. Scaled to 0..100 percent on emit.
     #[serde(rename = "precipProbability")]
     precip_probability: Option<f64>, // 0..1
+    #[serde(rename = "cloudCover", default)]
+    cloud_cover: Option<f64>, // 0..1
+    #[serde(default)]
+    visibility: Option<f64>, // miles (units=us)
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,8 +162,8 @@ fn icon_to_wmo(icon: Option<&str>) -> u32 {
         "thunderstorm" | "tstorm" => 95,
         "hail" => 96,
         // wind / breezy / dangerous-wind / tornado / smoke / haze / mist and
-        // anything unrecognized: no clean WMO equivalent -> 0 (glyph fallback).
-        _ => 0,
+        // anything unrecognized: unknown, never a fabricated clear sky.
+        _ => u32::MAX,
     }
 }
 
@@ -237,6 +241,13 @@ impl PirateWeather {
         if let Some(v) = c.precip_probability {
             fields.push((WeatherField::Pop, (v * 100.0).clamp(0.0, 100.0)));
         }
+        // The model's current sky.
+        if let Some(v) = c.cloud_cover {
+            fields.push((WeatherField::CloudCoverPct, (v * 100.0).clamp(0.0, 100.0)));
+        }
+        if let Some(mi) = c.visibility.filter(|v| *v > 0.0) {
+            fields.push((WeatherField::VisibilityMi, mi));
+        }
         fields
     }
 
@@ -305,7 +316,7 @@ impl PirateWeather {
                             .humidity
                             .filter(|rh| rh.is_finite() && (0.0..=1.0).contains(rh))
                             .map(frac_to_pct),
-                        cloud_cover_pct: h.cloud_cover.map(frac_to_pct).unwrap_or(0),
+                        cloud_cover_pct: h.cloud_cover.map(frac_to_pct),
                         ..Default::default()
                     })
                     .collect()
@@ -349,6 +360,9 @@ impl WeatherSource for PirateWeather {
         // model blend (HRRR/NBM/GEFS), not RTMA-RU radar, so this is a forecast
         // Pop, not a measured nowcast.
         fields.insert(WeatherField::Pop);
+        // The model's current sky: cloud cover and visibility.
+        fields.insert(WeatherField::CloudCoverPct);
+        fields.insert(WeatherField::VisibilityMi);
         fields.insert(WeatherField::ForecastDaily);
         fields.insert(WeatherField::ForecastHourly);
         SourceCaps {
@@ -379,7 +393,9 @@ impl WeatherSource for PirateWeather {
             | WeatherField::WindGustMph
             | WeatherField::WindBearingDeg
             | WeatherField::UvIndex
-            | WeatherField::RainIntensityInHr => 25,
+            | WeatherField::RainIntensityInHr
+            | WeatherField::CloudCoverPct
+            | WeatherField::VisibilityMi => 25,
             _ => i32::MIN,
         }
     }
@@ -642,7 +658,7 @@ mod tests {
         assert!((h.wind_mph.unwrap() - 6.0).abs() < 1e-6);
         assert_eq!(h.wind_dir_deg, 180);
         assert_eq!(h.humidity_pct, Some(66)); // 0.66 -> 66%
-        assert_eq!(h.cloud_cover_pct, 90); // 0.9 -> 90%
+        assert_eq!(h.cloud_cover_pct, Some(90)); // 0.9 -> 90%
         assert_eq!(h.weather_code, 2); // "partly-cloudy-day" -> WMO 2
     }
     #[test]

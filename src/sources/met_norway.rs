@@ -166,7 +166,7 @@ fn symbol_to_wmo(symbol: &str) -> u32 {
         "cloudy" => 3,
         "fog" => 45,
         "lightrain" | "drizzle" => 51,
-        _ => 0,
+        _ => u32::MAX,
     }
 }
 
@@ -275,7 +275,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
         let symbol = next
             .and_then(|n| n.summary.as_ref())
             .and_then(|s| s.symbol_code.as_deref());
-        let weather_code = symbol.map(symbol_to_wmo).unwrap_or(0);
+        let weather_code = symbol.map(symbol_to_wmo).unwrap_or(u32::MAX);
         let precip_in = next
             .and_then(|n| n.details.precipitation_amount)
             .filter(|v| crate::forecast::precip::valid_amount(*v))
@@ -299,7 +299,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
                 .relative_humidity
                 .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
                 .map(|rh| rh.round() as u32),
-            cloud_cover_pct: d.cloud_area_fraction.map(|x| x.round() as u32).unwrap_or(0),
+            cloud_cover_pct: d.cloud_area_fraction.map(|x| x.round() as u32),
             ..Default::default()
         });
     }
@@ -370,7 +370,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             .and_then(|n| n.details.precipitation_amount)
             .filter(|v| crate::forecast::precip::valid_amount(*v))
             .map(mm_to_in);
-        let step_code = symbol.map(symbol_to_wmo).unwrap_or(0);
+        let step_code = symbol.map(symbol_to_wmo).unwrap_or(u32::MAX);
         let step_pop = precip_in
             .map(|amount| synth_pop(amount, symbol))
             .unwrap_or_else(|| {
@@ -393,7 +393,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
                 temp_min_f: f64::MAX,
                 pop_max: 0,
                 wind_max_mph: Some(0.0),
-                weather_code: 0,
+                weather_code: u32::MAX,
                 seen_temp: false,
             }
         });
@@ -409,7 +409,13 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             .wind_max_mph
             .zip(wind_mph)
             .map(|(peak, wind)| peak.max(wind));
-        agg.weather_code = agg.weather_code.max(step_code);
+        if step_code != u32::MAX {
+            agg.weather_code = if agg.weather_code == u32::MAX {
+                step_code
+            } else {
+                agg.weather_code.max(step_code)
+            };
+        }
     }
 
     let mut daily: Vec<DailyEntry> = Vec::new();
@@ -522,6 +528,8 @@ impl WeatherSource for MetNorway {
         fields.insert(WeatherField::WindMph);
         fields.insert(WeatherField::WindBearingDeg);
         fields.insert(WeatherField::PressureInHg);
+        // The model's current cloud cover.
+        fields.insert(WeatherField::CloudCoverPct);
         fields.insert(WeatherField::ForecastDaily);
         fields.insert(WeatherField::ForecastHourly);
         SourceCaps {
@@ -544,7 +552,8 @@ impl WeatherSource for MetNorway {
             | WeatherField::RhPct
             | WeatherField::WindMph
             | WeatherField::WindBearingDeg
-            | WeatherField::PressureInHg => 20,
+            | WeatherField::PressureInHg
+            | WeatherField::CloudCoverPct => 20,
             _ => i32::MIN,
         }
     }
@@ -596,6 +605,9 @@ impl WeatherSource for MetNorway {
                     }
                     if let Some(wd) = d.wind_from_direction {
                         fields.push((WeatherField::WindBearingDeg, wd));
+                    }
+                    if let Some(c) = d.cloud_area_fraction {
+                        fields.push((WeatherField::CloudCoverPct, c.clamp(0.0, 100.0)));
                     }
                 }
                 // Poll::observation publishes nothing when `fields` is empty.
@@ -672,7 +684,7 @@ mod tests {
         assert_eq!(symbol_to_wmo("rainshowers_day"), 80);
         assert_eq!(symbol_to_wmo("snow"), 71);
         assert_eq!(symbol_to_wmo("heavyrainandthunder"), 95);
-        assert_eq!(symbol_to_wmo("totally_unknown_glyph"), 0);
+        assert_eq!(symbol_to_wmo("totally_unknown_glyph"), u32::MAX);
     }
 
     // A tiny two-step compact sample spanning two UTC calendar days, so
@@ -744,10 +756,10 @@ mod tests {
     #[test]
     fn forecast_maps_cloud_cover_fraction_to_pct() {
         // Forecast path only: cloud_area_fraction (percent) rounds into the
-        // hourly snapshot cloud_cover_pct. (Met.no has no current cloud field.)
+        // hourly snapshot cloud_cover_pct. (The current step emits CloudCoverPct.)
         let resp: ForecastResponse = serde_json::from_str(SAMPLE).expect("sample parses");
         let snap = build_snapshot(&resp, 0.0, 0.0, 1_700_000_000);
-        assert_eq!(snap.hourly[0].cloud_cover_pct, 40);
+        assert_eq!(snap.hourly[0].cloud_cover_pct, Some(40));
     }
 
     #[test]
@@ -851,7 +863,7 @@ mod tests {
         );
         assert_eq!(h0.wind_dir_deg, 180);
         assert_eq!(h0.humidity_pct, Some(55));
-        assert_eq!(h0.cloud_cover_pct, 40);
+        assert_eq!(h0.cloud_cover_pct, Some(40));
         // 25.4mm -> 1.0 in
         assert!(
             (h0.precip_in.unwrap() - 1.0).abs() < 0.001,

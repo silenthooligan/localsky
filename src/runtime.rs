@@ -422,6 +422,13 @@ pub fn writer_label(entry: &SourceEntry) -> String {
     entry.id.clone()
 }
 
+/// The configured site, for the sky's sun position. `None` until a location
+/// is set: (0, 0) is the unset marker, not a place.
+pub fn site_location(cfg: &Config) -> Option<(f64, f64)> {
+    let loc = &cfg.deployment.location;
+    loc.is_set().then_some((loc.lat, loc.lon))
+}
+
 /// Build the CURRENT-conditions arbitration priority map for the merge layer:
 /// each ENABLED source's `priority`, keyed by the LABEL its writer uses
 /// (`TEMPEST_LABEL` for the UDP path, the source id otherwise). Fed to
@@ -796,6 +803,8 @@ fn apply_runtime_config_locked(
     handles
         .tempest_store
         .set_max_ages(source_max_age_map(new_cfg));
+    // The sky's sun position follows a moved site without a restart.
+    handles.tempest_store.set_site(site_location(new_cfg));
     handles
         .tempest_store
         .set_field_overrides(field_override_map(new_cfg));

@@ -101,6 +101,7 @@ fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: 
             (F::WindMph, snap.wind_avg_mph),
             (F::RhPct, snap.rh_pct),
             (F::RainIntensityInHr, snap.rain_intensity_in_hr),
+            (F::SolarWm2, snap.solar_w_m2),
         ],
         now,
         now,
@@ -119,7 +120,12 @@ fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: 
     // silently re-fabricating a 0%.
     let pop = snap.pop_pct.expect("demo snapshot always sets pop_pct");
     tempest.apply_received_fields(
-        &[(F::Pop, pop), (F::Et0Today, snap.et0_today)],
+        &[
+            (F::Pop, pop),
+            (F::Et0Today, snap.et0_today),
+            (F::CloudCoverPct, DEMO_CLOUD_PCT),
+            (F::VisibilityMi, 10.0),
+        ],
         now,
         now,
         false,
@@ -245,8 +251,8 @@ pub fn seed_config() -> crate::config::schema::Config {
     // Advanced page's status line and the manifest read the truth.
     cfg.features.demo_mode = true;
     cfg.deployment.location = Location {
-        lat: 28.54,
-        lon: -81.38,
+        lat: DEMO_SITE.0,
+        lon: DEMO_SITE.1,
         elevation_m: Some(30.0),
     };
     cfg.deployment.mode = DeploymentMode::Standalone;
@@ -431,14 +437,22 @@ pub fn seed_config() -> crate::config::schema::Config {
     cfg
 }
 
+/// The demo's place, shared by its config and its synthetic sunlight.
+const DEMO_SITE: (f64, f64) = (28.54, -81.38);
+
+/// Thin cloud drifting over the demo, percent. Daytime light is dimmed to
+/// match, so the measured sky and the reported cover tell one story.
+const DEMO_CLOUD_PCT: f64 = 25.0;
+
 fn synth_tempest(t_sim: f64) -> TempestSnapshot {
+    use crate::engine::sunrise::{clear_sky_ghi_w_m2, solar_elevation_deg};
     let day_phase = (t_sim / 86400.0) * std::f64::consts::TAU;
-    let solar_norm = (day_phase - std::f64::consts::FRAC_PI_2).sin();
-    let solar = if solar_norm > 0.0 {
-        solar_norm * 950.0
-    } else {
-        0.0
-    };
+    // Sunlight follows the real sun at the demo site, so the sky reads day
+    // and night at the right times for a visitor.
+    let real_now = chrono::Utc::now().timestamp();
+    let solar = solar_elevation_deg(real_now, DEMO_SITE.0, DEMO_SITE.1)
+        .map(|elevation| clear_sky_ghi_w_m2(elevation) * (0.85 + 0.08 * (day_phase * 3.0).sin()))
+        .unwrap_or(0.0);
     let temp_c = 27.0 + 5.0 * (day_phase - 0.4 * std::f64::consts::TAU).sin();
     let temp_f = temp_c * 9.0 / 5.0 + 32.0;
     let rh = (75.0 - 15.0 * (day_phase - 0.4 * std::f64::consts::TAU).sin()).clamp(35.0, 95.0);
@@ -507,6 +521,9 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         // The demo accumulator is always today's.
         rain_today_day_ordinal: crate::timeutil::local_day_ordinal(now),
         rain_today_suspect_source: None,
+        cloud_cover_pct: Some(DEMO_CLOUD_PCT),
+        visibility_mi: Some(10.0),
+        sky: None,
     }
 }
 

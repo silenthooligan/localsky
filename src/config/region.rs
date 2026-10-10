@@ -140,6 +140,12 @@ pub const MAX_AGE_MRMS_S: u64 = 7200;
 /// ~1 to 1.5 hr late). See `TempestStore::max_age_for_field`.
 pub const MAX_AGE_MRMS_RATE_S: u64 = 900;
 
+/// How long a station's reported sky (cloud layers, visibility) stays
+/// current. Airport reports come once an hour and reach the API late, and
+/// cloud changes slowly, so one report cycle plus the lag: 75 minutes. The
+/// observing source's wider window, if any, still applies.
+pub const MAX_AGE_OBSERVED_SKY_S: u64 = 75 * 60;
+
 /// Default `max_age_s` for a synthesized/added cloud source. The slow-cadence
 /// forecast kinds (Open-Meteo, NWS, Met.no) get `MAX_AGE_SLOW_CADENCE_S` so a
 /// per-field pin outlives the refresh cycle; NOAA MRMS gets the wider

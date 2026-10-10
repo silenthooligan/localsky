@@ -6,6 +6,7 @@
 use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::ui::ChartKey;
 use crate::components::units_fmt::{fmt_optional_temp_short, use_unit_prefs, UnitPrefs};
+use crate::engine::sunrise::{solar_elevation_deg, HORIZON_DEG};
 use crate::forecast::snapshot::{ForecastSnapshot, HourlyEntry};
 use crate::timefmt::{format_hm, format_wday_short};
 use leptos::prelude::*;
@@ -14,6 +15,7 @@ use leptos::tachys::view::any_view::IntoAny;
 #[component]
 pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
     let unit_prefs = use_unit_prefs();
+    let site = use_context::<crate::app::SiteCoordinates>().map(|c| c.0);
     view! {
         <section class="forecast-hourly">
             <header class="forecast-section-head">
@@ -49,11 +51,12 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     let tz = s.timezone.clone();
                     let entries: Vec<HourlyEntry> = s.hourly.into_iter().take(48).collect();
                     let prefs = unit_prefs.get();
+                    let site = site.and_then(|c| c.get());
                     if entries.is_empty() {
                         view! { <super::ForecastPending variant="chart" what="hourly forecast"/> }
                             .into_any()
                     } else {
-                        view! { <HourlyChart entries prefs tz/> }.into_any()
+                        view! { <HourlyChart entries prefs tz site/> }.into_any()
                     }
                 }}
             </div>
@@ -63,7 +66,12 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
 }
 
 #[component]
-fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl IntoView {
+fn HourlyChart(
+    entries: Vec<HourlyEntry>,
+    prefs: UnitPrefs,
+    tz: String,
+    site: Option<(f64, f64)>,
+) -> impl IntoView {
     let n = entries.len().max(1);
     let col_w: f64 = 56.0;
     let total_w = col_w * n as f64;
@@ -79,14 +87,18 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
     let header_cells: Vec<_> = entries.iter().enumerate().map(|(i, e)| {
         let x = col_w * (i as f64) + col_w / 2.0;
         let label = format_hm(e.time_epoch, &tz);
-        // Day/night for the glyph: the deployment-local hour, read off the
-        // 24-hour "HH:MM" string (always 2-digit hour); fall back to noon.
-        let local_hour = label
-            .get(0..2)
-            .and_then(|h| h.parse::<u32>().ok())
-            .unwrap_or(12);
-        let is_day = (6..20).contains(&local_hour);
-        let (g, _) = weather_code_glyph(e.weather_code, is_day);
+        // Use the sun at mid-hour, including polar day/night. Without a site,
+        // a neutral glyph is more honest than a fabricated 06:00 to 20:00 day.
+        let is_day = site
+            .and_then(|(lat, lon)| solar_elevation_deg(e.time_epoch.checked_add(1800)?, lat, lon))
+            .map(|sun| sun > HORIZON_DEG);
+        let (g, condition) = weather_code_glyph(e.weather_code, is_day.unwrap_or(true));
+        let g = if is_day.is_none() && e.weather_code <= 2 { "cloud" } else { g };
+        let spoken = match is_day {
+            Some(true) => format!("{condition}, daytime"),
+            Some(false) => format!("{condition}, nighttime"),
+            None => format!("{condition}, day/night unavailable"),
+        };
         view! {
             <g>
                 <text x={x.to_string()} y="14" text-anchor="middle" class="hourly-time">{label}</text>
@@ -102,6 +114,8 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
                     stroke-linecap="round"
                     stroke-linejoin="round"
                     class="hourly-glyph"
+                    role="img"
+                    aria-label=spoken
                     inner_html=crate::components::ui::icon::paths_for(g)
                 ></svg>
                 <text x={x.to_string()} y="62" text-anchor="middle" class="hourly-temp">

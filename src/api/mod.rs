@@ -80,8 +80,6 @@ use futures::stream::Stream;
 use rusqlite::Connection;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::WatchStream;
-use tokio_stream::StreamExt;
 
 /// Everything the core API routers read, built once by the boot and
 /// mounted at both `/api` and `/api/v1` from one `router()` call.
@@ -135,7 +133,10 @@ pub fn router(st: ApiState) -> Router {
     let tempest_routes = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
-        .with_state(tempest);
+        .with_state(LiveState {
+            store: tempest,
+            forecast: forecast_store.clone(),
+        });
 
     // Manifest needs the live irrigation snapshot to enumerate per-zone
     // entities, so it borrows the IrrigationStore Arc before we hand it
@@ -175,18 +176,88 @@ pub fn router(st: ApiState) -> Router {
     router
 }
 
-async fn snapshot(State(store): State<Arc<TempestStore>>) -> Json<crate::tempest::state::Snapshot> {
-    let s = store.snapshot();
-    Json((*s).clone())
+/// The live snapshot is served with its sky judged at serving time, from the
+/// store's fresh readings and the forecast hour.
+#[derive(Clone)]
+struct LiveState {
+    store: Arc<TempestStore>,
+    forecast: Arc<ForecastStore>,
+}
+
+impl LiveState {
+    fn served(&self, snap: &crate::tempest::state::Snapshot) -> crate::tempest::state::Snapshot {
+        crate::weather::sky::with_sky(
+            &self.store,
+            snap,
+            Some(&self.forecast.snapshot()),
+            chrono::Utc::now().timestamp(),
+        )
+    }
+}
+
+async fn snapshot(State(live): State<LiveState>) -> Json<crate::tempest::state::Snapshot> {
+    Json(live.served(&live.store.snapshot()))
 }
 
 async fn stream(
-    State(store): State<Arc<TempestStore>>,
+    State(live): State<LiveState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = store.subscribe();
-    let s = WatchStream::new(rx).map(|snap| {
-        let payload = serde_json::to_string(&*snap).unwrap_or_else(|_| "{}".into());
-        Ok(Event::default().event("snapshot").data(payload))
-    });
+    let s = live_sky_stream(live, Duration::from_secs(30));
     Sse::new(s).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+fn live_sky_stream(
+    live: LiveState,
+    refresh: Duration,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let mut weather = live.store.subscribe();
+    let mut forecast = live.forecast.subscribe();
+    async_stream::stream! {
+        let mut clock = tokio::time::interval_at(tokio::time::Instant::now() + refresh, refresh);
+        clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            // The sun and freshness change even if every sensor has stopped.
+            // No lock/watch guard survives a yield or network backpressure.
+            let payload = serde_json::to_string(&live.served(&live.store.snapshot())).unwrap_or_else(|_| "{}".into());
+            yield Ok(Event::default().event("snapshot").data(payload));
+            tokio::select! {
+                changed = weather.changed() => { if changed.is_err() { break; } }
+                changed = forecast.changed() => { if changed.is_err() { break; } }
+                _ = clock.tick() => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_sky_tests {
+    use super::*;
+    use futures::{pin_mut, StreamExt};
+
+    #[tokio::test]
+    async fn quiet_sensors_still_refresh_sky_and_forecast_updates_are_immediate() {
+        let forecast = Arc::new(ForecastStore::new());
+        let live = LiveState {
+            store: Arc::new(TempestStore::new()),
+            forecast: forecast.clone(),
+        };
+        let stream = live_sky_stream(live.clone(), Duration::from_millis(20));
+        pin_mut!(stream);
+        assert!(stream.next().await.is_some());
+        assert!(tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .is_some());
+        let stream = live_sky_stream(live, Duration::from_secs(3600));
+        pin_mut!(stream);
+        assert!(stream.next().await.is_some());
+        forecast.store(crate::forecast::snapshot::ForecastSnapshot {
+            hourly: vec![Default::default()],
+            ..Default::default()
+        });
+        assert!(tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .is_some());
+    }
 }

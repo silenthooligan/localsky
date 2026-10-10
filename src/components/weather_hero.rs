@@ -17,68 +17,83 @@
 // vertical breathing room inside the card, every pixel of card height
 // is used by data. Brand gradient accent stripe at the top.
 
-use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::ui::{Icon, TemperatureValue};
 use crate::components::units_fmt::{fmt_pressure, fmt_rain_rate, fmt_wind, use_unit_prefs};
-use crate::forecast::snapshot::ForecastSnapshot;
+use crate::engine::sky::{SkyBasis, SkyCondition, SkyNow, SunPhase};
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 
-/// True when no physical weather station owns current conditions, i.e. a
-/// cloud-only (Open-Meteo) deployment. Keys on the canonical `has_live_station`
-/// signal (true the moment ANY live_current source, Tempest / Ecowitt / Davis /
-/// MQTT / ..., claims a current-conditions field), NOT the old Tempest-only
-/// serial + battery heuristic that misclassified a live Ecowitt/Davis/MQTT
-/// station (no Tempest serial, no battery voltage) as cloud-only.
-fn is_cloud_only(s: &Snapshot) -> bool {
-    !s.has_live_station
-}
+const WARM: &str = "var(--accent-warm)";
+const COOL: &str = "var(--accent-cool)";
+const DIM: &str = "var(--text-dim)";
+const RAIN: &str = "var(--accent-rain)";
+const LIGHTNING: &str = "var(--accent-lightning)";
 
-/// Day/night decision for the forecast-driven glyph (clear vs moon, etc.).
-/// Prefers the forecast's sunrise/sunset window for today; when those aren't
-/// available yet, defaults to daytime so an empty/loading forecast renders a
-/// daytime glyph rather than a moon at noon.
-fn is_day_now(f: &ForecastSnapshot, s: &Snapshot) -> bool {
-    let now = if s.last_packet_epoch > 0 {
-        s.last_packet_epoch
-    } else {
-        f.last_refresh_epoch
+/// Glyph, label and accent for the server's judgement of the sky. The server
+/// weighs every source the deployment has (`engine::sky`); the card only
+/// draws it, so the card and Home Assistant always agree.
+fn sky_presentation(sky: &SkyNow) -> (&'static str, String, &'static str) {
+    use SkyCondition as C;
+    let night = sky.is_day == Some(false);
+    let (icon, label, accent) = match sky.condition {
+        C::Thunderstorm => ("cloud-lightning", "Lightning nearby", LIGHTNING),
+        C::Hail => ("hail", "Hail", COOL),
+        C::Snow => ("cloud-snow", "Snow", COOL),
+        C::WintryMix => ("cloud-snow", "Wintry mix", COOL),
+        C::HeavyRain => ("cloud-rain", "Heavy rain", RAIN),
+        C::Rain => ("cloud-rain", "Rain", RAIN),
+        C::LightRain => ("cloud-drizzle", "Light rain", RAIN),
+        C::Fog => ("cloud-fog", "Fog", DIM),
+        C::LowVisibility => ("cloud-fog", "Low visibility", DIM),
+        C::Clear if sky.is_day.is_none() => ("cloud", "Clear", DIM),
+        C::Clear if night => ("moon", "Clear", COOL),
+        C::Clear => ("sun", "Sunny", WARM),
+        C::MostlyClear if night => ("cloud-moon", "Mostly clear", COOL),
+        C::MostlyClear if sky.is_day.is_none() => ("cloud", "Mostly clear", DIM),
+        C::MostlyClear => ("cloud-sun", "Mostly sunny", WARM),
+        C::PartlyCloudy if night => ("cloud-moon", "Partly cloudy", COOL),
+        C::PartlyCloudy if sky.is_day.is_none() => ("cloud", "Partly cloudy", DIM),
+        C::PartlyCloudy => ("cloud-sun", "Partly cloudy", WARM),
+        C::MostlyCloudy => ("cloud", "Mostly cloudy", DIM),
+        C::Overcast => ("cloud", "Overcast", DIM),
+        // No evidence about the sky: say where the sun is, never guess.
+        C::Unknown => match sky.phase {
+            Some(SunPhase::Dawn) => ("sunrise", "Sunrise", WARM),
+            Some(SunPhase::Dusk) => ("sunset", "Sunset", WARM),
+            Some(SunPhase::Night) => ("moon", "Night", COOL),
+            Some(SunPhase::Day) => ("sun", "Daytime", WARM),
+            None if sky.windy => return ("wind", "Windy".into(), DIM),
+            None => ("cloud", "Sky not reported", DIM),
+        },
     };
-    match f.daily.first() {
-        Some(today) if today.sunrise_epoch > 0 && today.sunset_epoch > 0 && now > 0 => {
-            now >= today.sunrise_epoch && now < today.sunset_epoch
-        }
-        _ => true,
-    }
+    let label = if sky.windy {
+        format!("{label}, windy")
+    } else {
+        label.to_string()
+    };
+    (icon, label, accent)
 }
 
-/// Accent colour for a WMO weather code so the forecast-driven condition keeps
-/// the same colour grammar the station-driven cascade uses (rain blue, sun
-/// warm, storm lightning, fog/cloud dim, snow cool).
-fn accent_for_code(code: u32) -> &'static str {
-    match code {
-        95 | 96 | 99 => "var(--accent-lightning)",
-        51..=67 | 80..=82 => "var(--accent-rain)",
-        71..=77 | 85 | 86 => "var(--accent-cool)",
-        3 | 45 | 48 => "var(--text-dim)",
-        // 0 / 1 (clear, mostly clear) and any unmapped code: warm/sun accent.
-        _ => "var(--accent-warm)",
+/// Short provenance at the point of use, with limitations available on tap.
+/// Never label a sunlight or forecast estimate as a measured cloud fraction.
+fn sky_evidence(sky: &SkyNow) -> (&'static str, &'static str) {
+    if sky.condition == SkyCondition::Thunderstorm {
+        return ("Lightning detected", "A strike was detected within 10 miles (16 km) in the last 15 minutes. Rain may be elsewhere.");
+    }
+    if sky.precipitating {
+        return ("Precipitation detected", "Based on a fresh gauge, radar or hail reading. A rain rate alone cannot identify snow or freezing rain.");
+    }
+    match sky.cover_basis {
+        SkyBasis::Observation => ("Reported conditions", "From a fresh sensor or weather-station report. A nearby station can differ from your location; low visibility does not identify its cause."),
+        SkyBasis::MeasuredSunlight => ("Estimated from sunlight", "Sunlight is compared with a clear-sky model. Shade, haze and sensor placement can affect this estimate; it is not a cloud-cover measurement."),
+        SkyBasis::Model => ("Estimated conditions", "From your weather provider's current model. Conditions at your location may differ."),
+        SkyBasis::Forecast => ("From the hourly forecast", "No current sky report is available. This estimate uses the current forecast hour; a rain or storm forecast is not an observation."),
+        SkyBasis::None => ("Sky not reported", "No fresh source reports the sky. Day and night follow the sun at your configured location."),
     }
 }
 
 #[component]
-pub fn Hero(
-    snap: ReadSignal<Snapshot>,
-    /// Live forecast snapshot. When the deployment has no physical station
-    /// (cloud-only), the headline condition is driven by the forecast's
-    /// current `weather_code` (correct rain/snow/fog/storm) instead of the
-    /// station-only solar-irradiance heuristic, which would read "Calm night"
-    /// at noon for a cloud-only user. Optional so an older call site that
-    /// only wires `snap` still compiles; absent => the solar cascade is used.
-    /// CONTRACT: app.rs `render_hero` should pass `forecast=Some(forecast)`.
-    #[prop(optional)]
-    forecast: Option<ReadSignal<ForecastSnapshot>>,
-) -> impl IntoView {
+pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
     view! {
         <section class="hero panel is-tier-1" aria-label="Current weather">
             {move || {
@@ -107,7 +122,7 @@ pub fn Hero(
                     }
                     .into_any();
                 }
-                view! { <HeroReadings snap forecast/> }.into_any()
+                view! { <HeroReadings snap/> }.into_any()
             }}
         </section>
     }
@@ -117,58 +132,16 @@ pub fn Hero(
 /// once the snapshot carries at least one real reading (see the warming-up
 /// guard in [`Hero`]).
 #[component]
-fn HeroReadings(
-    snap: ReadSignal<Snapshot>,
-    forecast: Option<ReadSignal<ForecastSnapshot>>,
-) -> impl IntoView {
+fn HeroReadings(snap: ReadSignal<Snapshot>) -> impl IntoView {
     let prefs = use_unit_prefs();
-    // Choose the headline glyph + label + accent from the live state.
-    // Order matters: lightning > rain > hail > then either the forecast
-    // weather_code (cloud-only) or the station's solar irradiance.
-    // Glyphs are themeable stroke icons (currentColor) tinted by accent,
-    // not multicolor emoji, they read correctly in dark/light/hc.
-    let condition = move || -> (&'static str, &'static str, &'static str) {
-        let s = snap.get();
-        // Live station / community sensors always win when they actually
-        // observe weather, regardless of source: a real strike or measured
-        // rain rate is ground truth over any model.
-        if s.lightning_count_last_min > 0 || s.lightning_strikes_last_hour > 0 {
-            return ("cloud-lightning", "Thunderstorm", "var(--accent-lightning)");
-        } else if s.has_live_station && (s.precip_type == 1 || s.rain_intensity_in_hr > 0.0) {
-            // Only a LIVE station observing precip earns the "Raining" headline.
-            // On a cloud-only deploy (PirateWeather etc.) the bus path can write a
-            // model-derived rain_intensity_in_hr; treating that as an OBSERVATION
-            // would claim "Raining" off a forecast fill, so we fall through to the
-            // forecast weather_code glyph below. Mirrors the irrigation RainingNow
-            // badge's rain_is_live discipline (rain counts as "now" only when a
-            // station measured it).
-            return ("cloud-rain", "Raining", "var(--accent-rain)");
-        } else if s.has_live_station && s.precip_type == 2 {
-            return ("hail", "Hail", "var(--accent-cool)");
-        }
-        // Cloud-only (no station): drive the headline from the forecast's
-        // current weather_code so a foggy / rainy / snowy / overcast day reads
-        // correctly. The solar-irradiance heuristic below is station-shaped
-        // and would mislabel a cloud-only deployment ("Calm night" at noon).
-        if is_cloud_only(&s) {
-            if let Some(fc) = forecast {
-                let f = fc.get();
-                if let Some(cur) = f.hourly.first() {
-                    let is_day = is_day_now(&f, &s);
-                    let (g, label) = weather_code_glyph(cur.weather_code, is_day);
-                    return (g, label, accent_for_code(cur.weather_code));
-                }
-            }
-        }
-        // Station path (or cloud-only with no forecast yet): solar irradiance.
-        if s.solar_w_m2 > 600.0 {
-            ("sun", "Sunny", "var(--accent-warm)")
-        } else if s.solar_w_m2 > 150.0 {
-            ("cloud-sun", "Partly sunny", "var(--accent-warm)")
-        } else if s.solar_w_m2 > 30.0 {
-            ("cloud", "Cloudy", "var(--text-dim)")
-        } else {
-            ("moon", "Calm night", "var(--accent-cool)")
+    // The headline glyph + label + accent. Glyphs are themeable stroke icons
+    // (currentColor) tinted by accent, so they read correctly in every theme.
+    let condition = move || -> (&'static str, String, &'static str) {
+        match snap.get().sky.as_ref() {
+            Some(sky) => sky_presentation(sky),
+            // Served snapshots always carry a sky; this is only a stream that
+            // predates it.
+            None => ("cloud", "Sky not reported".into(), DIM),
         }
     };
 
@@ -207,7 +180,7 @@ fn HeroReadings(
                 ("→", "trend--flat")
             }
         } else {
-            ("→", "trend--flat")
+            ("—", "trend--pending")
         };
         view! {
             <crate::components::ui::StatTile layout="inline" role="listitem" label="PRESS"
@@ -232,6 +205,15 @@ fn HeroReadings(
                         <TemperatureValue value=Signal::derive(move || snap.get().air_temp_f)/>
                     </div>
                     <div class="hero-condition">{move || condition().1}</div>
+                    {move || snap.get().sky.map(|sky| {
+                        let (label, explanation) = sky_evidence(&sky);
+                        view! {
+                            <details class="hero-sky-evidence">
+                                <summary>{label}<span aria-hidden="true">" ⓘ"</span></summary>
+                                <p>{explanation}</p>
+                            </details>
+                        }
+                    })}
                     // Provenance: a subtle "via {source}" chip on the headline
                     // reading, deep-linking to the per-field data-sources page so
                     // provenance surfaces at the point of consumption. Renders
@@ -240,12 +222,12 @@ fn HeroReadings(
                         <a
                             class="hero-source"
                             href="/settings?section=devices"
-                            title="Where this reading comes from"
+                            title="Temperature source"
                             style="display:inline-flex;align-items:center;gap:0.2em;font-size:0.7rem;\
                                    line-height:1;color:var(--text-dim);text-decoration:none;\
                                    opacity:0.85;margin-top:0.15rem;"
                         >
-                            "via "{provenance}
+                            "Temperature via "{provenance}
                         </a>
                     </Show>
                 </div>
@@ -284,5 +266,72 @@ fn HeroReadings(
                     value=Signal::derive(move || fmt_rain_rate(snap.get().rain_intensity_in_hr, prefs.get()))/>
                 {pressure_chip}
             </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::sky::SkyBasis;
+
+    fn sky(condition: SkyCondition, phase: Option<SunPhase>, windy: bool) -> SkyNow {
+        SkyNow {
+            condition,
+            phase,
+            is_day: phase.map(|p| p != SunPhase::Night),
+            cloud_cover_pct: None,
+            cover_basis: SkyBasis::None,
+            precipitating: false,
+            windy,
+            at_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn night_and_day_draw_their_own_sky() {
+        let night = Some(SunPhase::Night);
+        let day = Some(SunPhase::Day);
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::Clear, night, false)).1,
+            "Clear"
+        );
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::Clear, night, false)).0,
+            "moon"
+        );
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::Clear, day, false)).1,
+            "Sunny"
+        );
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::MostlyClear, night, false)).0,
+            "cloud-moon"
+        );
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::Overcast, day, false)).1,
+            "Overcast"
+        );
+    }
+
+    #[test]
+    fn an_unknown_sky_names_the_sun_instead_of_guessing() {
+        let label = |phase| sky_presentation(&sky(SkyCondition::Unknown, phase, false)).1;
+        assert_eq!(label(Some(SunPhase::Dawn)), "Sunrise");
+        assert_eq!(label(Some(SunPhase::Dusk)), "Sunset");
+        assert_eq!(label(Some(SunPhase::Night)), "Night");
+        assert_eq!(label(None), "Sky not reported");
+    }
+
+    #[test]
+    fn wind_qualifies_the_sky() {
+        let night = Some(SunPhase::Night);
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::PartlyCloudy, night, true)).1,
+            "Partly cloudy, windy"
+        );
+        assert_eq!(
+            sky_presentation(&sky(SkyCondition::Unknown, None, true)).1,
+            "Windy"
+        );
     }
 }

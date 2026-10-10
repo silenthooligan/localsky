@@ -181,7 +181,10 @@ pub struct HourlyEntry {
     pub wind_dir_deg: u32,
     #[serde(default)]
     pub humidity_pct: Option<u32>,
-    pub cloud_cover_pct: u32,
+    /// Sky cover for the hour, percent. `None` when the provider gave none:
+    /// a missing value once serialized as 0, which reads as a clear sky.
+    #[serde(default)]
+    pub cloud_cover_pct: Option<u32>,
     // ---- Extended variables (2026-07, Open-Meteo only; serde defaults =
     // "unknown" for other providers and pre-upgrade persisted caches). ----
     /// FAO-56 reference ET for this hour, inches. Summing the hours since
@@ -612,6 +615,11 @@ impl ForecastSnapshot {
             }
             if h.visibility_ft == 0.0 {
                 h.visibility_ft = dh.visibility_ft;
+            }
+            // Sky cover the owner did not send (NWS outside its grid data,
+            // a provider gap) comes from the donor instead of reading clear.
+            if h.cloud_cover_pct.is_none() {
+                h.cloud_cover_pct = dh.cloud_cover_pct;
             }
             if h.pressure_msl_hpa == 0.0 {
                 h.pressure_msl_hpa = dh.pressure_msl_hpa;
@@ -1645,6 +1653,29 @@ mod tests {
         owner.graft_extended_from(&donor, crate::engine::calendar::Calendar::utc());
         // Three days back was wet, so the dry stretch is three days.
         assert_eq!(owner.days_since_significant_rain(0.0), 3);
+    }
+
+    /// Missing sky cover comes from the donor; the owner's own cover stays.
+    #[test]
+    fn the_graft_fills_missing_cloud_cover_but_keeps_the_owners() {
+        let hour = |time_epoch, cloud_cover_pct| HourlyEntry {
+            time_epoch,
+            cloud_cover_pct,
+            ..Default::default()
+        };
+        let mut owner = ForecastSnapshot {
+            timezone: "America/New_York".into(),
+            hourly: vec![hour(3600, None), hour(7200, Some(10))],
+            ..Default::default()
+        };
+        let donor = ForecastSnapshot {
+            timezone: "America/New_York".into(),
+            hourly: vec![hour(3600, Some(60)), hour(7200, Some(90))],
+            ..Default::default()
+        };
+        owner.graft_extended_from(&donor, crate::engine::calendar::Calendar::utc());
+        assert_eq!(owner.hourly[0].cloud_cover_pct, Some(60));
+        assert_eq!(owner.hourly[1].cloud_cover_pct, Some(10));
     }
 
     /// A provider that sends its own history keeps it.

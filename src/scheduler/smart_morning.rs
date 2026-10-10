@@ -88,7 +88,7 @@ use crate::controllers::registry::ControllerRegistry;
 use crate::engine::cycle_soak;
 use crate::engine::interleave;
 use crate::engine::sprinkler_catalog::effective_precip_rate_mm_hr;
-use crate::engine::sunrise::sunrise_utc;
+use crate::engine::sunrise::sunrise_on_local_day;
 use crate::persistence::runs::{NewRun, RunsStore};
 use crate::persistence::ActiveRunsStore;
 use crate::ports::irrigation_controller::IrrigationController;
@@ -237,7 +237,12 @@ pub fn spawn(
                 policy.duration_quantum_s,
             );
 
-            let sunrise = match sunrise_utc(today, lat, lon) {
+            let sunrise = match sunrise_on_local_day(
+                crate::engine::clock::CivilDay::from_naive(today),
+                lat,
+                lon,
+                crate::timeutil::deployment_calendar(),
+            ) {
                 Some(s) => s,
                 None => {
                     continue;

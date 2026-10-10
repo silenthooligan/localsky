@@ -8,6 +8,29 @@ All paths below use `/api/v1`. Responses use field-named units, regardless of di
 
 The legacy numeric fields require their validity context. Check `air_temp_live_epoch`, `wind_live_epoch`, `rh_live_epoch`, and `rain_live_epoch` where applicable. `last_packet_epoch` alone does not establish freshness for every field.
 
+`sky` is evaluated from fresh readings whenever a snapshot is served. The live stream also refreshes it every 30 seconds and when forecasts change, so day/night and expired evidence update even when sensors are silent. Day and night use NOAA/Meeus solar position at the configured location, including polar day/night. Sunrise scheduling uses the configured local date, including date-line and fractional-hour zones.
+
+Sky cover prefers a station's cloud report, then a qualitative estimate from measured sunlight, then a provider's current model, then a forecast hour fetched within the last six hours. Sunlight is compared with the Haurwitz clear-sky model; shade, aerosols and sensor placement affect that estimate. It is not a cloud-fraction measurement. Missing or unrecognized provider codes remain unknown.
+
+Precipitation requires a fresh gauge/radar/hail reading, not a forecast chance. Rain rates may represent an observation interval rather than an instantaneous measurement. A surface temperature alone cannot establish snow, sleet or freezing rain, so the classifier does not infer those types. `thunderstorm` requires a strike within 10 miles (16 km) and the last 15 minutes; future-dated or unlocated strikes do not establish a nearby storm. Low visibility alone is `low_visibility`, because fog, smoke and dust can all reduce it.
+
+| Field | Meaning |
+|---|---|
+| `condition` | `clear`, `mostly_clear`, `partly_cloudy`, `mostly_cloudy`, `overcast`, `fog`, `low_visibility`, `light_rain`, `rain`, `heavy_rain`, `snow`, `wintry_mix`, `hail`, `thunderstorm` or `unknown`; clients should tolerate new values |
+| `phase` | `day`, `night`, `dawn` or `dusk` (sun above the horizon but low); null without a site location |
+| `is_day` | From the sun at the configured site; null without a valid location |
+| `cloud_cover_pct` | Reported/modelled cloud fraction, percent; null for sunlight-only estimates or unavailable cover |
+| `cover_basis` | `measured_sunlight`, `observation`, `model`, `forecast` or `none` |
+| `precipitating` | A fresh measured precipitation reading is positive |
+| `windy` | Sustained wind of at least 20 mph or gusts of at least 30 mph |
+| `at_epoch` | When the evidence was evaluated |
+
+`cloud_cover_pct` and `visibility_mi` on the snapshot are the current values from whichever source reports them (a sky sensor, a station report or a model's analysis), null when none does.
+
+`feels_like_f` uses the NWS heat-index eligibility check and humidity corrections, or wind chill at/below 50°F with wind above 3 mph. Otherwise it uses air temperature. `wet_bulb_f` is a Stull sea-level estimate, not a WBGT heat-stress measurement: it is unavailable outside -20 to 50°C and 5 to 100% RH, or in the cold/dry corner (below 0°C and 20% RH). Saturation gives the air temperature. These calculations require fresh inputs: missing humidity is not 0%, and missing wind cannot establish calm conditions for wind chill. A fresh reported `dew_point_f` is preferred; otherwise it is derived from fresh temperature and humidity. All three fields can be null; clients must preserve unavailable values.
+
+References: [NOAA solar calculations](https://gml.noaa.gov/grad/solcalc/calcdetails.html), [Haurwitz model](https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.clearsky.haurwitz.html), [NWS heat index](https://www.wpc.ncep.noaa.gov/html/heatindex_equation.shtml), [Stull (2011)](https://doi.org/10.1175/JAMC-D-11-0143.1). Solar event times assume a standard horizon/refraction; local terrain and atmospheric conditions can shift observed sunrise and sunset.
+
 The irrigation snapshot also exposes `current_weather` for selected temperature, humidity, and wind inputs. Each available sample includes its source, observation time, maximum age, whether it is measured, and the selection reason.
 
 **GET /stream** sends weather snapshot events. [SSE guide](api-streams.md).

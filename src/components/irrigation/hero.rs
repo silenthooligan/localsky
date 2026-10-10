@@ -70,7 +70,7 @@ pub fn no_run_eyebrow(state: crate::model::NextRunState) -> &'static str {
         NoLocation => "SETUP NEEDED",
         NoWaterPlanned => "NO WATERING PLANNED",
         NoLegalDay => "NOT A WATERING DAY",
-        NoSunrise => "POLAR NIGHT",
+        NoSunrise => "NO SUNRISE",
         At => "NO RUNS SCHEDULED",
     }
 }
@@ -81,7 +81,7 @@ pub fn no_run_headline(state: crate::model::NextRunState) -> &'static str {
         NoLocation => "No location set",
         NoWaterPlanned => "No watering in the current outlook",
         NoLegalDay => "None in 14 days",
-        NoSunrise => "No morning to aim at",
+        NoSunrise => "Sunrise schedule unavailable",
         At => "No run scheduled",
     }
 }
@@ -764,11 +764,11 @@ mod next_run_state_tests {
     }
 
     #[test]
-    fn no_sunrise_reads_as_the_season() {
-        assert_eq!(no_run_eyebrow(NextRunState::NoSunrise), "POLAR NIGHT");
+    fn no_sunrise_does_not_assume_polar_night() {
+        assert_eq!(no_run_eyebrow(NextRunState::NoSunrise), "NO SUNRISE");
         assert_eq!(
             no_run_headline(NextRunState::NoSunrise),
-            "No morning to aim at"
+            "Sunrise schedule unavailable"
         );
         assert_eq!(
             no_run_tag(NextRunState::NoSunrise),

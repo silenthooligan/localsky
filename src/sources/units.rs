@@ -82,6 +82,18 @@ pub fn to_canonical(field: WeatherField, value: f64, unit: Option<&str>) -> f64 
             "in" | "inch" | "inches" => crate::units::in_to_mm(value),
             _ => value, // mm / unknown = already-canonical mm
         },
+        VisibilityMi => match u.as_str() {
+            "km" => crate::units::km_to_mi(value),
+            "m" => value * 0.000_621_371,
+            "ft" | "feet" => value / 5280.0,
+            _ => value, // mi / unknown
+        },
+        // A sky sensor may report a fraction or oktas instead of percent.
+        CloudCoverPct => match u.as_str() {
+            "fraction" | "ratio" => value * 100.0,
+            "okta" | "oktas" => value / 8.0 * 100.0,
+            _ => value, // % / unknown
+        },
         // Unitless, already-canonical, or non-scalar fields: pass through.
         RhPct | SolarWm2 | UvIndex | Illuminance | WindBearingDeg | LightningCount | Pop
         | LeafWetness | RainTypeStr | ForecastDaily | ForecastHourly | RapidWindBearingDeg

@@ -66,6 +66,12 @@ struct CurrentBlock {
     /// an object `{ "1h": <mm> }`. OWM reports rain in mm even under
     /// units=imperial, so this mm/h reading is converted to in/hr downstream.
     rain: Option<RainOneHour>,
+    /// Cloud cover, percent.
+    #[serde(default)]
+    clouds: Option<f64>,
+    /// Visibility, meters.
+    #[serde(default)]
+    visibility: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,7 +172,7 @@ fn owm_to_wmo(code: u32) -> u32 {
         801 => 1,       // few clouds
         802 => 2,       // scattered clouds
         803 | 804 => 3, // broken / overcast clouds
-        _ => 0,
+        _ => u32::MAX,
     }
 }
 
@@ -175,7 +181,7 @@ fn first_wmo(weather: &[WeatherCond]) -> u32 {
         .first()
         .and_then(|w| w.id)
         .map(owm_to_wmo)
-        .unwrap_or(0)
+        .unwrap_or(u32::MAX)
 }
 
 /// Build a ForecastSnapshot from a parsed One Call response. Pulls the
@@ -251,7 +257,7 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
                 .humidity
                 .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
                 .map(|rh| rh.round() as u32),
-            cloud_cover_pct: (h.clouds.unwrap_or(0.0).round() as i64).clamp(0, 100) as u32,
+            cloud_cover_pct: h.clouds.map(|c| (c.round() as i64).clamp(0, 100) as u32),
             ..Default::default()
         })
         .collect();
@@ -316,6 +322,9 @@ impl WeatherSource for OpenWeather {
         fields.insert(WeatherField::WindBearingDeg);
         fields.insert(WeatherField::UvIndex);
         fields.insert(WeatherField::RainIntensityInHr);
+        // The model's current sky: cloud cover and visibility.
+        fields.insert(WeatherField::CloudCoverPct);
+        fields.insert(WeatherField::VisibilityMi);
         fields.insert(WeatherField::ForecastDaily);
         fields.insert(WeatherField::ForecastHourly);
         SourceCaps {
@@ -341,7 +350,9 @@ impl WeatherSource for OpenWeather {
             | WeatherField::WindGustMph
             | WeatherField::WindBearingDeg
             | WeatherField::UvIndex
-            | WeatherField::RainIntensityInHr => 25,
+            | WeatherField::RainIntensityInHr
+            | WeatherField::CloudCoverPct
+            | WeatherField::VisibilityMi => 25,
             _ => i32::MIN,
         }
     }
@@ -392,6 +403,13 @@ impl WeatherSource for OpenWeather {
                     // on units=imperial; / 25.4 -> in/hr for RainIntensityInHr.
                     if let Some(v) = c.rain.as_ref().and_then(|r| r.one_h) {
                         fields.push((WeatherField::RainIntensityInHr, crate::units::mm_to_in(v)));
+                    }
+                    // The model's current sky (cloud %, visibility m).
+                    if let Some(v) = c.clouds {
+                        fields.push((WeatherField::CloudCoverPct, v.clamp(0.0, 100.0)));
+                    }
+                    if let Some(m) = c.visibility.filter(|m| *m > 0.0) {
+                        fields.push((WeatherField::VisibilityMi, m * 0.000_621_371));
                     }
                 }
                 let mut poll = Poll::observation(&s.id, fields, now);
@@ -490,7 +508,8 @@ mod tests {
         assert_eq!(owm_to_wmo(211), 95); // thunderstorm
         assert_eq!(owm_to_wmo(741), 45); // fog
         assert_eq!(owm_to_wmo(601), 73); // snow
-        assert_eq!(owm_to_wmo(999999), 0); // unknown -> 0
+        assert_eq!(owm_to_wmo(999999), u32::MAX);
+        assert_eq!(first_wmo(&[]), u32::MAX);
     }
 
     #[test]
@@ -626,7 +645,7 @@ mod tests {
         assert!((h0.wind_mph.unwrap() - 6.0).abs() < 0.001);
         assert_eq!(h0.wind_dir_deg, 10); // 370 wrapped -> 10
         assert_eq!(h0.humidity_pct, Some(55));
-        assert_eq!(h0.cloud_cover_pct, 40);
+        assert_eq!(h0.cloud_cover_pct, Some(40));
     }
     #[test]
     fn documented_sparse_dry_rain_differs_from_null_and_malformed_amounts() {

@@ -2,6 +2,51 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-10-10
+
+### Fixed
+
+- Sunrise scheduling and forecast icons respect local dates across the date
+  line, fractional-hour timezones and polar seasons, including brief daylight
+  at the start or end of polar night, with improved solar math.
+- A missing sunrise no longer labels continuous daylight as "polar night".
+  Irrigation explains when a fixed-time schedule is needed.
+- Unknown weather codes no longer display clear skies; partly cloudy nights
+  use moon icons and heavy showers no longer show lightning.
+- Sky estimates reject stale/future data and invalid or unlocated lightning.
+  Reported clouds take priority over sunlight estimates, which no longer claim
+  a measured cloud percentage. Low visibility does not automatically mean fog,
+  and a cold thermometer does not establish snow or sleet.
+- Current sky conditions keep updating during sensor silence and immediately
+  reflect forecast changes. The weather card explains reported versus estimated
+  conditions without confusing them with the temperature's source.
+- Feels-like temperature includes NWS low/high-humidity adjustments. Wet-bulb
+  estimates stay unavailable outside their usable range, and unavailable derived
+  readings no longer break the browser's live stream. Derived temperatures need
+  fresh inputs; missing humidity and wind no longer stand in for measured zeroes.
+- The current conditions card and the Home Assistant weather entity judge the
+  sky the same way, from every source a deployment has, with or without a
+  weather station. Day and night follow the sun at your location rather than
+  how bright it is, so an overcast morning reads as cloudy, not "Calm night".
+- At night, and on installs without a light sensor, sky cover comes from
+  cloud reports: a nearby NWS station's cloud layers, a provider's current
+  cloud cover, or the forecast hour. When nothing reports the sky, the card
+  says so instead of claiming a clear night.
+- Current precipitation and nearby lightning use fresh observations. Forecast
+  cloud and fog fallback is labelled; a forecast chance of storms alone does
+  not display a current thunderstorm.
+- Forecast cloud cover is unknown rather than 0% when a provider gives none,
+  and NWS forecasts now include hourly sky cover and visibility.
+- Updated the yanked `chacha20` and `wnaf` dependencies to compatible patch
+  releases. Existing upstream advisory exceptions remain documented.
+- Hourly forecast icons switch between day and night at local sunrise and
+  sunset instead of at fixed 06:00 and 20:00.
+
+### Added
+
+- The weather snapshot API adds `sky`, `cloud_cover_pct` and `visibility_mi`
+  (API 2.5.0).
+
 ## [1.0.1] - 2026-10-05
 
 ### Added

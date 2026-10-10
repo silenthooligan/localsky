@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "LocalSky API read profile",
-    "version": "2.4.0",
+    "version": "2.5.0",
     "description": "Selected read endpoints for dashboards, automation, and AI connectors. Additional response fields are allowed. This profile does not grant read-only credentials: LocalSky bearer tokens can authorize writes outside this profile.",
     "license": {
       "name": "Apache-2.0",
@@ -578,6 +578,90 @@
           "selection_reason"
         ]
       },
+      "Sky": {
+        "type": "object",
+        "properties": {
+          "condition": {
+            "type": "string",
+            "enum": [
+              "clear",
+              "mostly_clear",
+              "partly_cloudy",
+              "mostly_cloudy",
+              "overcast",
+              "fog",
+              "low_visibility",
+              "light_rain",
+              "rain",
+              "heavy_rain",
+              "snow",
+              "wintry_mix",
+              "hail",
+              "thunderstorm",
+              "unknown"
+            ]
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "day",
+              "night",
+              "dawn",
+              "dusk",
+              null
+            ]
+          },
+          "is_day": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "cloud_cover_pct": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "cover_basis": {
+            "type": "string",
+            "enum": [
+              "measured_sunlight",
+              "observation",
+              "model",
+              "forecast",
+              "none"
+            ]
+          },
+          "precipitating": {
+            "type": "boolean"
+          },
+          "windy": {
+            "type": "boolean"
+          },
+          "at_epoch": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": true,
+        "description": "The current condition, judged when the snapshot is served from fresh readings, the sun at the site and the forecast hour. Precipitation appears only when observed; unknown means no sky evidence.",
+        "required": [
+          "condition",
+          "phase",
+          "is_day",
+          "cloud_cover_pct",
+          "cover_basis",
+          "precipitating",
+          "windy",
+          "at_epoch"
+        ]
+      },
       "WeatherSnapshot": {
         "type": "object",
         "properties": {
@@ -624,6 +708,39 @@
           },
           "has_live_station": {
             "type": "boolean"
+          },
+          "cloud_cover_pct": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "visibility_mi": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "feels_like_f": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "wet_bulb_f": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "dew_point_f": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "sky": {
+            "$ref": "#/components/schemas/Sky"
           }
         },
         "additionalProperties": true,

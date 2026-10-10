@@ -10,6 +10,8 @@
 pub mod arbitration;
 pub mod derived;
 pub mod live_store;
+#[cfg(feature = "ssr")]
+pub mod sky;
 
 // Every item in `arbitration` is ssr-only, so the glob re-export is
 // empty in a hydrate build and warns there. Gate it with its contents.

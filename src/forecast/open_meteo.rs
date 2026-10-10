@@ -333,7 +333,7 @@ fn forecast_url(base: &str, lat: f64, lon: f64, model: &str, past_days: u32) -> 
     let mut url = format!(
         "{base}/v1/forecast?\
          latitude={lat}&longitude={lon}&\
-         current=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,wind_speed_10m,wind_gusts_10m,wind_direction_10m,surface_pressure,precipitation,precipitation_probability,weather_code,cloud_cover,shortwave_radiation,uv_index&\
+         current=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,wind_speed_10m,wind_gusts_10m,wind_direction_10m,surface_pressure,precipitation,precipitation_probability,weather_code,cloud_cover,shortwave_radiation,uv_index,visibility&\
          daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,et0_fao_evapotranspiration,sunrise,sunset,precipitation_hours,rain_sum,showers_sum,snowfall_sum,sunshine_duration,apparent_temperature_max,cape_max,shortwave_radiation_sum&\
          hourly=weather_code,temperature_2m,apparent_temperature,precipitation,precipitation_probability,wind_speed_10m,wind_direction_10m,relative_humidity_2m,cloud_cover,et0_fao_evapotranspiration,vapour_pressure_deficit,soil_moisture_3_to_9cm,soil_moisture_9_to_27cm,soil_temperature_6cm,wind_gusts_10m,snowfall,snow_depth,freezing_level_height,visibility,pressure_msl,wet_bulb_temperature_2m&\
          temperature_unit=fahrenheit&\
@@ -572,6 +572,9 @@ struct RawCurrent {
     precipitation_probability: Option<f64>,
     #[serde(default)]
     cloud_cover: Option<f64>,
+    /// Current visibility, feet under the imperial request.
+    #[serde(default)]
+    visibility: Option<f64>,
     /// Shortwave (global horizontal) solar radiation, W/m². Gives cloud-only
     /// deployments a real solar reading (the hero condition + Solar panel), since
     /// no LAN station owns solar_w_m2 in that case.
@@ -676,7 +679,8 @@ struct RawHourly {
     wind_direction_10m: Vec<u32>,
     #[serde(default)]
     relative_humidity_2m: Vec<Option<f64>>,
-    cloud_cover: Vec<u32>,
+    #[serde(default)]
+    cloud_cover: Vec<Option<u32>>,
     // ---- Extended hourly variables (2026-07), same tolerance rules. ----
     #[serde(default)]
     et0_fao_evapotranspiration: Vec<Option<f64>>,
@@ -743,7 +747,7 @@ impl Raw {
         let hourly: Vec<HourlyEntry> = (0..self.hourly.time.len())
             .map(|i| HourlyEntry {
                 time_epoch: self.hourly.time.get(i).copied().unwrap_or(0),
-                weather_code: pick(&self.hourly.weather_code, i),
+                weather_code: self.hourly.weather_code.get(i).copied().unwrap_or(u32::MAX),
                 temp_f: pick(&self.hourly.temperature_2m, i).filter(|t| t.is_finite()),
                 apparent_temp_f: pick(&self.hourly.apparent_temperature, i),
                 // Open-Meteo stamps accumulations/probability at interval END.
@@ -800,7 +804,7 @@ impl Raw {
                 day_marker: crate::engine::clock::DayMarker::inside_local_day(
                     self.daily.time.get(i).copied().unwrap_or(0),
                 ),
-                weather_code: pick(&self.daily.weather_code, i),
+                weather_code: self.daily.weather_code.get(i).copied().unwrap_or(u32::MAX),
                 temp_max_f: pick(&self.daily.temperature_2m_max, i).filter(|t| t.is_finite()),
                 temp_min_f: pick(&self.daily.temperature_2m_min, i).filter(|t| t.is_finite()),
                 // Filled below by backfill_daily_humidity from the hourly window
@@ -908,6 +912,8 @@ pub const OPEN_METEO_CURRENT_FIELDS: &[crate::ports::weather_source::WeatherFiel
     WeatherField::SolarWm2,
     WeatherField::UvIndex,
     WeatherField::Et0Today,
+    WeatherField::CloudCoverPct,
+    WeatherField::VisibilityMi,
 ];
 
 impl Raw {
@@ -1050,9 +1056,14 @@ impl Raw {
         {
             fields.push((WeatherField::Et0Today, *et0_in * 25.4));
         }
-        // weather_code / cloud_cover are not scalar merge fields; cloud_cover is
-        // requested for parity but has no WeatherField, so it is not emitted.
-        let _ = cur.cloud_cover;
+        // The model's current analysis of the sky. The sky judges it below an
+        // observation, by this source's model nature.
+        if let Some(c) = cur.cloud_cover {
+            fields.push((WeatherField::CloudCoverPct, c));
+        }
+        if let Some(ft) = cur.visibility.filter(|v| *v > 0.0) {
+            fields.push((WeatherField::VisibilityMi, ft / 5280.0));
+        }
 
         // Invariant (the list-collapse contract): every field emitted here is a
         // member of OPEN_METEO_CURRENT_FIELDS, the const runtime.rs returns as the
@@ -1142,7 +1153,8 @@ mod tests {
             "https://api.open-meteo.com/v1/forecast?latitude=28.5&longitude=-81.4",
             "&current=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,",
             "wind_speed_10m,wind_gusts_10m,wind_direction_10m,surface_pressure,",
-            "precipitation,precipitation_probability,weather_code,cloud_cover,shortwave_radiation,uv_index",
+            "precipitation,precipitation_probability,weather_code,cloud_cover,shortwave_radiation,uv_index,",
+            "visibility",
             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,",
             "precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,",
             "et0_fao_evapotranspiration,sunrise,sunset,",
@@ -1253,7 +1265,8 @@ mod tests {
             "weather_code": 3,
             "cloud_cover": 75.0,
             "shortwave_radiation": 520.0,
-            "uv_index": 6.5
+            "uv_index": 6.5,
+            "visibility": 52800.0
         },
         "daily": {
             "time": [1, 2, 3, 4],
@@ -1624,6 +1637,8 @@ mod tests {
             F::SolarWm2,
             F::UvIndex,
             F::Et0Today,
+            F::CloudCoverPct,
+            F::VisibilityMi,
         ];
         assert_eq!(OPEN_METEO_CURRENT_FIELDS, &expected[..]);
         assert!(OPEN_METEO_CURRENT_FIELDS.contains(&F::RainTodayIn));

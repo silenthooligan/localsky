@@ -375,7 +375,10 @@ use serde::{Deserialize, Serialize};
 /// A fired rule can be superseded; the trace verdict remains authoritative.
 /// 2.3.0: declared forecast models, inclusive window queries and hourly archive.
 /// 2.4.0: optional structured source failures in privileged health/diagnostics.
-pub const API_VERSION: &str = "2.4.0";
+/// 2.5.0: the weather snapshot adds `sky`, the current condition judged from
+/// every source, plus `cloud_cover_pct` and `visibility_mi`. Forecast hourly
+/// `cloud_cover_pct` is null when the provider gave none.
+pub const API_VERSION: &str = "2.5.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

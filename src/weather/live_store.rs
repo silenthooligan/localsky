@@ -33,8 +33,11 @@ use {
 pub struct Snapshot {
     pub last_packet_epoch: i64,
     pub air_temp_f: f64,
+    #[serde(deserialize_with = "crate::weather::derived::deserialize_optional_reading")]
     pub feels_like_f: f64,
+    #[serde(deserialize_with = "crate::weather::derived::deserialize_optional_reading")]
     pub dew_point_f: f64,
+    #[serde(deserialize_with = "crate::weather::derived::deserialize_optional_reading")]
     pub wet_bulb_f: f64,
     pub rh_pct: f64,
     pub pressure_inhg: f64,
@@ -170,6 +173,19 @@ pub struct Snapshot {
     /// how this class of misconfiguration survives for months.
     #[serde(default)]
     pub rain_today_suspect_source: Option<String>,
+    /// Current sky cover, percent, from whichever source owns it: a sky
+    /// sensor, a nearby station's cloud report, or a model's current
+    /// analysis. `None` when no source reports it; never read as clear.
+    #[serde(default)]
+    pub cloud_cover_pct: Option<f64>,
+    /// Current horizontal visibility, miles. `None` when not reported.
+    #[serde(default)]
+    pub visibility_mi: Option<f64>,
+    /// The sky right now, judged from every fresh reading, the sun at the
+    /// site and the forecast hour (`engine::sky`). Computed when the
+    /// snapshot is served, so it is `None` inside the store.
+    #[serde(default)]
+    pub sky: Option<crate::engine::sky::SkyNow>,
 }
 
 /// Whether a live LOCAL weather station is actually PRESENT for this deployment,
@@ -311,6 +327,10 @@ pub struct RainOwner {
     pub is_fresh: bool,
 }
 
+/// How far back the sky's sunlight average reaches.
+#[cfg(feature = "ssr")]
+const SOLAR_WINDOW_S: i64 = 10 * 60;
+
 /// Slack before a fall in today's rain total counts as a fall.
 ///
 /// A gauge that reports hundredths can jitter in the last place on a
@@ -381,6 +401,9 @@ pub struct LiveWeatherStore {
     pub(super) max_ages: ArcSwap<HashMap<String, i32>>,
     pub(super) rain_natures: ArcSwap<HashMap<String, crate::model::RainNature>>,
     observed_condition_fields: ArcSwap<HashMap<String, [bool; 3]>>,
+    /// The configured site, for the sky's sun position. Set at boot and on
+    /// hot reload, like the priorities.
+    site: Mutex<Option<(f64, f64)>>,
     current_samples:
         Mutex<HashMap<crate::ports::weather_source::WeatherField, CurrentWeatherSample>>,
     /// PER-FIELD ownership: snapshot-field key -> (owning live source's priority,
@@ -460,6 +483,9 @@ pub struct LiveWeatherStore {
 #[derive(Default)]
 struct RollingBuffers {
     pressure: VecDeque<(i64, f64)>, // last 6h of pressure samples
+    // Live irradiance samples for the sky's sunlight average. Only live
+    // sensors land here: a model's radiation is not a measurement.
+    solar: VecDeque<(i64, f64)>,
     strikes: VecDeque<StrikeEvent>, // last hour of strikes
     // Independent totals prevent a backup gauge's minutes entering the
     // primary's total. A source/epoch is integrated at most once.
@@ -513,6 +539,7 @@ impl LiveWeatherStore {
             max_ages: ArcSwap::from(Arc::new(HashMap::new())),
             rain_natures: ArcSwap::from(Arc::new(HashMap::new())),
             observed_condition_fields: ArcSwap::from(Arc::new(HashMap::new())),
+            site: Mutex::new(None),
             current_samples: Mutex::new(HashMap::new()),
             field_owners: Mutex::new(HashMap::new()),
             fill_owners: Mutex::new(HashMap::new()),
@@ -673,6 +700,41 @@ impl LiveWeatherStore {
             .unwrap()
             .get(key)
             .map(|(_, epoch, label)| make(*epoch, label, false))
+    }
+
+    /// Owner, nature and freshness of any current-conditions field, keyed by
+    /// its snapshot-field name (`solar_w_m2`, `cloud_cover_pct`, ...). A zero
+    /// in the snapshot cannot say whether anything measured it; this can.
+    pub fn field_owner(&self, key: &'static str, at: i64) -> Option<RainOwner> {
+        self.rain_field_owner(key, at)
+    }
+
+    /// Mean live irradiance over the last `SOLAR_WINDOW_S`, while a live
+    /// sensor freshly owns solar. Averaging keeps passing clouds from
+    /// flipping the sky between sunny and cloudy minute to minute.
+    pub fn measured_solar_mean(&self, at: i64) -> Option<f64> {
+        let owner = self.field_owner("solar_w_m2", at)?;
+        if !(owner.is_live && owner.is_fresh) {
+            return None;
+        }
+        let roll = self.rolling.lock().unwrap();
+        let (sum, count) = roll
+            .solar
+            .iter()
+            .filter(|(t, w)| {
+                *t >= at.saturating_sub(SOLAR_WINDOW_S) && *t <= at && w.is_finite() && *w >= 0.0
+            })
+            .fold((0.0, 0u32), |(sum, n), (_, w)| (sum + w, n + 1));
+        (count > 0).then(|| sum / f64::from(count))
+    }
+
+    /// The configured site (latitude, longitude), for the sun's position.
+    pub fn set_site(&self, site: Option<(f64, f64)>) {
+        *self.site.lock().unwrap() = site;
+    }
+
+    pub fn site(&self) -> Option<(f64, f64)> {
+        *self.site.lock().unwrap()
     }
 
     /// Owner and freshness travel with the current rain rate.
@@ -929,6 +991,7 @@ impl LiveWeatherStore {
         let mut owns_rain = false;
         let mut wrote_et0 = false;
         let mut wrote_pressure: Option<f64> = None;
+        let mut wrote_solar: Option<f64> = None;
         // Keys this source wrote this call -> recorded as provenance after the
         // owners lock drops (a live claim or a forecast fill both count).
         let mut prov_keys: Vec<&'static str> = Vec::new();
@@ -1119,7 +1182,10 @@ impl LiveWeatherStore {
                     snap.pressure_inhg = v;
                     wrote_pressure = Some(v);
                 }
-                F::SolarWm2 => snap.solar_w_m2 = v,
+                F::SolarWm2 => {
+                    snap.solar_w_m2 = v;
+                    wrote_solar = Some(v);
+                }
                 F::UvIndex => snap.uv_index = v,
                 F::Illuminance => snap.illuminance_lx = v,
                 F::RainTodayIn => {
@@ -1243,6 +1309,8 @@ impl LiveWeatherStore {
                     snap.battery_pct = Snapshot::battery_pct_from_v(v);
                 }
                 F::PrecipType => snap.precip_type = v.clamp(0.0, 255.0) as u8,
+                F::CloudCoverPct => snap.cloud_cover_pct = Some(v.clamp(0.0, 100.0)),
+                F::VisibilityMi => snap.visibility_mi = Some(v.max(0.0)),
                 F::RainTypeStr | F::ForecastDaily | F::ForecastHourly => continue,
             }
             prov_keys.push(key);
@@ -1282,6 +1350,13 @@ impl LiveWeatherStore {
                 }
                 roll.pressure.push_back((at_epoch, p));
                 snap.pressure_trend_inhg = roll.pressure.iter().cloned().collect();
+            }
+            if let Some(w) = wrote_solar.filter(|_| live_current) {
+                let window_start = at_epoch - SOLAR_WINDOW_S;
+                while roll.solar.front().is_some_and(|(t, _)| *t < window_start) {
+                    roll.solar.pop_front();
+                }
+                roll.solar.push_back((at_epoch, w));
             }
             // A live reading also ages the strike ring, so the hourly
             // count decays to zero once a storm has passed rather than
@@ -3758,6 +3833,46 @@ mod current_evidence_alignment_tests {
         assert_eq!(
             crate::assembly::readings::resolve_current_conditions(&samples, None, now + 601).3,
             LiveReadings::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_station_sky_report_outlasts_its_sources_half_hour_window() {
+        // NWS reports an airport's cloud layers once an hour, late. Its
+        // 2100 s source window would hand the sky to the model for half of
+        // every hour; the observed sky holds for a report cycle instead.
+        use crate::config::region::MAX_AGE_OBSERVED_SKY_S;
+        let store = LiveWeatherStore::new();
+        store.set_rain_natures(HashMap::from([
+            ("nws".to_string(), crate::model::RainNature::Measured),
+            ("open_meteo".to_string(), crate::model::RainNature::Model),
+        ]));
+        store.set_priorities(HashMap::from([
+            ("nws".to_string(), 35),
+            ("open_meteo".to_string(), 25),
+        ]));
+        store.set_max_ages(HashMap::from([
+            ("nws".to_string(), 2100),
+            ("open_meteo".to_string(), 2100),
+        ]));
+        store.apply_source_fields(&[(F::CloudCoverPct, 100.0)], 1_000, false, "nws");
+        // Forty minutes on, past the source window but inside the sky's.
+        let later = 1_000 + 2_400;
+        store.apply_source_fields(&[(F::CloudCoverPct, 20.0)], later, false, "open_meteo");
+        assert_eq!(store.snapshot().cloud_cover_pct, Some(100.0));
+        let owner = store.field_owner("cloud_cover_pct", later).unwrap();
+        assert_eq!(owner.label, "nws");
+        assert!(owner.is_fresh);
+        // After a full report cycle with no new report, the model fills.
+        let much_later = 1_000 + MAX_AGE_OBSERVED_SKY_S as i64 + 60;
+        store.apply_source_fields(&[(F::CloudCoverPct, 20.0)], much_later, false, "open_meteo");
+        assert_eq!(store.snapshot().cloud_cover_pct, Some(20.0));
+        assert_eq!(
+            store
+                .field_owner("cloud_cover_pct", much_later)
+                .unwrap()
+                .label,
+            "open_meteo"
         );
     }
 }

@@ -172,6 +172,7 @@ pub fn field_role(field: &crate::ports::weather_source::WeatherField) -> &'stati
         F::BatteryV => "battery",
         F::PrecipType | F::RainLastMinIn => "rain",
         F::ForecastDaily | F::ForecastHourly | F::Pop => "forecast",
+        F::CloudCoverPct | F::VisibilityMi => "sky",
     }
 }
 
@@ -215,5 +216,7 @@ pub fn field_key(field: &crate::ports::weather_source::WeatherField) -> &'static
         F::BatteryV => "battery_v",
         F::PrecipType => "precip_type",
         F::RainLastMinIn => "rain_in_last_min",
+        F::CloudCoverPct => "cloud_cover_pct",
+        F::VisibilityMi => "visibility_mi",
     }
 }

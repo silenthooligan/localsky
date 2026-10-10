@@ -126,13 +126,9 @@ pub mod next_run {
         Sunrise math works anywhere on earth, but not nowhere in particular. \
         Add your location under Settings and the schedule fills itself in.";
 
-    /// Polar latitude, no sunrise on the days in range.
-    ///
-    /// Playful, because the alternative is a blank screen and a support
-    /// ticket. The second sentence is the actually useful part.
-    pub const NO_SUNRISE: &str = "The sun is not scheduled to rise here for a while. \
-        Watering runs before dawn, so there is no morning to aim at. \
-        Nothing is broken, and normal service resumes with the daylight.";
+    /// No sunrise can mean continuous daylight as well as polar night.
+    pub const NO_SUNRISE: &str = "Sunrise-based watering pauses during continuous \
+        daylight or darkness. Set a fixed time in Settings → Manual schedules.";
 
     /// Every day in the horizon is refused by a restriction.
     ///
@@ -250,9 +246,8 @@ mod tests {
     fn playful_copy_still_tells_the_operator_what_to_do() {
         assert!(next_run::NO_LOCATION.contains("Settings"));
         assert!(idle::NO_ZONES.contains("Add a zone"));
-        // And says plainly that nothing is wrong, because a polar winter
-        // looks exactly like a broken scheduler from the outside.
-        assert!(next_run::NO_SUNRISE.contains("Nothing is broken"));
+        assert!(next_run::NO_SUNRISE.contains("Manual schedules"));
+        assert!(next_run::NO_SUNRISE.contains("daylight or darkness"));
     }
 
     /// Watch-only is described by who it is FOR, not by what hardware

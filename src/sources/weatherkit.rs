@@ -125,6 +125,8 @@ struct CurrentWeather {
     uv_index: Option<f64>,
     cloud_cover: Option<f64>,             // 0..1
     precipitation_intensity: Option<f64>, // mm/h (current rain rate)
+    #[serde(default)]
+    visibility: Option<f64>, // m
 }
 
 /// Apple's minute-by-minute nowcast (the "next hour" precipitation forecast).
@@ -197,20 +199,21 @@ struct HourWeather {
 }
 
 /// Map an Apple WeatherKit conditionCode string to a WMO code for the shared
-/// glyph registry. Loose mapping; unknown codes fall back to 0 (clear).
+/// glyph registry. Unmapped conditions stay unknown rather than clear.
 fn apple_to_wmo(code: &str) -> u32 {
     match code {
-        "Clear" | "MostlyClear" | "Hot" | "Frigid" => 0,
+        "Clear" => 0,
+        "MostlyClear" => 1,
         "PartlyCloudy" => 2,
         "MostlyCloudy" | "Cloudy" => 3,
         "Fog" => 45,
-        "Haze" | "Smoke" | "Dust" => 45,
         "Drizzle" => 51,
         "FreezingDrizzle" => 56,
         "Rain" | "MixedRainfall" => 63,
         "HeavyRain" => 65,
         "FreezingRain" => 66,
-        "Showers" | "ScatteredShowers" | "IsolatedThunderstorms" => 80,
+        "Showers" | "ScatteredShowers" => 80,
+        "IsolatedThunderstorms" => 95,
         "Sleet" | "MixedRainAndSleet" | "MixedSnowAndSleet" => 67,
         "Flurries" | "Snow" | "SnowShowers" | "ScatteredSnowShowers" | "MixedRainAndSnow" => 73,
         "HeavySnow" | "Blizzard" | "BlowingSnow" => 75,
@@ -220,12 +223,12 @@ fn apple_to_wmo(code: &str) -> u32 {
         | "SevereThunderstorm"
         | "Hurricane"
         | "TropicalStorm" => 95,
-        _ => 0,
+        _ => u32::MAX,
     }
 }
 
 fn wmo_opt(code: &Option<String>) -> u32 {
-    code.as_deref().map(apple_to_wmo).unwrap_or(0)
+    code.as_deref().map(apple_to_wmo).unwrap_or(u32::MAX)
 }
 
 /// Build a ForecastSnapshot from a WeatherKit response.
@@ -302,7 +305,7 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                         .humidity
                         .filter(|rh| rh.is_finite() && (0.0..=1.0).contains(rh))
                         .map(frac_to_pct),
-                    cloud_cover_pct: frac_to_pct(h.cloud_cover.unwrap_or(0.0)),
+                    cloud_cover_pct: h.cloud_cover.map(frac_to_pct),
                     ..Default::default()
                 })
                 .collect()
@@ -366,11 +369,13 @@ fn current_fields(resp: &WkResponse) -> Vec<(WeatherField, f64)> {
     if let Some(v) = rain_mm_hr {
         f.push((WeatherField::RainIntensityInHr, mm_to_in(v)));
     }
-    // Cloud cover (0..1 -> percent). Only emitted if the shared WeatherField
-    // catalog gains a CloudCoverPct current-conditions field; today the enum
-    // has no such variant, so currentWeather.cloudCover stays parsed-but-unused
-    // here (it still rides through forecastHourly.cloudCover -> cloud_cover_pct).
-    let _ = c.cloud_cover;
+    // The model's current sky (cloud cover 0..1 -> percent, visibility m).
+    if let Some(v) = c.cloud_cover {
+        f.push((WeatherField::CloudCoverPct, frac_to_pct(v) as f64));
+    }
+    if let Some(m) = c.visibility.filter(|m| *m > 0.0) {
+        f.push((WeatherField::VisibilityMi, m * 0.000_621_371));
+    }
     let _ = c.temperature_apparent; // apparent temp is recomputed downstream
     f
 }
@@ -450,6 +455,9 @@ impl WeatherSource for WeatherKit {
         fields.insert(WeatherField::WindBearingDeg);
         fields.insert(WeatherField::UvIndex);
         fields.insert(WeatherField::RainIntensityInHr);
+        // The model's current sky: cloud cover and visibility.
+        fields.insert(WeatherField::CloudCoverPct);
+        fields.insert(WeatherField::VisibilityMi);
         fields.insert(WeatherField::ForecastDaily);
         fields.insert(WeatherField::ForecastHourly);
         SourceCaps {
@@ -472,7 +480,9 @@ impl WeatherSource for WeatherKit {
             | WeatherField::WindGustMph
             | WeatherField::WindBearingDeg
             | WeatherField::UvIndex
-            | WeatherField::RainIntensityInHr => 25,
+            | WeatherField::RainIntensityInHr
+            | WeatherField::CloudCoverPct
+            | WeatherField::VisibilityMi => 25,
             _ => i32::MIN,
         }
     }
@@ -674,7 +684,7 @@ mod tests {
         let h = &s.hourly[0];
         assert!((h.temp_f.unwrap() - 77.0).abs() < 0.01, "25C -> 77F");
         assert_eq!(h.humidity_pct, Some(60));
-        assert_eq!(h.cloud_cover_pct, 75);
+        assert_eq!(h.cloud_cover_pct, Some(75));
         assert_eq!(h.precip_probability, Some(20));
         assert!((h.precip_in.unwrap() - 0.1).abs() < 0.01, "2.54mm -> 0.1in");
     }

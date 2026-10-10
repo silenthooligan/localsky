@@ -42,6 +42,16 @@ For HA's local WeatherFlow precipitation sensor, choose **Rain last minute (accu
 
 Measured rain history and forecast rain stay distinct in watering explanations and the API.
 
+## The current sky
+
+The weather card and Home Assistant show one judgement of the sky, built from whatever your sources report:
+
+- Rain, snow, hail and thunderstorms appear only when a gauge, radar or lightning sensor observes them. A forecast's chance of storms is not a storm.
+- Day and night follow the sun at your configured location, so an overcast morning reads as a cloudy day rather than a night.
+- In daylight, a light sensor's reading is compared with clear-sky sunlight for the sun's height. At night, or without a light sensor, sky cover comes from a nearby station's cloud report, then a provider's current cloud cover, then the forecast hour.
+- Fog comes from reported visibility.
+- When nothing reports the sky, the card says so instead of guessing.
+
 ## Forecast tracks
 
 The main forecast serves the app and watering decisions. Extra models provide separate comparison and integration tracks. An NBM track, for example, remains a forecast, including when accessed through Open-Meteo.

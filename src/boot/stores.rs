@@ -79,6 +79,7 @@ pub async fn build(storage: &Storage, config: &BootConfig) -> Stores {
                 .collect(),
         );
         tempest.set_priorities(crate::runtime::source_priority_map(cfg));
+        tempest.set_site(crate::runtime::site_location(cfg));
         tempest.set_observed_condition_fields(
             cfg.sources
                 .iter()

@@ -1,6 +1,6 @@
 # LocalSky guide
 
-Service 1.0.1; API 2.4.0.
+Service 1.0.2; API 2.5.0.
 
 
 ---
@@ -10,7 +10,7 @@ Source: https://localsky.io/docs/introduction.html
 # The LocalSky guide
 
 <div class="ls-doc-hero">
-<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.0.1</p>
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.0.2</p>
 <p class="ls-doc-tagline">Know your weather.<br><em>Understand your watering.</em></p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
@@ -1077,6 +1077,16 @@ For HA's local WeatherFlow precipitation sensor, choose **Rain last minute (accu
 
 Measured rain history and forecast rain stay distinct in watering explanations and the API.
 
+## The current sky
+
+The weather card and Home Assistant show one judgement of the sky, built from whatever your sources report:
+
+- Rain, snow, hail and thunderstorms appear only when a gauge, radar or lightning sensor observes them. A forecast's chance of storms is not a storm.
+- Day and night follow the sun at your configured location, so an overcast morning reads as a cloudy day rather than a night.
+- In daylight, a light sensor's reading is compared with clear-sky sunlight for the sun's height. At night, or without a light sensor, sky cover comes from a nearby station's cloud report, then a provider's current cloud cover, then the forecast hour.
+- Fog comes from reported visibility.
+- When nothing reports the sky, the card says so instead of guessing.
+
 ## Forecast tracks
 
 The main forecast serves the app and watering decisions. Extra models provide separate comparison and integration tracks. An NBM track, for example, remains a forecast, including when accessed through Open-Meteo.
@@ -2075,6 +2085,8 @@ Source: https://localsky.io/docs/schedules.html
 
 Use a manual schedule when a zone needs a chosen start time and duration. Configure it under **Settings → Manual schedules**.
 
+At polar locations, continuous daylight or darkness can leave no sunrise for the automatic plan to target. Use a manual schedule with a fixed local time during those periods.
+
 Each schedule targets one zone, selected weekdays, a local start time, and a duration. Schedule changes are read while LocalSky runs; check that the save succeeded.
 
 ## Choose a mode
@@ -2084,7 +2096,7 @@ Each schedule targets one zone, selected weekdays, a local start time, and a dur
 | Override | Suppresses the zone's smart plan on days covered by the enabled schedule |
 | Floor | Keeps the fixed schedule and allows additional smart watering when eligible |
 
-These modes describe how the schedules coexist. They do not guarantee watering through a hold.
+These modes describe how the schedules coexist. Safety checks can still prevent watering.
 
 Floor watering counts toward applied irrigation. Under weekly scheduling it also resets session spacing, so a frequent Floor schedule may leave no need or eligible day for a smart run.
 
@@ -2096,19 +2108,19 @@ Times use the installation's timezone. A schedule with no selected weekdays neve
 
 Run limits and applicable restriction caps still apply. The accepted duration can be shorter than the requested duration.
 
-## Weather and protected holds
+## Weather and safety checks
 
 By default, manual schedules are evaluated against the applicable weather and control policy.
 
 The explicit **Ignores weather** option can waive supported weather checks, including missing live-weather evidence. The saved schedule identifies that choice, and dispatch records bypassed gates.
 
-The waiver does not clear owner holds, watering restrictions, the restart hold, or the affected zone's missing/untrusted configured probe hold. Review this option as a deliberate change in behavior.
+The waiver does not bypass your pause setting, watering restrictions, a required restart, or a missing or untrusted configured soil probe. Review this option as a deliberate change in behavior.
 
 ## Before enabling
 
 Confirm the zone binding and remove overlapping schedules in the controller or other software. Check the intended weekdays and timezone, then supervise an initial run.
 
-Use the Daily and Run logs to see what was scheduled, held, or delivered. A failed dispatch is not a completed watering.
+Use the Daily and Run logs to see what was scheduled, skipped, or watered. A failed dispatch is not a completed watering.
 
 [Restrictions](restrictions.md) · [Decision rules](skip-rules.md) · [History](history.md)
 
@@ -2751,7 +2763,7 @@ Back up, update the server, then update the Home Assistant companion if you use 
 
 Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.0.1`.
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.0.2`.
 
 ## Docker Compose
 
@@ -3299,7 +3311,7 @@ The examples read `LOCALSKY_URL` and an optional `LOCALSKY_TOKEN` from the envir
 ## Contract basics
 
 - **Base path:** `/api/v1`.
-- **Response contract:** API **2.4.0**. The version in the URL and response contract are separate.
+- **Response contract:** API **2.5.0**. The version in the URL and response contract are separate.
 - **Authentication:** bearer API token when required.
 - **Unknown data:** null remains unknown. Some legacy snapshot numbers also require their accompanying validity or timestamp fields.
 - **Time:** epoch values are UTC seconds. Daily grouping uses the installation timezone.
@@ -3516,7 +3528,7 @@ Source: https://localsky.io/docs/api.html
 
 # API reference
 
-LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.1** uses response contract **2.4.0**. The path prefix and contract version are independent.
+LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.2** uses response contract **2.5.0**. The path prefix and contract version are independent.
 
 Start with the [API quick start](api-quickstart.md), or download the [OpenAPI read profile](openapi.json). The profile covers selected read operations; the reference below also documents control and administration.
 
@@ -3607,6 +3619,29 @@ All paths below use `/api/v1`. Responses use field-named units, regardless of di
 **GET /snapshot** returns the current weather snapshot. Its name predates the source bus; readings can come from sources other than Tempest.
 
 The legacy numeric fields require their validity context. Check `air_temp_live_epoch`, `wind_live_epoch`, `rh_live_epoch`, and `rain_live_epoch` where applicable. `last_packet_epoch` alone does not establish freshness for every field.
+
+`sky` is evaluated from fresh readings whenever a snapshot is served. The live stream also refreshes it every 30 seconds and when forecasts change, so day/night and expired evidence update even when sensors are silent. Day and night use NOAA/Meeus solar position at the configured location, including polar day/night. Sunrise scheduling uses the configured local date, including date-line and fractional-hour zones.
+
+Sky cover prefers a station's cloud report, then a qualitative estimate from measured sunlight, then a provider's current model, then a forecast hour fetched within the last six hours. Sunlight is compared with the Haurwitz clear-sky model; shade, aerosols and sensor placement affect that estimate. It is not a cloud-fraction measurement. Missing or unrecognized provider codes remain unknown.
+
+Precipitation requires a fresh gauge/radar/hail reading, not a forecast chance. Rain rates may represent an observation interval rather than an instantaneous measurement. A surface temperature alone cannot establish snow, sleet or freezing rain, so the classifier does not infer those types. `thunderstorm` requires a strike within 10 miles (16 km) and the last 15 minutes; future-dated or unlocated strikes do not establish a nearby storm. Low visibility alone is `low_visibility`, because fog, smoke and dust can all reduce it.
+
+| Field | Meaning |
+|---|---|
+| `condition` | `clear`, `mostly_clear`, `partly_cloudy`, `mostly_cloudy`, `overcast`, `fog`, `low_visibility`, `light_rain`, `rain`, `heavy_rain`, `snow`, `wintry_mix`, `hail`, `thunderstorm` or `unknown`; clients should tolerate new values |
+| `phase` | `day`, `night`, `dawn` or `dusk` (sun above the horizon but low); null without a site location |
+| `is_day` | From the sun at the configured site; null without a valid location |
+| `cloud_cover_pct` | Reported/modelled cloud fraction, percent; null for sunlight-only estimates or unavailable cover |
+| `cover_basis` | `measured_sunlight`, `observation`, `model`, `forecast` or `none` |
+| `precipitating` | A fresh measured precipitation reading is positive |
+| `windy` | Sustained wind of at least 20 mph or gusts of at least 30 mph |
+| `at_epoch` | When the evidence was evaluated |
+
+`cloud_cover_pct` and `visibility_mi` on the snapshot are the current values from whichever source reports them (a sky sensor, a station report or a model's analysis), null when none does.
+
+`feels_like_f` uses the NWS heat-index eligibility check and humidity corrections, or wind chill at/below 50°F with wind above 3 mph. Otherwise it uses air temperature. `wet_bulb_f` is a Stull sea-level estimate, not a WBGT heat-stress measurement: it is unavailable outside -20 to 50°C and 5 to 100% RH, or in the cold/dry corner (below 0°C and 20% RH). Saturation gives the air temperature. These calculations require fresh inputs: missing humidity is not 0%, and missing wind cannot establish calm conditions for wind chill. A fresh reported `dew_point_f` is preferred; otherwise it is derived from fresh temperature and humidity. All three fields can be null; clients must preserve unavailable values.
+
+References: [NOAA solar calculations](https://gml.noaa.gov/grad/solcalc/calcdetails.html), [Haurwitz model](https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.clearsky.haurwitz.html), [NWS heat index](https://www.wpc.ncep.noaa.gov/html/heatindex_equation.shtml), [Stull (2011)](https://doi.org/10.1175/JAMC-D-11-0143.1). Solar event times assume a standard horizon/refraction; local terrain and atmospheric conditions can shift observed sunrise and sunset.
 
 The irrigation snapshot also exposes `current_weather` for selected temperature, humidity, and wind inputs. Each available sample includes its source, observation time, maximum age, whether it is measured, and the selection reason.
 
@@ -4150,6 +4185,14 @@ These compatibility fields were deprecated during API 1 and remain in API 2.0.0.
 | `POST /wizard/test_source` | endpoint | structural validation only; nothing in the UI calls it | absent |
 
 ## Migration notes
+
+**2.5.0** (LocalSky 1.0.2). The weather snapshot (`GET /snapshot`, `/stream`)
+adds `sky`: the current condition judged at serving time from every fresh
+reading the deployment has, the sun's position at the site and the forecast
+hour. It also adds `cloud_cover_pct` and `visibility_mi`, current values from
+whichever source reports them, null when none does. In the forecast, hourly
+`cloud_cover_pct` is now null when the provider gave no sky cover; it was
+previously 0, which read as a clear sky. See [Weather and forecasts](api-weather.md).
 
 **2.3.0** (LocalSky 0.9.1) adds extra forecast tracks, inclusive forecast-window queries, and the hourly forecast archive. See [Weather and forecasts](api-weather.md).
 

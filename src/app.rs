@@ -111,6 +111,13 @@ pub struct HasIrrigation(pub RwSignal<bool>);
 #[derive(Clone, Copy)]
 pub struct Located(pub RwSignal<Option<bool>>);
 
+/// The configured site's (lat, lon) from `/api/v1/location`, so sky glyphs
+/// can ask whether the sun is up there instead of guessing from brightness
+/// or the clock. `None` until the deferred fetch lands (SSR and hydrate's
+/// first frame agree) and on an install with no location.
+#[derive(Clone, Copy)]
+pub struct SiteCoordinates(pub RwSignal<Option<(f64, f64)>>);
+
 /// Target for the legacy `/settings/{sources,data-sources,controllers}`
 /// aliases that redirect into the unified devices hub.
 ///
@@ -216,6 +223,29 @@ pub fn App() -> impl IntoView {
     crate::components::irrigation::quick_run_client::provide_quick_run_client(has_irrigation);
     let located: RwSignal<Option<bool>> = RwSignal::new(None);
     provide_context(Located(located));
+    let site: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
+    provide_context(SiteCoordinates(site));
+    #[cfg(feature = "hydrate")]
+    {
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            let Ok(resp) = gloo_net::http::Request::get(&crate::base::url("/api/v1/location"))
+                .send()
+                .await
+            else {
+                return;
+            };
+            let Ok(val): Result<serde_json::Value, _> = resp.json().await else {
+                return;
+            };
+            if val.get("located").and_then(|v| v.as_bool()) == Some(true) {
+                let coordinate = |key: &str| val.get(key).and_then(|v| v.as_f64());
+                if let (Some(lat), Some(lon)) = (coordinate("lat"), coordinate("lon")) {
+                    site.set(Some((lat, lon)));
+                }
+            }
+        });
+    }
     #[cfg(feature = "hydrate")]
     {
         leptos::task::spawn_local(async move {
@@ -744,7 +774,7 @@ fn WeatherHome(
         // and deep-links into /irrigation. Weather-only installs render nothing.
         {view! { <HomeWateringVerdict snap=irrigation/> }.into_any()}
         <div class="weather-grid">
-            {render_hero(snap, forecast).into_any()}
+            {render_hero(snap).into_any()}
             {render_radar().into_any()}
             <div class="weather-observations">
                     {view! { <WindPanel snap irrigation/> }.into_any()}
@@ -770,13 +800,9 @@ fn WeatherHome(
     }
 }
 
-fn render_hero(
-    snap: ReadSignal<Snapshot>,
-    forecast: ReadSignal<ForecastSnapshot>,
-) -> impl IntoView {
-    // Pass the forecast so the cloud-only condition glyph can key off the
-    // current weather_code (correct rain/snow/fog) rather than only solar.
-    view! { <Hero snap forecast=forecast/> }
+fn render_hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
+    // The condition is the server's `sky`, judged from every source.
+    view! { <Hero snap/> }
 }
 
 fn render_radar() -> impl IntoView {
