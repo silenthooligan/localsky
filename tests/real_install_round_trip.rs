@@ -183,7 +183,7 @@ fn a_real_config_builds_one_soil_row_per_zone() {
 
 /// A real install's pre-0.9.0 file (schema_version 1, records inside the
 /// document) migrates on the first load: the records move to the ledger
-/// beside it, the document says 2, and the second load rewrites nothing.
+/// beside it, the document uses the current schema, and the second load rewrites nothing.
 #[tokio::test]
 async fn a_pre_090_config_migrates_to_the_ledger() {
     use localsky::ports::config_store::ConfigStore;
@@ -206,16 +206,20 @@ async fn a_pre_090_config_migrates_to_the_ledger() {
         .load()
         .await
         .expect("a real v1 config loads and migrates");
-    assert_eq!(cfg.schema_version, 2);
+    let current_schema = localsky::config::CURRENT_SCHEMA_VERSION;
+    assert_eq!(cfg.schema_version, current_schema);
     let doc = std::fs::read_to_string(&path).unwrap();
-    assert!(doc.contains("schema_version = 2"));
+    assert!(doc.contains(&format!("schema_version = {current_schema}")));
     assert!(!doc.contains("seeded_source_ids") && !doc.contains("priority_repaired_ids"));
     let ledger = store.ledger();
     assert!(ledger.seeded_source_ids.contains(&"nws".to_string()));
     assert!(ledger.priority_repaired_ids.contains(&"nws".to_string()));
-    assert_eq!(ledger.migrations.len(), 2);
+    assert_eq!(
+        ledger.migrations.len(),
+        localsky::config::migrate::MIGRATIONS.len()
+    );
     let again = store.load().await.unwrap();
-    assert_eq!(again.schema_version, 2);
+    assert_eq!(again.schema_version, current_schema);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         doc,

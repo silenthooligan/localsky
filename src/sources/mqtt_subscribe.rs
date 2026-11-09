@@ -133,7 +133,7 @@ impl WeatherSource for MqttSubscribe {
                 ev = eventloop.poll() => {
                     match ev {
                         Ok(Event::Incoming(Packet::Publish(p))) => {
-                            self.handle_publish(&bus, &p.topic, &p.payload);
+                            self.handle_publish(&bus, &p.topic, &p.payload, p.retain);
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
                             let mut ok = 0usize;
@@ -192,7 +192,7 @@ impl WeatherSource for MqttSubscribe {
 }
 
 impl MqttSubscribe {
-    fn handle_publish(&self, bus: &SourceBus, topic: &str, payload: &[u8]) {
+    fn handle_publish(&self, bus: &SourceBus, topic: &str, payload: &[u8], retained: bool) {
         for sub in &self.config.subscriptions {
             if !topic_matches(&sub.topic, topic) {
                 continue;
@@ -207,25 +207,24 @@ impl MqttSubscribe {
             };
             let value = raw * sub.scale + sub.offset;
 
-            // Zone-bound subscription: emit a per-zone soil CHANNEL rather
-            // than a global typed Observation. The merge bus is keyed by
-            // WeatherField, which cannot tell "back yard soil" from "front
-            // yard soil" (both would be RhPct) and would clobber the global
-            // humidity field besides. Routing it as a KeyedReading writes a
-            // discoverable `soilmoisture_<zone_slug>` channel to
-            // sensor_history that the zone binds via
-            // `source:<id>:soilmoisture_<zone_slug>` exactly like a native
-            // Ecowitt channel. resolve_soil_pct + the soil discovery + the
-            // Sensors inventory then all work through the normal binding.
-            if let Some(zone) = sub
+            // Soil uses one channel per topic/path, independent of the zone.
+            // Retained replay has no trustworthy measurement timestamp.
+            // Wait for a live delivery before creating or refreshing history.
+            if let Some(_zone) = sub
                 .zone_slug
                 .as_deref()
                 .map(str::trim)
                 .filter(|z| !z.is_empty())
             {
+                if retained {
+                    continue;
+                }
                 let _ = bus.send(SourceEvent::KeyedReading {
                     source_id: self.id.clone(),
-                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                    key: crate::config::soil::probe_key(
+                        "mqtt",
+                        &[topic, sub.json_path.as_deref().unwrap_or("")],
+                    ),
                     value,
                     at_epoch: now_epoch(),
                 });
@@ -455,7 +454,7 @@ mod tests {
             Some("back_yard"),
         )]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
-        src.handle_publish(&tx, "esp/soil/back", b"38.5");
+        src.handle_publish(&tx, "esp/soil/back", b"38.5", false);
 
         match rx.try_recv().expect("an event was emitted") {
             SourceEvent::KeyedReading {
@@ -465,7 +464,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(source_id, "garden_mqtt");
-                assert_eq!(key, "soilmoisture_back_yard");
+                assert_eq!(
+                    key,
+                    crate::config::soil::probe_key("mqtt", &["esp/soil/back", ""])
+                );
                 assert_eq!(value, 38.5);
             }
             other => panic!("expected KeyedReading, got {other:?}"),
@@ -480,7 +482,7 @@ mod tests {
     fn unbound_soil_emits_global_observation() {
         let src = source_with(vec![sub("esp/soil/loose", "rh_pct", None, None)]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
-        src.handle_publish(&tx, "esp/soil/loose", b"41.0");
+        src.handle_publish(&tx, "esp/soil/loose", b"41.0", false);
 
         match rx.try_recv().expect("an event was emitted") {
             SourceEvent::Observation { fields, .. } => {
@@ -496,7 +498,7 @@ mod tests {
     fn blank_zone_slug_falls_back_to_global_observation() {
         let src = source_with(vec![sub("esp/soil/x", "rh_pct", None, Some("   "))]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
-        src.handle_publish(&tx, "esp/soil/x", b"50.0");
+        src.handle_publish(&tx, "esp/soil/x", b"50.0", false);
         assert!(matches!(
             rx.try_recv().unwrap(),
             SourceEvent::Observation { .. }
@@ -511,13 +513,60 @@ mod tests {
         s.offset = 5.0;
         let src = source_with(vec![s]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
-        src.handle_publish(&tx, "esp/raw", b"300"); // 300*0.1 + 5 = 35
+        src.handle_publish(&tx, "esp/raw", b"300", false); // 300*0.1 + 5 = 35
         match rx.try_recv().unwrap() {
             SourceEvent::KeyedReading { key, value, .. } => {
-                assert_eq!(key, "soilmoisture_front_yard");
+                assert_eq!(
+                    key,
+                    crate::config::soil::probe_key("mqtt", &["esp/raw", ""])
+                );
                 assert!((value - 35.0).abs() < 1e-9);
             }
             other => panic!("expected KeyedReading, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn four_probes_in_one_zone_emit_four_independent_channels() {
+        let topics = [
+            "sensor-soil1",
+            "sensor-soil2",
+            "sensor-soil3",
+            "sensor-soil4",
+        ];
+        let src = source_with(
+            topics
+                .iter()
+                .map(|topic| sub(topic, "rh_pct", None, Some("planters")))
+                .collect(),
+        );
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
+        for topic in topics {
+            src.handle_publish(&tx, topic, b"36", false);
+        }
+        let mut keys = std::collections::HashSet::new();
+        while let Ok(event) = rx.try_recv() {
+            let SourceEvent::KeyedReading { key, .. } = event else {
+                panic!("soil must not overwrite weather");
+            };
+            keys.insert(key);
+        }
+        assert_eq!(keys.len(), 4);
+    }
+
+    #[test]
+    fn retained_replay_is_not_a_new_soil_measurement() {
+        let src = source_with(vec![sub("soil/1", "rh_pct", None, Some("bed"))]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
+        src.handle_publish(&tx, "soil/1", b"74", true);
+        assert!(rx.try_recv().is_err());
+        src.handle_publish(&tx, "soil/1", b"29", false);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SourceEvent::KeyedReading { value: 29.0, .. }
+        ));
+        // Another subscription/reconnect replay still cannot overwrite the live sample.
+        src.handle_publish(&tx, "soil/1", b"74", true);
+        assert!(rx.try_recv().is_err());
     }
 }

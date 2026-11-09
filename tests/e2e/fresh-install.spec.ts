@@ -110,7 +110,9 @@ test("the wizard's happy path writes a config with a rule and a zone", async ({ 
   await expect(banner).toBeVisible({ timeout: 30_000 });
   await expect(page).toHaveURL(/\/setup\/review/);
   // The step's own record of the hold, which no dismissal can take away.
-  await expect(page.getByText(/Saved, and not running yet/)).toBeVisible();
+  await expect(page.getByText('Settings saved. Restart needed.', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Go to restart', exact: true }).click();
+  await expect(banner.getByRole('button', { name: 'Restart LocalSky now' })).toBeInViewport();
   // And the reasons name the wiring the running process does not have.
   await expect(banner).toContainText(/controllers are not connected/i);
   await expect(banner).toContainText(/weather sources are not connected/i);

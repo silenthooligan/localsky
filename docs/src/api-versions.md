@@ -29,6 +29,20 @@ These compatibility fields were deprecated during API 1 and remain in API 2.0.0.
 
 ## Migration notes
 
+**2.6.0** (LocalSky 1.1.0). Zones add `soil_probes`, a list of
+`{sensor_id, excluded_from_decisions, stale_after_s}`, and `soil_aggregation`
+(`median`, `average`, or `minimum`). A nonempty list takes precedence over the
+legacy `soil_sensor_id`, which remains accepted for single-probe clients.
+Clear both fields to remove all probe bindings. Sensor inventory adds
+`excluded_from_decisions`, `stale_after_s`, and `usable_for_decisions`.
+
+Configuration schema 3 prevents older binaries from silently ignoring probe
+lists. Migration preserves native single-probe bindings and expands legacy
+mapped zone channels into independent probe IDs. Mixed history stays in its
+original channel and is not assigned to individual probes. Mapped probes need
+a new measurement after upgrade. MQTT retained replays do not count as new
+measurements. Keep a pre-upgrade backup if rollback is required.
+
 **2.5.0** (LocalSky 1.0.2). The weather snapshot (`GET /snapshot`, `/stream`)
 adds `sky`: the current condition judged at serving time from every fresh
 reading the deployment has, the sun's position at the site and the forecast

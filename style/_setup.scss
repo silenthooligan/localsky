@@ -31,10 +31,6 @@
   }
   .source-field-doc { white-space: normal; }
   p a { text-decoration: underline; text-underline-offset: 0.2em; }
-  .geo-search { flex-wrap: wrap; }
-  .geo-search .ui-input { flex: 1 1 12rem; }
-  .geo-result { flex-wrap: wrap; }
-  .geo-result__name { flex-basis: 12rem; }
   .scan-row { flex-wrap: wrap; }
   .cond-list { margin: var(--space-4) 0; }
   .setup-empty { padding: var(--space-4); background: var(--elev-2); border-radius: var(--radius-md); }

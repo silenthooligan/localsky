@@ -38,7 +38,7 @@ Sensor capabilities vary. A WH51 supplies moisture and battery information; it d
 
 Connect the source first, wait for a reading, then bind the channel to a zone. For manually mapped MQTT/HTTP channels, also set the zone on the source mapping.
 
-Configure calibration and target bands for the actual probe placement. One reading should represent the zone's root conditions; a gateway connection alone is not soil evidence.
+Configure calibration and target bands for the actual probe placement. Choose median, average, or lowest when a zone uses several probes. Each probe has its own freshness window and exclusion switch. A gateway connection alone is not soil evidence.
 
 [First soil probe](first-soil-sensor.md) · [Calibration](soil-sensors.md)
 

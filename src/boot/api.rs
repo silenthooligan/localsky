@@ -327,9 +327,13 @@ pub fn build(
             header::REFERRER_POLICY,
             HeaderValue::from_static("strict-origin-when-cross-origin"),
         ))
+        // geolocation=(self): the Location step's "Use my location" asks
+        // the browser for the device position from LocalSky's own origin.
+        // An empty allowlist denied that to the page itself; (self) keeps
+        // it closed to any cross-origin frame LocalSky might embed.
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("geolocation=(), camera=(), microphone=()"),
+            HeaderValue::from_static("geolocation=(self), camera=(), microphone=()"),
         ));
 
     // The auth API plus the enforcement middleware over the complete

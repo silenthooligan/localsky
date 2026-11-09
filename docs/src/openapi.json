@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "LocalSky API read profile",
-    "version": "2.5.0",
+    "version": "2.6.0",
     "description": "Selected read endpoints for dashboards, automation, and AI connectors. Additional response fields are allowed. This profile does not grant read-only credentials: LocalSky bearer tokens can authorize writes outside this profile.",
     "license": {
       "name": "Apache-2.0",

@@ -458,11 +458,11 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
                 .map(|dt| dt.with_timezone(&tz_offset))
             {
                 Some(dt) => format!(
-                    "{zone_name} has reported no valid reading since {}. The saturation gate is running without it.",
+                    "A soil probe in {zone_name} has reported no valid reading since {}. Check Sensors. Watering is held if no usable probes remain.",
                     dt.format("%b %-d")
                 ),
                 None => format!(
-                    "{zone_name} has never reported a valid reading. The saturation gate is running without it."
+                    "A soil probe in {zone_name} has never reported a valid reading. Check Sensors. Watering is held if no usable probes remain."
                 ),
             };
             PushPayload {

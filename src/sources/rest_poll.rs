@@ -153,7 +153,7 @@ impl WeatherSource for RestPoll {
                     };
                     let value = raw * m.scale + m.offset;
                     // Per-zone soil channel -> KeyedReading.
-                    if let Some(zone) = m
+                    if let Some(_zone) = m
                         .zone_slug
                         .as_deref()
                         .map(str::trim)
@@ -161,7 +161,10 @@ impl WeatherSource for RestPoll {
                     {
                         poll = poll.with(SourceEvent::KeyedReading {
                             source_id: s.id.clone(),
-                            key: crate::sources::bus_recorder::zone_soil_key(zone),
+                            key: crate::config::soil::probe_key(
+                                "http",
+                                &[m.json_path.as_deref().unwrap_or("")],
+                            ),
                             value,
                             at_epoch: now,
                         });

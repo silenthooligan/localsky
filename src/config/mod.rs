@@ -22,6 +22,7 @@ pub mod env_compat;
 pub mod kind_labels;
 pub mod region;
 pub mod schema;
+pub mod soil;
 
 // Server-gated for a reason, not by habit. `validate` parses timezones and
 // CIDR blocks, which would drag the whole tz database and an IP-parsing

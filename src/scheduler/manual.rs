@@ -413,9 +413,7 @@ async fn run_tick(
 
         // A weather waiver cannot certify a configured probe without a fresh
         // engine verdict. Use the current binding, never a raw-reading guess.
-        let probe_configured = zone_soil_cfg
-            .and_then(|z| z.soil_sensor_id.as_deref())
-            .is_some_and(|id| !id.trim().is_empty());
+        let probe_configured = zone_soil_cfg.is_some_and(|z| z.has_soil_probe());
         if probe_configured
             && !snapshot.is_some_and(|snap| snapshot_is_fresh(snap.last_refresh_epoch, now_epoch))
         {
@@ -2954,6 +2952,8 @@ mod tests {
                 slug: slug.into(),
                 name: slug.into(),
                 soil_sensor_id: None,
+                soil_probes: Default::default(),
+                soil_aggregation: Default::default(),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
                 sprinkler_type,

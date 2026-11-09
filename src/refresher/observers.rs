@@ -457,7 +457,7 @@ pub(crate) fn emit_push_events(
     }
 
     for f in &snap.soil_probe_faults {
-        if probe_fault_notified.insert(f.zone_slug.clone()) {
+        if probe_fault_notified.insert(format!("{}:{}", f.zone_slug, f.sensor_id)) {
             push.emit(PushEvent::SoilProbeFault {
                 zone_name: f.zone_name.clone(),
                 zone_slug: f.zone_slug.clone(),

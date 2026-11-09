@@ -17,11 +17,11 @@ For Ecowitt, confirm that the probe is registered on the gateway first. For HA, 
 
 Open **Sensors** and find the probe. Check its value, unit, battery where available, and observation time. Wait for a real update before binding it.
 
-For MQTT, HTTP, and other mapped channels, set **Bind to zone** on the source mapping. The channel appears after it has published a reading.
+For MQTT, HTTP, and other mapped channels, set **Bind to zone** on the source mapping. Configured mapped channels appear in the picker before the first reading; wait for a live sample before relying on them.
 
 ## Binding a probe to a zone
 
-Open **Zones → Edit zone → Soil moisture sensor** and choose the channel. Save and follow any restart prompt.
+Open **Zones → Edit zone → Soil probes** and choose the channel. Save and follow any restart prompt.
 
 Binding from a probe card can move the probe from a previous zone. Editing a zone changes that zone's binding, so review existing assignments if the same probe is selected elsewhere.
 
@@ -37,13 +37,13 @@ Avoid setting another soil texture merely to make a displayed percentage look be
 
 Open the zone and Watering decisions. Confirm that the selected probe is current and that any hold names the relevant evidence.
 
-A missing or untrusted configured probe holds its affected zone. A zone with no probe binding can use the weather and soil model.
+When no configured probe is fresh, valid, and included, the zone is held. Other usable probes can continue to supply its reading. A zone with no probe binding can use the weather and soil model.
 
 ## Common problems
 
 | Problem | Check |
 |---|---|
-| Probe absent from picker | Has the source published a reading? Is the zone mapping set where required? |
+| Probe absent from picker | Is the source configured? Is the zone mapping set where required? |
 | Percentage never moves | Battery, placement, gateway registration, and original timestamps |
 | No temperature or EC | Whether the probe hardware supports those measurements |
 | Binding affects the wrong area | Zone assignment and physical probe placement |

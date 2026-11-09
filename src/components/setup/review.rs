@@ -138,11 +138,7 @@ fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'stati
     // Soil-probe bindings: how many zones carry a non-null soil_sensor_id.
     let bound_count = zones
         .values()
-        .filter(|z| {
-            z.get("soil_sensor_id")
-                .map(|v| v.is_string())
-                .unwrap_or(false)
-        })
+        .filter(|z| !crate::config::soil::json_bindings(z).is_empty())
         .count();
     let sensors_text = if bound_count == 0 {
         "None bound. Scheduling runs on weather evidence; add probes later under Settings, Sensors."
@@ -352,9 +348,8 @@ pub fn ReviewStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            // Above the title, and sticky, on purpose: when the apply reports a
-            // boot-only change this notice IS the answer to "did that work",
-            // and the person reading it is already on their way out.
+            // The notice stays in the wizard's page flow. The saved result
+            // below links back to it after an apply made from a long review.
             <RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
             <h2 class="setup-step__title">"Everything look right?"</h2>
             <p class="setup-step__body">
@@ -483,14 +478,9 @@ pub fn ReviewStep() -> impl IntoView {
                 });
                 view! {
                     <div class="setup-zero-zone-warn">
-                        <strong>"Saved, and not running yet."</strong>
-                        " Your answers are written down, but the parts LocalSky can "
-                        "only set up while it is starting are not running, so nothing "
-                        "waters until you restart it. The Restart now button in the "
-                        "notice at the top of this page does that. LocalSky comes back "
-                        "to this page afterwards and offers to modify the setup or "
-                        "start fresh: that screen means it worked, and Back to "
-                        "Settings leaves it."
+                        <strong>"Settings saved. Restart needed."</strong>
+                        " Restart LocalSky to apply your setup. "
+                        <a href="#restart-notice">"Go to restart"</a>
                         {reasons}
                         {reraise}
                     </div>

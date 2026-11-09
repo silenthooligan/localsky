@@ -236,9 +236,15 @@ impl Yolink {
                 continue;
             };
             let v = raw * m.scale + m.offset;
-            if let Some(zone) = &m.zone_slug {
+            if let Some(_zone) = &m.zone_slug {
                 // Per-zone soil channel -> KeyedReading.
-                soil.push((crate::sources::bus_recorder::zone_soil_key(zone), v));
+                soil.push((
+                    crate::config::soil::probe_key(
+                        "yolink",
+                        &[&m.device_id, &m.state_path.join(".")],
+                    ),
+                    v,
+                ));
             } else if let Some(f) = m.field {
                 fields.push((f, v));
             }

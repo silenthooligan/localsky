@@ -138,7 +138,7 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             match result {
                 Ok(Some(body))
                     if body["ok"] == true
-                        && !body["failed"].as_array().is_some_and(|v| !v.is_empty()) =>
+                        && body["failed"].as_array().is_none_or(|v| v.is_empty()) =>
                 {
                     sent.set(if body["scope"] == "device" {
                         "Stop sent for all zones on this controller".into()

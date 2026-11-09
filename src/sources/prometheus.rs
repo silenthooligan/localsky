@@ -192,7 +192,7 @@ impl WeatherSource for Prometheus {
                         Ok(raw) => {
                             ok_n += 1;
                             let value = raw * q.scale + q.offset;
-                            if let Some(zone) = q
+                            if let Some(_zone) = q
                                 .zone_slug
                                 .as_deref()
                                 .map(str::trim)
@@ -200,7 +200,7 @@ impl WeatherSource for Prometheus {
                             {
                                 poll = poll.with(SourceEvent::KeyedReading {
                                     source_id: s.id.clone(),
-                                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                                    key: crate::config::soil::probe_key("prometheus", &[&q.query]),
                                     value,
                                     at_epoch: now,
                                 });

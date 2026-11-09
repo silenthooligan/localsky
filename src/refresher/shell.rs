@@ -595,7 +595,7 @@ pub(crate) async fn prefetch(
         resolve_soil_zones(&watering_policy.soil_zones, map, sensor_history).await
     };
     let soil_probe_faults =
-        detect_soil_probe_faults(&watering_policy.soil_zones, &soil_zones, sensor_history).await;
+        detect_soil_probe_faults(&watering_policy.soil_zones, map, sensor_history).await;
     crate::assembly::Prefetched {
         observed_past_gauge_in,
         observed_days_since_rain,

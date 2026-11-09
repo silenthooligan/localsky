@@ -1277,28 +1277,57 @@ struct GeocodeQuery {
     q: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// One address candidate. `lat`/`lon` stay strings because that is the
+/// Nominatim wire shape the client has parsed since the first release;
+/// Census hits are formatted into the same shape. `source` says which
+/// authority answered (`osm` or `census`) so the UI can show it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GeocodeResult {
     display_name: String,
     lat: String,
     lon: String,
+    #[serde(default = "geocode_source_osm")]
+    source: String,
 }
 
-/// Geocode limiter budget: max 10 requests per fixed one-minute window per
-/// client IP, the same budget AuthRuntime::allow_login_attempt grants
-/// login/setup. Generous for a human (the UI fires ONE request per Search
-/// click and serializes them behind a `searching` flag) and far under
-/// Nominatim's absolute 1 req/s ceiling.
-const GEOCODE_MAX_PER_MIN: u32 = 10;
+const GEOCODE_SOURCE_OSM: &str = "osm";
+const GEOCODE_SOURCE_CENSUS: &str = "census";
+
+fn geocode_source_osm() -> String {
+    GEOCODE_SOURCE_OSM.to_string()
+}
+
+/// Longest query relayed upstream. Nothing a person types at an address
+/// box is longer; anything past it is a paste or a probe.
+const GEOCODE_MAX_QUERY_CHARS: usize = 200;
+
+/// Geocode limiter budget: max 30 requests per fixed one-minute window per
+/// client IP. A person refining a query by hand (town dropped, ZIP added,
+/// a typo fixed) sends a handful of searches in a minute; the earlier
+/// budget of 10 ran out mid-retry and the client, which then swallowed
+/// the 429, went quiet for the rest of the window. Nominatim's own
+/// ceiling (an absolute 1 req/s) is enforced separately by `pace`, per
+/// instance rather than per client, so this number is about fairness
+/// between LAN clients, not about protecting the upstream.
+const GEOCODE_MAX_PER_MIN: u32 = 30;
+
+/// Minimum spacing between two upstream Nominatim calls from this
+/// instance. The policy says one per second; the extra 100 ms absorbs
+/// clock skew between the two ends.
+const NOMINATIM_MIN_SPACING: std::time::Duration = std::time::Duration::from_millis(1100);
 
 /// Geocode limiter: ip -> (attempts, window_start_epoch). Mirrors
 /// AuthRuntime::login_attempts but is deliberately its OWN bucket: sharing
 /// the login map would let address searches consume login attempts (and
 /// failed logins block address search), coupling two unrelated surfaces.
-/// Cloning shares the map.
+/// Cloning shares the map and the pacer.
 #[derive(Clone, Default)]
 pub struct GeocodeLimiter {
     attempts: Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, i64)>>>,
+    /// The instant the next upstream Nominatim call may start. Reserved
+    /// under the lock, slept outside it, so concurrent handlers queue in
+    /// one-second slots instead of racing the upstream limit together.
+    upstream_next: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
 }
 
 impl GeocodeLimiter {
@@ -1319,14 +1348,45 @@ impl GeocodeLimiter {
         }
         allowed
     }
+
+    /// Wait for this instance's next Nominatim slot. The first caller in a
+    /// quiet second goes at once; everyone else gets the slot after the
+    /// last one reserved, so the instance never sends two upstream calls
+    /// inside one second however many clients or retries want to.
+    async fn pace(&self) {
+        let slot = {
+            let mut next = self.upstream_next.lock().expect("geocode pacer lock");
+            let now = tokio::time::Instant::now();
+            let slot = match *next {
+                Some(reserved) if reserved > now => reserved,
+                _ => now,
+            };
+            *next = Some(slot + NOMINATIM_MIN_SPACING);
+            slot
+        };
+        tokio::time::sleep_until(slot).await;
+    }
 }
 
-/// GET /api/wizard/geocode?q= -> Nominatim search relay. ProbeGuard-gated
+/// GET /api/wizard/geocode?q= -> address search relay. ProbeGuard-gated
 /// like every other outbound wizard handler: without it this was an
 /// unauthenticated, un-rate-limited relay any internet-anonymous caller
 /// (the public demo above all) could drive, and Nominatim bans bulk
 /// callers BY User-Agent, so one abuser could break address search for
 /// every LocalSky deployment sharing the agent string.
+///
+/// Three rungs, each tried only when the one before found nothing:
+///   1. Nominatim with the query as typed.
+///   2. Nominatim with the query simplified (`relaxed_query`). Nominatim
+///      files many streets under a nearby hamlet or subdivision rather
+///      than the postal town, so "Street, Town, ST" finds nothing while
+///      "Street, ST" or "Street" alone hits.
+///   3. The US Census Bureau geocoder, for queries that look like a US
+///      address (`looks_like_us_address`). Public-domain TIGER data that
+///      carries new subdivision streets months before volunteers name
+///      them in OpenStreetMap. Keyless, US only, needs a house number.
+/// A failure on rung 1 is still a 502 when nothing later answers; a
+/// genuine "no match" is an empty 200 the client turns into a hint.
 async fn get_geocode(
     _guard: ProbeGuard,
     State(s): State<WizardApiState>,
@@ -1358,10 +1418,10 @@ async fn get_geocode(
         }
     }
 
-    let url = format!(
-        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=5",
-        crate::text::query_value(&q.q)
-    );
+    let query: String = q.q.trim().chars().take(GEOCODE_MAX_QUERY_CHARS).collect();
+    if query.is_empty() {
+        return Json(Vec::<GeocodeResult>::new()).into_response();
+    }
     // Bounded budget: a client with no total timeout would let a stalled
     // upstream pin handler tasks for as long as it likes. Nominatim ToS
     // requires a meaningful User-Agent identifying the operator, so this is
@@ -1369,32 +1429,426 @@ async fn get_geocode(
     // identity rather than the derived per-install one.
     let client =
         crate::net::client_with(std::time::Duration::from_secs(10), "LocalSky setup wizard");
-    let res = client.get(&url).send().await;
-    // Trimmed categories, not the raw upstream/transport string, consistent
-    // with the other probe handlers (Nominatim is a fixed cloud host so the
-    // SSRF-oracle risk is low, but keep the no-raw-upstream-text rule uniform).
-    match res {
-        // Capped body read, like the other outbound handlers: a fixed host
-        // is still an unbounded-buffer risk behind a broken CDN/proxy.
-        Ok(r) => match crate::net::safe_fetch::read_json_capped::<Vec<GeocodeResult>>(r).await {
-            Ok(results) => Json(results).into_response(),
-            Err(_) => (
-                StatusCode::BAD_GATEWAY,
-                Json(ApiError {
-                    error: "geocode_parse_error".into(),
-                    detail: Some("geocoder response could not be parsed".into()),
-                }),
-            )
-                .into_response(),
-        },
-        Err(e) => (
+
+    s.geocode_limiter.pace().await;
+    let primary = nominatim_search(&client, &query).await;
+    if let Ok(hits) = &primary {
+        if !hits.is_empty() {
+            return Json(hits.clone()).into_response();
+        }
+    }
+    if let Some(relaxed) = relaxed_query(&query) {
+        s.geocode_limiter.pace().await;
+        if let Ok(hits) = nominatim_search(&client, &relaxed).await {
+            if !hits.is_empty() {
+                return Json(hits).into_response();
+            }
+        }
+    }
+    if looks_like_us_address(&query) {
+        if let Ok(hits) = census_search(&client, &query).await {
+            if !hits.is_empty() {
+                return Json(hits).into_response();
+            }
+        }
+    }
+    match primary {
+        Ok(_) => Json(Vec::<GeocodeResult>::new()).into_response(),
+        Err(failure) => failure.into_response(),
+    }
+}
+
+/// Why an upstream geocoder call produced no usable answer. Trimmed
+/// categories, not the raw upstream/transport string, consistent with the
+/// other probe handlers (both hosts are fixed cloud services so the
+/// SSRF-oracle risk is low, but keep the no-raw-upstream-text rule uniform).
+#[derive(Debug)]
+enum GeocodeUpstream {
+    Transport(String),
+    Status(u16),
+    Parse,
+}
+
+impl GeocodeUpstream {
+    fn into_response(self) -> Response {
+        let (error, detail) = match self {
+            GeocodeUpstream::Transport(category) => ("geocode_transport_error", category),
+            GeocodeUpstream::Status(code) => (
+                "geocode_upstream_status",
+                format!("geocoder answered HTTP {code}"),
+            ),
+            GeocodeUpstream::Parse => (
+                "geocode_parse_error",
+                "geocoder response could not be parsed".to_string(),
+            ),
+        };
+        (
             StatusCode::BAD_GATEWAY,
             Json(ApiError {
-                error: "geocode_transport_error".into(),
-                detail: Some(crate::net::reqwest_error_category(&e).to_string()),
+                error: error.into(),
+                detail: Some(detail),
             }),
         )
-            .into_response(),
+            .into_response()
+    }
+}
+
+/// One Nominatim search. Capped body read, like the other outbound
+/// handlers: a fixed host is still an unbounded-buffer risk behind a
+/// broken CDN/proxy. Every hit is stamped `osm` whatever the wire said.
+async fn nominatim_search(
+    client: &reqwest::Client,
+    q: &str,
+) -> Result<Vec<GeocodeResult>, GeocodeUpstream> {
+    let url = format!(
+        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=5",
+        crate::text::query_value(q)
+    );
+    let resp = client.get(&url).send().await.map_err(|e| {
+        GeocodeUpstream::Transport(crate::net::reqwest_error_category(&e).to_string())
+    })?;
+    if !resp.status().is_success() {
+        return Err(GeocodeUpstream::Status(resp.status().as_u16()));
+    }
+    let mut hits = crate::net::safe_fetch::read_json_capped::<Vec<GeocodeResult>>(resp)
+        .await
+        .map_err(|_| GeocodeUpstream::Parse)?;
+    for hit in &mut hits {
+        hit.source = GEOCODE_SOURCE_OSM.to_string();
+    }
+    Ok(hits)
+}
+
+/// The US Census Bureau geocoder's one-line address lookup
+/// (geocoding.geo.census.gov, Public_AR_Current benchmark). Keyless and
+/// public domain. It matches a house number on a street in TIGER, so a
+/// bare street or town name returns nothing; the client's empty-result
+/// hint tells the operator to add the number.
+async fn census_search(
+    client: &reqwest::Client,
+    q: &str,
+) -> Result<Vec<GeocodeResult>, GeocodeUpstream> {
+    let url = format!(
+        "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address={}&benchmark=Public_AR_Current&format=json",
+        crate::text::query_value(q)
+    );
+    let resp = client.get(&url).send().await.map_err(|e| {
+        GeocodeUpstream::Transport(crate::net::reqwest_error_category(&e).to_string())
+    })?;
+    if !resp.status().is_success() {
+        return Err(GeocodeUpstream::Status(resp.status().as_u16()));
+    }
+    let envelope = crate::net::safe_fetch::read_json_capped::<CensusEnvelope>(resp)
+        .await
+        .map_err(|_| GeocodeUpstream::Parse)?;
+    Ok(census_hits(envelope))
+}
+
+#[derive(Debug, Deserialize)]
+struct CensusEnvelope {
+    result: CensusResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct CensusResult {
+    #[serde(rename = "addressMatches", default)]
+    address_matches: Vec<CensusMatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CensusMatch {
+    #[serde(rename = "matchedAddress")]
+    matched_address: String,
+    coordinates: CensusCoordinates,
+}
+
+/// Census returns x = longitude, y = latitude.
+#[derive(Debug, Deserialize)]
+struct CensusCoordinates {
+    x: f64,
+    y: f64,
+}
+
+fn census_hits(envelope: CensusEnvelope) -> Vec<GeocodeResult> {
+    envelope
+        .result
+        .address_matches
+        .into_iter()
+        .take(5)
+        .map(|m| GeocodeResult {
+            display_name: prettify_census_address(&m.matched_address),
+            lat: format!("{:.6}", m.coordinates.y),
+            lon: format!("{:.6}", m.coordinates.x),
+            source: GEOCODE_SOURCE_CENSUS.to_string(),
+        })
+        .collect()
+}
+
+/// Census matched addresses come back shouted ("100 MAIN ST, TOWN, SC,
+/// 29450"). Case the street and town like a person would, keep the state
+/// code and directionals upper, and join the state and ZIP the way an
+/// envelope does.
+fn prettify_census_address(matched: &str) -> String {
+    let segments: Vec<&str> = matched
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    match segments.as_slice() {
+        [street, city, state, zip] => format!(
+            "{}, {}, {state} {zip}",
+            title_case_words(street),
+            title_case_words(city)
+        ),
+        _ => segments
+            .iter()
+            .map(|s| title_case_words(s))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn title_case_words(s: &str) -> String {
+    const KEEP_UPPER: &[&str] = &["N", "S", "E", "W", "NE", "NW", "SE", "SW"];
+    s.split_whitespace()
+        .map(|word| {
+            if KEEP_UPPER.contains(&word) {
+                return word.to_string();
+            }
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) if first.is_alphabetic() => first
+                    .to_uppercase()
+                    .chain(chars.flat_map(char::to_lowercase))
+                    .collect(),
+                _ => word.to_lowercase(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A simpler form of a comma-separated query for the second Nominatim
+/// try: three or more parts keep the first and the last ("Street, Town,
+/// ST" -> "Street, ST"); two parts keep the first alone. None when there
+/// is nothing to simplify or the result would repeat the first try.
+fn relaxed_query(q: &str) -> Option<String> {
+    let parts: Vec<&str> = q
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let relaxed = match parts.as_slice() {
+        [] | [_] => return None,
+        [first, _] => (*first).to_string(),
+        [first, .., last] => format!("{first}, {last}"),
+    };
+    (relaxed != q.trim()).then_some(relaxed)
+}
+
+/// Whether a query reads like a US address, so the Census fallback is
+/// worth a call: a ZIP (or ZIP+4) anywhere, a state code where an address
+/// puts it (last), or a state name. Two-letter codes elsewhere are words
+/// ("in", "or", "me"), so they do not count. A false positive costs one
+/// keyless call that returns no match; a false negative costs the operator
+/// the fallback, so the test leans inclusive.
+fn looks_like_us_address(q: &str) -> bool {
+    let tokens: Vec<String> = q
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|t| {
+            t.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_ascii_uppercase()
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.iter().any(|t| is_us_zip(t)) {
+        return true;
+    }
+    if let Some(last) = tokens.last() {
+        if US_STATES.iter().any(|(code, _)| code == last) {
+            return true;
+        }
+    }
+    let joined = format!(" {} ", tokens.join(" "));
+    joined.contains(" USA ")
+        || joined.contains(" UNITED STATES ")
+        || US_STATES
+            .iter()
+            .any(|(_, name)| joined.contains(&format!(" {name} ")))
+}
+
+fn is_us_zip(token: &str) -> bool {
+    let (zip, plus4) = match token.split_once('-') {
+        Some((zip, plus4)) => (zip, Some(plus4)),
+        None => (token, None),
+    };
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    digits(zip, 5) && plus4.is_none_or(|p| digits(p, 4))
+}
+
+/// Postal codes and upper-cased names of the fifty states plus DC and
+/// Puerto Rico, the area the Census geocoder covers.
+const US_STATES: &[(&str, &str)] = &[
+    ("AL", "ALABAMA"),
+    ("AK", "ALASKA"),
+    ("AZ", "ARIZONA"),
+    ("AR", "ARKANSAS"),
+    ("CA", "CALIFORNIA"),
+    ("CO", "COLORADO"),
+    ("CT", "CONNECTICUT"),
+    ("DE", "DELAWARE"),
+    ("FL", "FLORIDA"),
+    ("GA", "GEORGIA"),
+    ("HI", "HAWAII"),
+    ("ID", "IDAHO"),
+    ("IL", "ILLINOIS"),
+    ("IN", "INDIANA"),
+    ("IA", "IOWA"),
+    ("KS", "KANSAS"),
+    ("KY", "KENTUCKY"),
+    ("LA", "LOUISIANA"),
+    ("ME", "MAINE"),
+    ("MD", "MARYLAND"),
+    ("MA", "MASSACHUSETTS"),
+    ("MI", "MICHIGAN"),
+    ("MN", "MINNESOTA"),
+    ("MS", "MISSISSIPPI"),
+    ("MO", "MISSOURI"),
+    ("MT", "MONTANA"),
+    ("NE", "NEBRASKA"),
+    ("NV", "NEVADA"),
+    ("NH", "NEW HAMPSHIRE"),
+    ("NJ", "NEW JERSEY"),
+    ("NM", "NEW MEXICO"),
+    ("NY", "NEW YORK"),
+    ("NC", "NORTH CAROLINA"),
+    ("ND", "NORTH DAKOTA"),
+    ("OH", "OHIO"),
+    ("OK", "OKLAHOMA"),
+    ("OR", "OREGON"),
+    ("PA", "PENNSYLVANIA"),
+    ("RI", "RHODE ISLAND"),
+    ("SC", "SOUTH CAROLINA"),
+    ("SD", "SOUTH DAKOTA"),
+    ("TN", "TENNESSEE"),
+    ("TX", "TEXAS"),
+    ("UT", "UTAH"),
+    ("VT", "VERMONT"),
+    ("VA", "VIRGINIA"),
+    ("WA", "WASHINGTON"),
+    ("WV", "WEST VIRGINIA"),
+    ("WI", "WISCONSIN"),
+    ("WY", "WYOMING"),
+    ("DC", "DISTRICT OF COLUMBIA"),
+    ("PR", "PUERTO RICO"),
+];
+
+#[cfg(test)]
+mod geocode_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn relaxed_query_drops_the_town_segment() {
+        assert_eq!(
+            relaxed_query("Huguenot Trl, Huger, SC").as_deref(),
+            Some("Huguenot Trl, SC")
+        );
+        assert_eq!(
+            relaxed_query("Wading Point Blvd, Huger SC 29450").as_deref(),
+            Some("Wading Point Blvd")
+        );
+        assert_eq!(
+            relaxed_query("1 Main St, Springfield, Sangamon County, IL 62701").as_deref(),
+            Some("1 Main St, IL 62701")
+        );
+        assert_eq!(relaxed_query("Springfield"), None);
+        assert_eq!(relaxed_query(" , , "), None);
+        assert_eq!(relaxed_query("Orlando, "), None);
+    }
+
+    #[test]
+    fn us_address_heuristic_reads_zip_state_code_or_state_name() {
+        assert!(looks_like_us_address("Huguenot Trl, Huger, SC"));
+        assert!(looks_like_us_address("100 Huguenot Trl 29450"));
+        assert!(looks_like_us_address("400 S Orange Ave, Orlando, Florida"));
+        assert!(looks_like_us_address(
+            "1600 Pennsylvania Ave NW, Washington, DC 20500"
+        ));
+        assert!(looks_like_us_address("Portland, OR"));
+        assert!(looks_like_us_address("12 Elm St, Dover, DE 19901-1234"));
+        assert!(!looks_like_us_address("Springfield"));
+        assert!(!looks_like_us_address("Sydney, NSW"));
+        assert!(!looks_like_us_address("Berlin, Germany"));
+        assert!(!looks_like_us_address("Cambridge, England"));
+        assert!(!looks_like_us_address("in the park"));
+        assert!(!looks_like_us_address("Or Yehuda"));
+    }
+
+    #[test]
+    fn census_matches_become_results_in_the_wire_shape() {
+        let body = serde_json::json!({"result": {"input": {}, "addressMatches": [
+            {"matchedAddress": "400 S ORANGE AVE, ORLANDO, FL, 32801",
+             "coordinates": {"x": -81.37924, "y": 28.53834},
+             "tigerLine": {}, "addressComponents": {}}
+        ]}});
+        let envelope: CensusEnvelope = serde_json::from_value(body).unwrap();
+        let hits = census_hits(envelope);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].display_name, "400 S Orange Ave, Orlando, FL 32801");
+        assert_eq!(hits[0].lat, "28.538340");
+        assert_eq!(hits[0].lon, "-81.379240");
+        assert_eq!(hits[0].source, "census");
+    }
+
+    #[test]
+    fn census_no_match_is_an_empty_list() {
+        let body = serde_json::json!({"result": {"input": {}, "addressMatches": []}});
+        let envelope: CensusEnvelope = serde_json::from_value(body).unwrap();
+        assert!(census_hits(envelope).is_empty());
+    }
+
+    #[test]
+    fn nominatim_hits_default_to_the_osm_source() {
+        let body = serde_json::json!([{
+            "place_id": 1, "display_name": "Orlando, Florida, United States",
+            "lat": "28.5383", "lon": "-81.3792", "type": "city"
+        }]);
+        let hits: Vec<GeocodeResult> = serde_json::from_value(body).unwrap();
+        assert_eq!(hits[0].source, "osm");
+        let wire = serde_json::to_value(&hits[0]).unwrap();
+        assert_eq!(wire["source"], "osm");
+        assert_eq!(wire["lat"], "28.5383");
+    }
+
+    #[test]
+    fn census_address_case_keeps_state_and_directionals() {
+        assert_eq!(
+            prettify_census_address("100 HUGUENOT TRL, HUGER, SC, 29450"),
+            "100 Huguenot Trl, Huger, SC 29450"
+        );
+        assert_eq!(
+            prettify_census_address("1600 PENNSYLVANIA AVE NW, WASHINGTON, DC, 20500"),
+            "1600 Pennsylvania Ave NW, Washington, DC 20500"
+        );
+        assert_eq!(
+            prettify_census_address("12 W 1ST ST, ODD SHAPE"),
+            "12 W 1st St, Odd Shape"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacer_spaces_upstream_calls_one_second_apart() {
+        let limiter = GeocodeLimiter::default();
+        let start = tokio::time::Instant::now();
+        limiter.pace().await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start,
+            "the first call in a quiet second goes at once"
+        );
+        limiter.pace().await;
+        limiter.pace().await;
+        assert!(tokio::time::Instant::now() - start >= NOMINATIM_MIN_SPACING * 2);
     }
 }
 

@@ -353,7 +353,7 @@ pub(crate) fn compute_soil_forecasts(
     // Sensors rail listed all four removed probes as offline).
     let zones: Vec<ForecastZone> = zone_cfg
         .iter()
-        .filter(|z| z.soil_sensor_id.is_some())
+        .filter(|z| z.has_soil_probe())
         .map(|z| {
             let (kc, depth) = kc_depth_for(&z.slug, agronomy, today_doy, site_lat);
             ForecastZone {

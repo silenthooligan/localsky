@@ -355,6 +355,8 @@ pub fn seed_config() -> crate::config::schema::Config {
         controller_station: String::new(),
         controller_zone_name: None,
         soil_sensor_id: None,
+        soil_probes: Default::default(),
+        soil_aggregation: Default::default(),
         target_min_pct_soil: 30.0,
         saturation_pct_soil: 70.0,
         photo_url: None,
@@ -378,6 +380,8 @@ pub fn seed_config() -> crate::config::schema::Config {
             controller_station: "1".to_string(),
             controller_zone_name: None,
             soil_sensor_id: soil("back_yard"),
+            soil_probes: Default::default(),
+            soil_aggregation: Default::default(),
             // The balance showcase: a 1.75 in week over 2 sessions wants
             // more per session than the 60 minute cap can deliver.
             weekly_budget_in: Some(1.75),
@@ -394,6 +398,8 @@ pub fn seed_config() -> crate::config::schema::Config {
             controller_station: "2".to_string(),
             controller_zone_name: None,
             soil_sensor_id: soil("front_yard"),
+            soil_probes: Default::default(),
+            soil_aggregation: Default::default(),
             ..base.clone()
         },
     );
@@ -406,6 +412,8 @@ pub fn seed_config() -> crate::config::schema::Config {
             controller_station: "3".to_string(),
             controller_zone_name: None,
             soil_sensor_id: soil("side_yard"),
+            soil_probes: Default::default(),
+            soil_aggregation: Default::default(),
             weekly_budget_in: Some(1.3),
             sessions_per_week: Some(2),
             // The demo's soil-governed zone: the per-zone pin puts the
@@ -429,6 +437,8 @@ pub fn seed_config() -> crate::config::schema::Config {
             controller_station: "4".to_string(),
             controller_zone_name: None,
             soil_sensor_id: soil("back_yard_shrubs"),
+            soil_probes: Default::default(),
+            soil_aggregation: Default::default(),
             ..base.clone()
         },
     );

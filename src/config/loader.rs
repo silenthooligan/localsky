@@ -64,6 +64,7 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
 /// reason (its `zone_rain_credit_cap_range` error gates whole-config
 /// writes); a non-finite value drops to None, the derived cap.
 pub fn normalize_legacy_values(cfg: &mut Config) {
+    crate::config::soil::migrate_bindings(cfg);
     for (slug, z) in cfg.zones.iter_mut() {
         if let Some(n) = z.sessions_per_week {
             if !(1..=7).contains(&n) {
@@ -281,6 +282,12 @@ pub fn auto_default_controller(cfg: &mut Config) {
 /// variants, required fields) is already handled by serde; this catches
 /// structural things serde can't.
 pub fn validate(cfg: &Config) -> Result<(), LoadError> {
+    if let Some(error) = crate::config::soil::validation_errors(cfg)
+        .into_iter()
+        .next()
+    {
+        return Err(LoadError::Validation(error));
+    }
     super::schema::ForecastTrack::validate_all(&cfg.forecast_tracks)
         .map_err(LoadError::Validation)?;
     if cfg.schema_version > CURRENT_SCHEMA_VERSION {
@@ -576,6 +583,8 @@ mod tests {
                 controller_station: "1".into(),
                 controller_zone_name: None,
                 soil_sensor_id: None,
+                soil_probes: Default::default(),
+                soil_aggregation: Default::default(),
                 target_min_pct_soil: 80.0, // backwards!
                 saturation_pct_soil: 60.0, // less than min
                 photo_url: None,
@@ -623,6 +632,8 @@ mod tests {
                 controller_station: "1".into(),
                 controller_zone_name: None,
                 soil_sensor_id: None,
+                soil_probes: Default::default(),
+                soil_aggregation: Default::default(),
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
                 photo_url: None,
@@ -669,6 +680,8 @@ mod tests {
                 controller_station: "1".into(),
                 controller_zone_name: None,
                 soil_sensor_id: None,
+                soil_probes: Default::default(),
+                soil_aggregation: Default::default(),
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
                 photo_url: None,
@@ -744,6 +757,8 @@ mod tests {
             controller_station: station.into(),
             controller_zone_name: None,
             soil_sensor_id: None,
+            soil_probes: Default::default(),
+            soil_aggregation: Default::default(),
             target_min_pct_soil: 30.0,
             saturation_pct_soil: 70.0,
             photo_url: None,

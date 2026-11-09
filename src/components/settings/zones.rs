@@ -193,7 +193,8 @@ pub fn ZoneEditorHost(#[prop(default = false)] show_list: bool) -> impl IntoView
                                                       // Soil-moisture sensor assignment (the flexible per-zone wiring).
                                                       // "" = none (no soil gate). Otherwise an `ha:<entity>` or
                                                       // `source:<id>:<key>` address. Thresholds drive the per-zone skip.
-    let new_soil_sensor = RwSignal::new(String::new());
+    let new_soil_probes = RwSignal::new(Vec::<crate::config::SoilProbeConfig>::new());
+    let new_soil_aggregation = RwSignal::new(crate::config::SoilAggregation::default());
     let new_soil_min = RwSignal::new(30.0f64);
     let new_soil_sat = RwSignal::new(70.0f64);
 
@@ -216,7 +217,8 @@ pub fn ZoneEditorHost(#[prop(default = false)] show_list: bool) -> impl IntoView
             new_controller.get(),
             new_station.get(),
             new_photo_url.get(),
-            new_soil_sensor.get(),
+            serde_json::to_string(&new_soil_probes.get()).unwrap_or_default(),
+            format!("{:?}", new_soil_aggregation.get()),
             new_soil_min.get().to_string(),
             new_soil_sat.get().to_string(),
         ]
@@ -271,7 +273,8 @@ pub fn ZoneEditorHost(#[prop(default = false)] show_list: bool) -> impl IntoView
                             new_sched_model,
                             new_station,
                             new_photo_url,
-                            new_soil_sensor,
+                            new_soil_probes,
+                            new_soil_aggregation,
                             new_soil_min,
                             new_soil_sat,
                         );
@@ -353,7 +356,13 @@ pub fn ZoneEditorHost(#[prop(default = false)] show_list: bool) -> impl IntoView
                     new_controller.set(gs("controller_id"));
                     new_station.set(gs("controller_station"));
                     new_photo_url.set(gs("photo_url"));
-                    new_soil_sensor.set(gs("soil_sensor_id"));
+                    new_soil_probes.set(crate::config::soil::json_bindings(&z));
+                    new_soil_aggregation.set(
+                        z.get("soil_aggregation")
+                            .cloned()
+                            .and_then(|v| serde_json::from_value(v).ok())
+                            .unwrap_or_default(),
+                    );
                     new_soil_min.set(gf("target_min_pct_soil", 30.0));
                     new_soil_sat.set(gf("saturation_pct_soil", 70.0));
                     editing_slug.set(Some(slug));
@@ -656,7 +665,8 @@ pub fn ZoneEditorHost(#[prop(default = false)] show_list: bool) -> impl IntoView
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url
-                    new_soil_sensor=new_soil_sensor
+                    new_soil_probes=new_soil_probes
+                    new_soil_aggregation=new_soil_aggregation
                     new_soil_min=new_soil_min
                     new_soil_sat=new_soil_sat
                     soil_sensor_opts=soil_sensor_opts
@@ -717,7 +727,8 @@ pub fn ZoneForm(
     new_controller: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
-    new_soil_sensor: RwSignal<String>,
+    new_soil_probes: RwSignal<Vec<crate::config::SoilProbeConfig>>,
+    new_soil_aggregation: RwSignal<crate::config::SoilAggregation>,
     new_soil_min: RwSignal<f64>,
     new_soil_sat: RwSignal<f64>,
     soil_sensor_opts: RwSignal<Vec<(String, String, Option<f64>, String)>>,
@@ -815,7 +826,8 @@ pub fn ZoneForm(
                 new_sched_model,
                 new_station,
                 new_photo_url,
-                new_soil_sensor,
+                new_soil_probes,
+                new_soil_aggregation,
                 new_soil_min,
                 new_soil_sat,
             );
@@ -990,14 +1002,9 @@ pub fn ZoneForm(
         };
         // Soil-sensor assignment: "" -> null (no soil gate), else the
         // chosen ha:/source: address. Thresholds drive the per-zone skip.
-        let soil_sensor_json = {
-            let s = new_soil_sensor.get();
-            if s.trim().is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(s)
-            }
-        };
+        let soil_sensor_json = serde_json::Value::Null;
+        let soil_probes_json = serde_json::json!(new_soil_probes.get());
+        let soil_aggregation_json = serde_json::json!(new_soil_aggregation.get());
         let soil_min = new_soil_min.get();
         let soil_sat = new_soil_sat.get();
 
@@ -1093,6 +1100,8 @@ pub fn ZoneForm(
                     );
                     obj.insert("photo_url".into(), photo_url_json);
                     obj.insert("soil_sensor_id".into(), soil_sensor_json);
+                    obj.insert("soil_probes".into(), soil_probes_json);
+                    obj.insert("soil_aggregation".into(), soil_aggregation_json);
                     obj.insert("target_min_pct_soil".into(), serde_json::json!(soil_min));
                     obj.insert("saturation_pct_soil".into(), serde_json::json!(soil_sat));
                 }
@@ -1122,6 +1131,8 @@ pub fn ZoneForm(
                     None => serde_json::Value::Null,
                 },
                 "soil_sensor_id": soil_sensor_json,
+                "soil_probes": soil_probes_json,
+                "soil_aggregation": soil_aggregation_json,
                 "target_min_pct_soil": soil_min,
                 "saturation_pct_soil": soil_sat,
                 "photo_url": photo_url_json,
@@ -1924,76 +1935,8 @@ pub fn ZoneForm(
                 <PhotoField value=new_photo_url/>
             </FormField>
 
-            <FormField
-                label="Soil moisture sensor (optional)".to_string()
-                helptext="The sensor that gates this zone's watering. Blank waters on the water balance alone.".to_string()
-                error=Signal::derive(|| None::<String>)
-            >
-                <select
-                    class="ui-input"
-                    on:change=move |ev| new_soil_sensor.set(event_target_value(&ev))
-                >
-                    <option value="" selected=move || new_soil_sensor.get().is_empty()>
-                        "(none, no soil gate)"
-                    </option>
-                    {move || soil_sensor_opts.get().into_iter().map(|(id, label, _, _)| {
-                        let cur = new_soil_sensor.get();
-                        let sel = cur.strip_prefix("ha:").unwrap_or(&cur) == id.strip_prefix("ha:").unwrap_or(&id);
-                        view! { <option value=id.clone() selected=sel>{label}</option> }
-                    }).collect_view()}
-                </select>
-                // Live reading + origin of the assigned sensor, the "full
-                // data picture" right in the zone, with a jump to manage it.
-                {move || {
-                    let sel = new_soil_sensor.get();
-                    if sel.is_empty() { return {
-                        let _: () = view! {};
-                        ().into_any()
-                    }; }
-                    // Zones store the bare entity (sensor.x) while the soil feed
-                    // ids HA channels as ha:sensor.x, match on the bare id.
-                    let bare = |s: &str| s.strip_prefix("ha:").unwrap_or(s).to_string();
-                    let sel_bare = bare(&sel);
-                    let opt = soil_sensor_opts.get().into_iter().find(|(id, ..)| bare(id) == sel_bare);
-                    let (reading, origin) = match opt {
-                        Some((_, _, pct, source)) => {
-                            let r = pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "-".into());
-                            let o = if source == "home_assistant" { "Home Assistant" } else if source.is_empty() { "manual / HA entity" } else { "LocalSky native" };
-                            (r, o.to_string())
-                        }
-                        // Selected an id (e.g. a typed ha:entity) not in the list.
-                        None => ("live".to_string(), "manual / HA entity".to_string()),
-                    };
-                    view! {
-                        <div class="zone-soil-live">
-                            <span class="zone-soil-live__pct">{reading}</span>
-                            <span class="zone-soil-live__origin">{origin}</span>
-                            <a class="zone-soil-live__manage" href="/settings?section=devices">"Manage in Devices →"</a>
-                        </div>
-                    }.into_any()
-                }}
-                // One picker: the select above already lists BOTH Home
-                // Assistant soil entities (ha:*) and LocalSky native channels
-                // (source:*) from /sensors/soil, so there is no separate HA
-                // picker. This input is the escape hatch for an id not yet
-                // discovered (e.g. an HA entity HA hasn't reported on yet).
-                <input
-                    type="text"
-                    class="ui-input"
-                    class:u-mt2=true
-                    placeholder="or type any id (e.g. ha:sensor.back_yard_soil_moisture)"
-                    prop:value=move || new_soil_sensor.get()
-                    on:input=move |ev| new_soil_sensor.set(event_target_value(&ev))
-                />
-                <crate::components::ui::Button variant="secondary" size="sm"
-                    class="setup-footer__btn setup-footer__btn--ghost u-mt2"
-                    href="/settings?section=devices&add=source"
-                    target="_blank"
-
-
-                >
-                    "+ Add a sensor"
-                </crate::components::ui::Button>
+            <FormField label="Soil probes".to_string() error=Signal::derive(|| None::<String>)>
+                <super::soil_probes::SoilProbeEditor probes=new_soil_probes aggregation=new_soil_aggregation options=soil_sensor_opts/>
             </FormField>
 
             <FormField
@@ -2407,7 +2350,8 @@ pub(crate) fn reset_zone_draft(
     new_sched_model: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
-    new_soil_sensor: RwSignal<String>,
+    new_soil_probes: RwSignal<Vec<crate::config::SoilProbeConfig>>,
+    new_soil_aggregation: RwSignal<crate::config::SoilAggregation>,
     new_soil_min: RwSignal<f64>,
     new_soil_sat: RwSignal<f64>,
 ) {
@@ -2423,7 +2367,8 @@ pub(crate) fn reset_zone_draft(
     new_sched_model.set(String::new());
     new_station.set(String::new());
     new_photo_url.set(String::new());
-    new_soil_sensor.set(String::new());
+    new_soil_probes.set(Vec::new());
+    new_soil_aggregation.set(Default::default());
     new_soil_min.set(30.0);
     new_soil_sat.set(70.0);
 }
@@ -3042,15 +2987,18 @@ fn ZoneCard(
     let species_display = pretty_species(&species_slug).to_string();
     let soil_display = pretty_soil(&soil_slug).to_string();
     let area_display = fmt_area_sqft(area, prefs);
-    let soil_sensor_display = match zone.get("soil_sensor_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => {
-            let sat = zone
-                .get("saturation_pct_soil")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(70.0);
-            format!("{s} (skip ≥ {sat:.0}%)")
-        }
-        _ => "(none, no soil gate)".to_string(),
+    let probes = crate::config::soil::json_bindings(&zone);
+    let included = probes.iter().filter(|p| !p.excluded_from_decisions).count();
+    let soil_sensor_display = if probes.is_empty() {
+        "None".to_string()
+    } else {
+        format!(
+            "{included}/{} included, {}",
+            probes.len(),
+            zone.get("soil_aggregation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("median")
+        )
     };
     let ctrl_id_for_badges = ctrl_id.clone();
     let slug_kv = slug.clone();

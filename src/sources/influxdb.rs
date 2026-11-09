@@ -144,7 +144,7 @@ impl InfluxDb {
                 Ok(raw) => {
                     any_ok = true;
                     let value = raw * q.scale + q.offset;
-                    if let Some(zone) = q
+                    if let Some(_zone) = q
                         .zone_slug
                         .as_deref()
                         .map(str::trim)
@@ -152,7 +152,7 @@ impl InfluxDb {
                     {
                         poll = poll.with(SourceEvent::KeyedReading {
                             source_id: self.id.clone(),
-                            key: crate::sources::bus_recorder::zone_soil_key(zone),
+                            key: crate::config::soil::probe_key("influx", &[&q.query]),
                             value,
                             at_epoch: now,
                         });

@@ -1,6 +1,6 @@
 # LocalSky guide
 
-Service 1.0.2; API 2.5.0.
+Service 1.1.0; API 2.6.0.
 
 
 ---
@@ -10,7 +10,7 @@ Source: https://localsky.io/docs/introduction.html
 # The LocalSky guide
 
 <div class="ls-doc-hero">
-<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.0.2</p>
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.1.0</p>
 <p class="ls-doc-tagline">Know your weather.<br><em>Understand your watering.</em></p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
@@ -913,7 +913,7 @@ Sensor capabilities vary. A WH51 supplies moisture and battery information; it d
 
 Connect the source first, wait for a reading, then bind the channel to a zone. For manually mapped MQTT/HTTP channels, also set the zone on the source mapping.
 
-Configure calibration and target bands for the actual probe placement. One reading should represent the zone's root conditions; a gateway connection alone is not soil evidence.
+Configure calibration and target bands for the actual probe placement. Choose median, average, or lowest when a zone uses several probes. Each probe has its own freshness window and exclusion switch. A gateway connection alone is not soil evidence.
 
 [First soil probe](first-soil-sensor.md) · [Calibration](soil-sensors.md)
 
@@ -1417,11 +1417,11 @@ For Ecowitt, confirm that the probe is registered on the gateway first. For HA, 
 
 Open **Sensors** and find the probe. Check its value, unit, battery where available, and observation time. Wait for a real update before binding it.
 
-For MQTT, HTTP, and other mapped channels, set **Bind to zone** on the source mapping. The channel appears after it has published a reading.
+For MQTT, HTTP, and other mapped channels, set **Bind to zone** on the source mapping. Configured mapped channels appear in the picker before the first reading; wait for a live sample before relying on them.
 
 ## Binding a probe to a zone
 
-Open **Zones → Edit zone → Soil moisture sensor** and choose the channel. Save and follow any restart prompt.
+Open **Zones → Edit zone → Soil probes** and choose the channel. Save and follow any restart prompt.
 
 Binding from a probe card can move the probe from a previous zone. Editing a zone changes that zone's binding, so review existing assignments if the same probe is selected elsewhere.
 
@@ -1437,13 +1437,13 @@ Avoid setting another soil texture merely to make a displayed percentage look be
 
 Open the zone and Watering decisions. Confirm that the selected probe is current and that any hold names the relevant evidence.
 
-A missing or untrusted configured probe holds its affected zone. A zone with no probe binding can use the weather and soil model.
+When no configured probe is fresh, valid, and included, the zone is held. Other usable probes can continue to supply its reading. A zone with no probe binding can use the weather and soil model.
 
 ## Common problems
 
 | Problem | Check |
 |---|---|
-| Probe absent from picker | Has the source published a reading? Is the zone mapping set where required? |
+| Probe absent from picker | Is the source configured? Is the zone mapping set where required? |
 | Percentage never moves | Battery, placement, gateway registration, and original timestamps |
 | No temperature or EC | Whether the probe hardware supports those measurements |
 | Binding affects the wrong area | Zone assignment and physical probe placement |
@@ -1462,7 +1462,7 @@ A soil probe adds evidence about a particular zone. It can support a saturation 
 
 ## Bind the reading
 
-For an Ecowitt channel or discovered HA sensor, select the probe under **Zone → Soil moisture sensor**.
+For an Ecowitt channel or discovered HA sensor, add the probe under **Zone → Soil probes**. A zone can use multiple probes.
 
 For MQTT, HTTP, and other manually mapped channels, first set **Bind to zone** in the source mapping. Wait for a reading, then select that channel in the zone editor. A source mapping and the zone's selected probe serve different purposes.
 
@@ -1480,10 +1480,37 @@ A relative probe percentage is not automatically volumetric water content. Witho
 
 - A sufficiently wet zone can be held independently of neighboring zones.
 - Reliable dry evidence can demote supported soft forecast-rain recommendations.
-- A configured missing or untrusted probe holds its affected zone.
+- Stale, invalid, and excluded probes do not contribute to the combined value.
+- A configured zone is held when none of its probes are usable.
 - A zone with no probe binding can use the weather and soil model.
 
 A true zero reading is not the same as missing data. Freshness and fault checks matter alongside the number.
+
+## Combine probes and handle failures
+
+Choose **Median**, **Average**, or **Lowest** in the zone editor. Median is the
+default and uses the middle value, or the mean of the two middle values for an
+even count. Average gives every usable probe equal weight. Lowest lets the
+driest included probe drive the zone. Different placements can produce valid
+different values; review calibration and placement before choosing a policy.
+
+Each probe has a **Stale after (seconds)** setting, from 1 to 604800 seconds.
+The default stays at 86400 seconds for compatibility. Set it above the expected
+reporting interval, allowing for missed reports. For example, a five-minute
+probe can use 900 seconds if three missed intervals should make it stale.
+Check the individual probe status in Settings, Sensors; a healthy peer does
+not refresh another probe's age.
+
+**Exclude from decisions** retains the binding, measurements, and history.
+The other usable probes continue to supply the zone reading. If every probe
+is excluded or unavailable, watering stays held. Removing every binding is a
+separate action that returns the zone to its weather and soil model.
+
+MQTT soil mappings require one exact topic per probe. Weather mappings still
+support wildcards. Retained messages received after subscribing or reconnecting
+do not refresh soil measurements. LocalSky waits for a live publication.
+Existing mapped channels receive independent IDs on upgrade; their old mixed
+history is retained without being attributed to a particular probe.
 
 ## Temperature, conductivity, and battery
 
@@ -2763,7 +2790,7 @@ Back up, update the server, then update the Home Assistant companion if you use 
 
 Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.0.2`.
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.1.0`.
 
 ## Docker Compose
 
@@ -3311,7 +3338,7 @@ The examples read `LOCALSKY_URL` and an optional `LOCALSKY_TOKEN` from the envir
 ## Contract basics
 
 - **Base path:** `/api/v1`.
-- **Response contract:** API **2.5.0**. The version in the URL and response contract are separate.
+- **Response contract:** API **2.6.0**. The version in the URL and response contract are separate.
 - **Authentication:** bearer API token when required.
 - **Unknown data:** null remains unknown. Some legacy snapshot numbers also require their accompanying validity or timestamp fields.
 - **Time:** epoch values are UTC seconds. Daily grouping uses the installation timezone.
@@ -3528,7 +3555,7 @@ Source: https://localsky.io/docs/api.html
 
 # API reference
 
-LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.0.2** uses response contract **2.5.0**. The path prefix and contract version are independent.
+LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.1.0** uses response contract **2.6.0**. The path prefix and contract version are independent.
 
 Start with the [API quick start](api-quickstart.md), or download the [OpenAPI read profile](openapi.json). The profile covers selected read operations; the reference below also documents control and administration.
 
@@ -4032,21 +4059,23 @@ Used during first-run; always mounted, and **public only until the first account
 | `/api/v1/wizard/scan_zones` | POST | `{ "controller": <ControllerEntry> }`; zone discovery for controllers that support it. Returns `{ "zones": [ { "station_id", "name" } ] }`. Callers use it to offer the controller's own zones as choices: the zone editor's station picker, the controller editor's bind table, and the setup wizard's zone import. A redacted secret in the posted entry is restored from the stored config by entry id (`400 unmatched_redacted_secret` when no stored value matches). `422 controller_unsupported` when the kind is not probeable at all (`mqtt_command`, `ha_service_call`, `esphome_native`); `502 zone_scan_failed` when the controller is unreachable, rejects the credential, is rate limited, **or has no zone-discovery endpoint** (`hydrawise`, `bhyve`, `rainbird`, whose detail reads "operation not supported by this controller"). A client cannot tell "this kind cannot enumerate" from "this controller is offline" by status alone, so gate on the kind before calling: only `rachio`, `opensprinkler_direct`, `http_generic` and `dry_run` can enumerate |
 | `/api/v1/wizard/probe_soil` | POST | `{ "host": "<gateway host>", "source_id": "..." }` (`source_id` optional); reads an Ecowitt gateway's live soil channels off its local API so the Sensors step can offer them for zone binding. `422` for an empty or non-LAN host, `502` if unreachable |
 | `/api/v1/wizard/discover` | GET | One LAN sweep: passive Tempest, Ecowitt broadcast, OpenSprinkler probe |
-| `/api/v1/wizard/geocode?q=<address>` | GET | Server-side proxy to Nominatim with the required User-Agent |
+| `/api/v1/wizard/geocode?q=<address>` | GET | Address search relay. OpenStreetMap Nominatim with the required User-Agent; when the typed form finds nothing, one retry with the town segment dropped, then the US Census Bureau geocoder for queries that read as a US address (ZIP, state code or state name). 30 requests per minute per client IP (`429 rate_limited`); upstream Nominatim calls are spaced one second apart per instance. `502` only when Nominatim itself failed and no fallback answered; no match is an empty `200` list |
 
-`geocode` returns up to 5 candidates:
+`geocode` returns up to 5 candidates. `source` is `osm` or `census`:
 
 ```json
 [
   {
     "display_name": "Orlando, Florida, USA",
     "lat": "28.5383",
-    "lon": "-81.3792"
+    "lon": "-81.3792",
+    "source": "osm"
   },
   {
-    "display_name": "Cambridge, Cambridgeshire, England, United Kingdom",
-    "lat": "52.2053",
-    "lon": "0.1218"
+    "display_name": "400 S Orange Ave, Orlando, FL 32801",
+    "lat": "28.538340",
+    "lon": "-81.379240",
+    "source": "census"
   }
 ]
 ```
@@ -4185,6 +4214,20 @@ These compatibility fields were deprecated during API 1 and remain in API 2.0.0.
 | `POST /wizard/test_source` | endpoint | structural validation only; nothing in the UI calls it | absent |
 
 ## Migration notes
+
+**2.6.0** (LocalSky 1.1.0). Zones add `soil_probes`, a list of
+`{sensor_id, excluded_from_decisions, stale_after_s}`, and `soil_aggregation`
+(`median`, `average`, or `minimum`). A nonempty list takes precedence over the
+legacy `soil_sensor_id`, which remains accepted for single-probe clients.
+Clear both fields to remove all probe bindings. Sensor inventory adds
+`excluded_from_decisions`, `stale_after_s`, and `usable_for_decisions`.
+
+Configuration schema 3 prevents older binaries from silently ignoring probe
+lists. Migration preserves native single-probe bindings and expands legacy
+mapped zone channels into independent probe IDs. Mixed history stays in its
+original channel and is not assigned to individual probes. Mapped probes need
+a new measurement after upgrade. MQTT retained replays do not count as new
+measurements. Keep a pre-upgrade backup if rollback is required.
 
 **2.5.0** (LocalSky 1.0.2). The weather snapshot (`GET /snapshot`, `/stream`)
 adds `sky`: the current condition judged at serving time from every fresh
@@ -4477,7 +4520,7 @@ Saves validate the candidate, retain a config snapshot, and apply supported chan
 ## Top-level structure
 
 ```toml
-schema_version = 2
+schema_version = 3
 forecast_provider = "..."     # optional root-level source ID
 
 [deployment]
@@ -4619,7 +4662,7 @@ pressure_in_hg = "davis"
 forecast_provider = "nws_forecast"
 ```
 
-The Settings > Devices data-sources editor is the visual equivalent: drag rows or use arrow keys to reorder each reading's chain (toggling between Automatic smart defaults and Custom), and pick the forecast provider. Soil moisture is out of scope here; it is bound per zone via `soil_sensor_id`.
+The Settings > Devices data-sources editor is the visual equivalent: drag rows or use arrow keys to reorder each reading's chain (toggling between Automatic smart defaults and Custom), and pick the forecast provider. Soil moisture is out of scope here; it is bound per zone via `soil_probes`.
 
 ## `[[controllers]]`
 
@@ -4642,7 +4685,7 @@ Supported `kind` values: `opensprinkler_direct`, `http_generic`, `mqtt_command`,
 
 ## Editable, migrating ids
 
-Source and controller `id` fields are editable. Renaming one migrates every reference automatically: the `field_source_chains` picks, the `forecast_provider` pin, each zone's `soil_sensor_id`, and each zone's `controller_id`. A rename never leaves a dangling reference. Rename through the Settings UI or by editing the config and applying it.
+Source and controller `id` fields are editable. Renaming one migrates every reference automatically: the `field_source_chains` picks, the `forecast_provider` pin, each zone's probe IDs (including legacy `soil_sensor_id`), and each zone's `controller_id`. A rename never leaves a dangling reference. Rename through the Settings UI or by editing the config and applying it.
 
 ## `[zones.<slug>]`
 
@@ -4665,7 +4708,8 @@ max_run_minutes = null           # null = 60; longest single run (whole minutes,
 controller_id = "os_main"
 controller_station = "1"         # the controller's own id for this zone
 controller_zone_name = null      # the controller's name for it; a label only
-soil_sensor_id = null            # optional; no probe just means no soil gate
+soil_probes = []                 # no bindings: use the water balance alone
+soil_aggregation = "median"     # median | average | minimum
 target_min_pct_soil = 30.0
 saturation_pct_soil = 70.0
 weekly_budget_in = null          # null = 1.00 turf, 0.50 shrub/garden/bed
@@ -4959,7 +5003,7 @@ Bad PUTs return 422 with the specific failure; on-disk file is untouched.
 
 ## Migrations
 
-There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](https://github.com/silenthooligan/localsky/blob/main/src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `2`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#config-and-database-migrations).
+There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](https://github.com/silenthooligan/localsky/blob/main/src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `3`; older configs migrate their soil binding into the probe list, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#config-and-database-migrations).
 
 LocalSky records a config snapshot on every save. Each successful write (a settings `PUT`, a raw-TOML save, or the wizard apply) first copies the previous on-disk `localsky.toml` to `<config_dir>/snapshots/<unix_ts>.toml`, keeping the newest 20 and pruning older ones. To list and restore them:
 
@@ -4997,6 +5041,29 @@ LOCALSKY_ANALYTICS_SRC=/stats/u.js            # your tracker script URL
 LOCALSKY_ANALYTICS_WEBSITE_ID=<your-site-id>  # data-website-id value
 LOCALSKY_ANALYTICS_HOST_URL=                  # optional data-host-url
 ```
+
+### Multiple soil probes
+
+Use the zone editor to select probe IDs returned by `/api/v1/sensors/soil`.
+Each binding has `sensor_id`, `excluded_from_decisions` (default false), and
+`stale_after_s` (default 86400; range 1 through 604800 seconds). For example:
+
+```toml
+[[zones.back_yard.soil_probes]]
+sensor_id = "source:ecowitt_gw:soilmoisture1"
+excluded_from_decisions = false
+stale_after_s = 900
+
+[[zones.back_yard.soil_probes]]
+sensor_id = "source:ecowitt_gw:soilmoisture2"
+excluded_from_decisions = true
+stale_after_s = 900
+```
+
+A nonempty `soil_probes` list takes precedence over legacy `soil_sensor_id`.
+An empty list falls back to the legacy field, so clear both to remove all
+bindings. Excluding every probe keeps the zone held. See
+[probe aggregation and freshness](soil-sensors.md#combine-probes-and-handle-failures).
 
 
 ---
@@ -5044,7 +5111,23 @@ Source: https://localsky.io/docs/location.html
 
 Set latitude, longitude, and elevation during setup. LocalSky uses them for sunrise, solar calculations, forecast coverage, and map placement. The timezone is inferred from coordinates.
 
-Use address search or enter coordinates directly. Check the result, especially near a timezone boundary. Enter a known elevation when the automatic lookup is unavailable or inaccurate.
+Use address search, your device's location, or enter coordinates directly. Check the result, especially near a timezone boundary. Enter a known elevation when the automatic lookup is unavailable or inaccurate.
+
+## Address search
+
+Type a street, town, or landmark and press Enter. LocalSky looks it up in OpenStreetMap through its own server, so your browser never talks to the map service directly. When nothing matches, it retries with the town dropped (OpenStreetMap often files a street under a nearby place rather than the postal town) and then, for a United States address with a house number, asks the US Census Bureau geocoder, which lists new streets before OpenStreetMap has them named. Each result says which service found it.
+
+If a search comes back empty, try the street or landmark on its own, add the ZIP or postal code, or include a house number for a street built in the last few years. Coordinates from your phone's map app always work.
+
+Searches are limited to 30 a minute per device, and LocalSky spaces its own requests to OpenStreetMap one second apart, as that service requires.
+
+## Pick on the map
+
+The button opens a map under the search box. Tap or click where you are to drop the pin, drag it to fine-tune, and the coordinates below follow. A search result, your device's location, or a typed coordinate moves the pin too. The map tiles come from OpenStreetMap and are fetched only while the map is open.
+
+## Use my location
+
+The button asks your browser for the device's position. Browsers only share it over HTTPS or on localhost, and only after you allow it. When LocalSky is embedded in Home Assistant, open it in its own tab first. An indoor fix can be off by tens of meters, so check the coordinates before moving on.
 
 After moving an installation, update its location in Settings and confirm the timezone, forecast coverage, and next scheduled run. Daily history and permitted watering days depend on local time.
 

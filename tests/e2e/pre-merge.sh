@@ -13,9 +13,16 @@
 # inside it are the wrong revision.
 set -eu
 IMG="${1:?image}"
-NET=localsky-e2e-net
-APP=localsky-e2e
-DEMO=localsky-e2e-demo
+# Every docker resource carries the image tag (the build's sha), so two
+# gates on one daemon (a main push and a release-candidate branch at the
+# same minute, 2026-10-24) cannot remove each other's container or
+# network mid-suite. Fixed names did exactly that: exit 137 on one side,
+# "network not found" on the other.
+RUN_ID=$(printf '%s' "$IMG" | sed 's/.*://' | cut -c1-12)
+NET="localsky-e2e-net-$RUN_ID"
+APP="localsky-e2e-$RUN_ID"
+DEMO="localsky-e2e-demo-$RUN_ID"
+PW="localsky-e2e-pw-$RUN_ID"
 E2E_DIR=$(cd "$(dirname "$0")" && pwd)
 PW_VERSION=$(sed -n '/"node_modules\/@playwright\/test"/,/}/s/.*"version": *"\([0-9.]*\)".*/\1/p' "$E2E_DIR/package-lock.json" | head -1)
 [ -n "$PW_VERSION" ] || { echo "could not read the @playwright/test version from package-lock.json"; exit 1; }
@@ -24,7 +31,7 @@ PW_IMG="mcr.microsoft.com/playwright:v${PW_VERSION}-noble"
 cleanup() {
   docker rm -f "$APP" >/dev/null 2>&1 || true
   docker rm -f "$DEMO" >/dev/null 2>&1 || true
-  docker rm -f localsky-e2e-pw >/dev/null 2>&1 || true
+  docker rm -f "$PW" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 fail() {
@@ -72,7 +79,6 @@ done
 # --ipc=host for chromium's shared memory.
 # The stock browser image does not include the DejaVu families selected by
 # the visual fixture. Install and verify them before comparing baselines.
-PW=localsky-e2e-pw
 docker rm -f "$PW" >/dev/null 2>&1 || true
 if ! docker image inspect "$PW_IMG" >/dev/null 2>&1; then
   pulled=0
@@ -91,8 +97,8 @@ docker create --name "$PW" --network "$NET" --ipc=host -w /e2e \
     && test "$(fc-match -f "%{family}" "DejaVu Sans Mono")" = "DejaVu Sans Mono" \
     && npm ci --no-audit --no-fund >/dev/null \
     && npx playwright test fresh-install.spec.ts --reporter=list --retries=0 --forbid-only \
-    && npx playwright test axe.spec.ts editor-drawer.spec.ts intent-safety.spec.ts forecast-tracks.spec.ts rachio-scan.spec.ts zone-bind.spec.ts --reporter=list --retries=0 --forbid-only \
-    && BASE_URL="$DEMO_BASE_URL" npx playwright test smoke.spec.ts radar.spec.ts demo.spec.ts visual-system.spec.ts setup-layout.spec.ts stable-ux.spec.ts notification-settings.spec.ts quick-run.spec.ts watering-controls.spec.ts --reporter=list --retries=0 --forbid-only --update-snapshots=none' >/dev/null
+    && npx playwright test axe.spec.ts editor-drawer.spec.ts intent-safety.spec.ts forecast-tracks.spec.ts rachio-scan.spec.ts zone-bind.spec.ts soil-probes.spec.ts --reporter=list --retries=0 --forbid-only \
+    && BASE_URL="$DEMO_BASE_URL" npx playwright test smoke.spec.ts radar.spec.ts demo.spec.ts visual-system.spec.ts setup-layout.spec.ts location-search.spec.ts stable-ux.spec.ts notification-settings.spec.ts quick-run.spec.ts watering-controls.spec.ts --reporter=list --retries=0 --forbid-only --update-snapshots=none' >/dev/null
 for f in package.json package-lock.json playwright.config.ts "$E2E_DIR"/*.spec.ts; do
   case "$f" in /*) src="$f" ;; *) src="$E2E_DIR/$f" ;; esac
   docker cp "$src" "$PW:/e2e/$(basename "$src")"

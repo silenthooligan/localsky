@@ -186,7 +186,7 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
                 let soil: std::collections::BTreeSet<String> = cfg
                     .zones
                     .iter()
-                    .filter(|(_, z)| z.soil_sensor_id.is_some())
+                    .filter(|(_, z)| z.has_soil_probe())
                     .map(|(slug, _)| slug.clone())
                     .collect();
                 (flow, leaf, pop, lux, Some(soil))

@@ -376,7 +376,16 @@ pub async fn generate_report_with(
         );
 
         // Probe-dependent checks.
-        let binding = classify_binding(z.soil_sensor_id.as_deref());
+        let probes: Vec<_> = z
+            .soil_bindings()
+            .into_iter()
+            .filter(|p| !p.excluded_from_decisions)
+            .collect();
+        let binding = classify_binding(if probes.len() == 1 {
+            Some(probes[0].sensor_id.as_str())
+        } else {
+            None
+        });
         let (drift, backout, has_probe_data) = match &binding {
             BindingKind::Source(sid, key) => {
                 let readings_raw = sensor_store

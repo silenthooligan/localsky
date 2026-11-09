@@ -1175,6 +1175,11 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 // the wind feature being skipped.
                 <script src=crate::base::url("/vendor/leaflet-velocity.min.js") defer></script>
                 <script src=crate::base::url("/radar.js") defer></script>
+                // Location pin picker (public/geo-picker.js): mounts a
+                // Leaflet map on the wizard's and Settings' "Pick on map"
+                // canvas when it appears, the same observer contract as
+                // radar.js, loaded once here for the same reason.
+                <script src=crate::base::url("/geo-picker.js") defer></script>
                 // Theme + kiosk-mode bootstrap. Runs synchronously before
                 // first paint so [data-theme="..."] and [data-readonly]
                 // attributes apply with no flash. Theme reads

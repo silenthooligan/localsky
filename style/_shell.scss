@@ -168,14 +168,30 @@ a { color: var(--accent); }
 .scan-row__text strong { color: var(--text-bright); font-size: var(--text-body-sm); }
 .scan-row__text span { color: var(--text-faint); font-size: var(--text-meta); }
 
-// Wizard location: address search + result list.
-.geo-search { display: flex; gap: var(--space-2); }
-.geo-search .ui-input { flex: 1; }
+// Wizard + Settings location (components::geo_search): address search,
+// the status line under it, and the result list.
+.geo-search { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.geo-search .ui-input { flex: 1 1 12rem; min-width: 0; max-width: 100%; }
+.geo-search .btn { flex: 1 1 auto; }
+// Always-present live region; it only takes up room when it has a message.
+.geo-status { margin: 0; }
+.geo-status__text { display: block; padding: var(--space-1) 0 0; font-size: var(--text-body-sm); line-height: 1.5; color: var(--text-dim); }
+.geo-status--error .geo-status__text { color: var(--accent-danger); }
 .geo-results { display: flex; flex-direction: column; gap: var(--space-1); }
-.geo-result { display: flex; align-items: baseline; gap: var(--space-3); width: 100%; text-align: left; padding: var(--space-2) var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-sm); cursor: pointer; color: var(--text); font: inherit; }
+.geo-result { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); width: 100%; text-align: left; padding: var(--space-2) var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-sm); cursor: pointer; color: var(--text); font: inherit; }
 .geo-result:hover { border-color: var(--accent); background: var(--elev-3); }
-.geo-result__name { flex: 1; min-width: 0; font-size: var(--text-body-sm); }
+.geo-result__name { flex: 1 1 12rem; min-width: 0; font-size: var(--text-body-sm); }
+.geo-result__source { flex: none; padding: 1px var(--space-2); border: 1px solid var(--elev-border); border-radius: 999px; font-size: var(--text-micro); color: var(--text-dim); white-space: nowrap; }
 .geo-result__coords { flex: none; font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-faint); white-space: nowrap; }
+// "Pick on map" (public/geo-picker.js): Leaflet on OSM tiles under the
+// search box. The tile pane borrows the radar's basemap filter so dark
+// themes get the same inverted map; the pin is a CSS dot, no image fetch.
+.geo-map { margin-top: var(--space-2); }
+.geo-map__canvas { height: 320px; max-height: 55vh; border: 1px solid var(--elev-border); border-radius: var(--radius-sm); overflow: hidden; }
+.geo-map__canvas .leaflet-tile-pane { filter: var(--radar-basemap-filter); }
+.geo-map__hint { margin: var(--space-1) 0 0; font-size: var(--text-meta); line-height: 1.5; color: var(--text-faint); }
+.geo-pin { background: none; border: 0; }
+.geo-pin__dot { display: block; width: 28px; height: 28px; box-sizing: border-box; border-radius: 50%; border: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 35%, transparent); box-shadow: 0 0 0 2px var(--bg-deep); }
 
 // Login page: centered card, full-viewport.
 .login-page { display: flex; align-items: center; justify-content: center; min-height: 70vh; padding: var(--space-5); }
@@ -240,6 +256,19 @@ a { color: var(--accent); }
     scroll-padding-top: calc(4.25rem + env(safe-area-inset-top) + 35dvh + 1rem);
     scroll-padding-bottom: calc(5rem + env(safe-area-inset-bottom));
   }
+}
+
+// Setup hides the app's mobile header. Keep its restart notice in normal
+// flow at every width: neither an offset nor a sticky layer should cover
+// the branding, appearance controls or form when the user scrolls.
+.app-shell:has(.setup-shell) .health-banner--sticky {
+  position: static;
+  max-height: none;
+  overflow: visible;
+}
+html:has(.setup-shell):has(.health-banner--sticky) {
+  scroll-padding-top: var(--space-4);
+  scroll-padding-bottom: var(--space-4);
 }
 .health-banner__link { flex: none; color: var(--accent-text); font-weight: 600; text-decoration: none; }
 .health-banner__link:hover { text-decoration: underline; }

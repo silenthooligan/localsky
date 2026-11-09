@@ -2,6 +2,37 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-08
+
+### Added
+
+- Multiple soil probes per zone with median, average, or lowest aggregation,
+  individual freshness windows, and exclusion from watering decisions.
+  API contract 2.6.0 adds probe configuration and inventory eligibility.
+
+- Location: "Use my location" fills the coordinates from the browser (HTTPS or localhost, with permission). Denied, unavailable and embedded cases each explain themselves.
+- Address search: US Census Bureau fallback for US addresses OpenStreetMap has not mapped yet. Results show which service found them.
+- Location: "Pick on map" drops a pin on an OpenStreetMap map; the pin follows search results, device location and typed coordinates. Tiles load only while the map is open.
+
+### Fixed
+
+- Soil mappings keep independent readings instead of sharing a zone channel.
+  A live probe no longer masks a stale peer. MQTT retained replays no longer
+  refresh soil readings after reconnect. Configuration schema 3 migrates old
+  bindings; mapped probes wait for a new reading after upgrade.
+
+- Address search no longer goes silent: no matches, rate limits and service errors each show a message, and stale results clear when the query changes.
+- Address search retries with the town dropped when OpenStreetMap files the street under a nearby place.
+- Settings location search controls and results fit narrow phone screens.
+
+### Changed
+
+- Address search allows 30 lookups a minute per device (was 10). The server spaces its OpenStreetMap calls one second apart.
+
+### Security
+
+- Dependency updates for October RustSec advisories: rustls 0.23.46, rustls-webpki 0.103.16, webpki-roots and webpki-root-certs 1.0.11, quinn-proto 0.11.19, ctutils 0.4.5, tokio 1.54.1.
+
 ## [1.0.2] - 2026-10-10
 
 ### Fixed

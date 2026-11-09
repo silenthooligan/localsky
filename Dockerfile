@@ -79,7 +79,7 @@ FROM src AS gate
 COPY tests ./tests
 COPY README.md ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/build/target,sharing=locked \
     cargo fmt --check \
     && cargo clippy --no-default-features --features ssr --all-targets -- -D warnings \
     && INSTA_UPDATE=no cargo test --no-default-features --features ssr --tests \
@@ -111,8 +111,18 @@ ENV GIT_SHA=${GIT_SHA}
 # /build/out in the same RUN. target/site is regenerated from scratch each
 # build (cheap assembly) so stale content-hashed pkg files from earlier
 # builds cannot accumulate in the cache and leak into the image.
+#
+# sharing=locked on the target mount (here and in the gate stage): two
+# image builds on one runner (a main push and a release-candidate branch,
+# 2026-10-24) ran this step at the same minute in the SAME cache dir.
+# Cargo serializes compilation with its own lock, but the rm -rf above and
+# cargo-leptos's asset hashing run outside it, so one build's cleanup
+# deleted the other's freshly hashed pkg/localsky.<hash>.js mid-hash (a
+# panic here) and the survivor shipped an image whose HTML named a file
+# it did not contain (hydration never happened in the candidate's e2e).
+# Locked pauses the second writer until the first RUN releases the mount.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/build/target,sharing=locked \
     rm -rf target/site \
     && cargo leptos build --release \
     && mkdir -p /build/out \

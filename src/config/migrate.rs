@@ -29,7 +29,52 @@ pub const MIGRATIONS: &[Migration] = &[
         target: 2,
         apply: open_meteo_past_days,
     },
+    Migration {
+        id: "2026-11-independent-soil-probes",
+        target: 3,
+        apply: independent_soil_probes,
+    },
 ];
+
+/// Preserve raw references and other configuration verbatim. The loader
+/// expands virtual zone addresses after environment interpolation, when the
+/// source's actual topic/entity selectors are known.
+fn independent_soil_probes(doc: &mut toml::Table, _ledger: &mut Ledger) {
+    let Some(zones) = doc.get_mut("zones").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    for zone in zones
+        .iter_mut()
+        .filter_map(|(_, value)| value.as_table_mut())
+    {
+        if zone
+            .get("soil_probes")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|p| !p.is_empty())
+        {
+            continue;
+        }
+        let Some(id) = zone
+            .get("soil_sensor_id")
+            .and_then(toml::Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let mut probe = toml::Table::new();
+        probe.insert("sensor_id".into(), toml::Value::String(id.into()));
+        probe.insert("stale_after_s".into(), toml::Value::Integer(86400));
+        probe.insert(
+            "excluded_from_decisions".into(),
+            toml::Value::Boolean(false),
+        );
+        zone.insert(
+            "soil_probes".into(),
+            toml::Value::Array(vec![toml::Value::Table(probe)]),
+        );
+        zone.remove("soil_sensor_id");
+    }
+}
 
 /// Apply every migration this document still needs, in order. Returns the
 /// ids applied; empty means neither file needs writing.
@@ -170,7 +215,11 @@ epoch = 5
         let applied = migrate(&mut doc, &mut ledger, 100);
         assert_eq!(
             applied,
-            vec!["2026-09-ledger-sidecar", "2026-09-open-meteo-past-days"]
+            vec![
+                "2026-09-ledger-sidecar",
+                "2026-09-open-meteo-past-days",
+                "2026-11-independent-soil-probes"
+            ]
         );
         assert_eq!(document_version(&doc), CURRENT_SCHEMA_VERSION);
         for gone in ["seeded_source_ids", "priority_repaired_ids", "ha_adoption"] {
@@ -179,7 +228,7 @@ epoch = 5
         assert_eq!(ledger.seeded_source_ids, vec!["nws"]);
         assert_eq!(ledger.priority_repaired_ids, vec!["open_meteo"]);
         assert_eq!(ledger.ha_adoption.len(), 1);
-        assert_eq!(ledger.migrations.len(), 2);
+        assert_eq!(ledger.migrations.len(), 3);
         let past = doc["sources"][0]["config"]["past_days"].as_integer();
         assert_eq!(past, Some(3));
 
@@ -213,5 +262,44 @@ epoch = 5
         let mut ids: Vec<&str> = MIGRATIONS.iter().map(|m| m.id).collect();
         ids.dedup();
         assert_eq!(ids.len(), MIGRATIONS.len());
+    }
+
+    #[test]
+    fn v2_soil_migration_preserves_environment_references_and_other_fields() {
+        let raw = r#"
+schema_version = 2
+[zones.bed]
+soil_sensor_id = "source:mqtt:soilmoisture_bed"
+area_sqft = 100
+[[sources]]
+id = "mqtt"
+kind = "mqtt"
+[sources.config]
+broker_host = "${MQTT_HOST}"
+password = "${MQTT_PASSWORD}"
+[[sources.config.subscriptions]]
+topic = "${SOIL_TOPIC}"
+field = "rh_pct"
+zone_slug = "bed"
+"#;
+        let mut doc: toml::Table = toml::from_str(raw).unwrap();
+        let sources = doc["sources"].clone();
+        let mut ledger = Ledger::default();
+        assert_eq!(
+            migrate(&mut doc, &mut ledger, 100),
+            vec!["2026-11-independent-soil-probes"]
+        );
+        assert_eq!(document_version(&doc), 3);
+        assert_eq!(doc["sources"], sources);
+        assert_eq!(doc["zones"]["bed"]["area_sqft"].as_integer(), Some(100));
+        assert_eq!(
+            doc["zones"]["bed"]["soil_probes"][0]["sensor_id"].as_str(),
+            Some("source:mqtt:soilmoisture_bed")
+        );
+        assert!(!doc["zones"]["bed"]
+            .as_table()
+            .unwrap()
+            .contains_key("soil_sensor_id"));
+        assert!(migrate(&mut doc, &mut ledger, 200).is_empty());
     }
 }

@@ -859,20 +859,26 @@ target = "irrigation_control.is_paused"
 epoch = 5
 "#;
 
-    /// The plan's criterion: a v1 file migrates to v2 on the first load
+    /// A v1 file migrates to the current schema on the first load
     /// and re-saves byte-identically on the second; the records are in the
     /// ledger and out of the document, where no config write can drop them.
     #[tokio::test]
-    async fn a_v1_file_migrates_to_v2_and_resaves_byte_identically() {
+    async fn a_v1_file_migrates_and_resaves_byte_identically() {
         let d = dir("v1");
         let path = d.join("localsky.toml");
         std::fs::write(&path, V1).unwrap();
         let store = FileConfigStore::new(&path);
 
         let cfg = store.load().await.unwrap();
-        assert_eq!(cfg.schema_version, 2);
+        assert_eq!(cfg.schema_version, crate::config::CURRENT_SCHEMA_VERSION);
         let first = std::fs::read_to_string(&path).unwrap();
-        assert!(first.contains("schema_version = 2"), "{first}");
+        assert!(
+            first.contains(&format!(
+                "schema_version = {}",
+                crate::config::CURRENT_SCHEMA_VERSION
+            )),
+            "{first}"
+        );
         for gone in ["seeded_source_ids", "ha_adoption"] {
             assert!(
                 !first.contains(gone),
@@ -883,11 +889,14 @@ epoch = 5
         let ledger = store.ledger();
         assert_eq!(ledger.seeded_source_ids, vec!["nws"]);
         assert_eq!(ledger.ha_adoption.len(), 1);
-        assert_eq!(ledger.migrations.len(), 2);
+        assert_eq!(
+            ledger.migrations.len(),
+            crate::config::migrate::MIGRATIONS.len()
+        );
 
         // Second load: nothing to migrate, nothing rewritten.
         let again = store.load().await.unwrap();
-        assert_eq!(again.schema_version, 2);
+        assert_eq!(again.schema_version, crate::config::CURRENT_SCHEMA_VERSION);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
         assert_eq!(store.ledger(), ledger);
 

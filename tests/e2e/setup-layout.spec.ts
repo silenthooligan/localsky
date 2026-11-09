@@ -1,5 +1,6 @@
 import { test, expect, Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import visualDemo from './fixtures/visual-demo.json';
 
 test.use({ serviceWorkers: 'block', reducedMotion: 'reduce' });
 const steps = ['welcome','location','sources','controllers','zones','rules','sensors','llm','notifications','account','review'];
@@ -62,6 +63,49 @@ async function geometry(page: Page) {
     return found;
   });
   expect(issues).toEqual([]);
+}
+
+for (const mode of ['light', 'dark']) for (const [width, height] of [[320, 740], [390, 844], [844, 390], [1440, 900]]) {
+  test(`pending restart does not cover wizard branding in ${mode} at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height });
+    await sandbox(page);
+    const writes: string[] = [];
+    page.on('request', r => { if (!['GET', 'HEAD'].includes(r.method())) writes.push(r.url()); });
+    await page.route('**/api/wizard/state', route => route.fulfill({ json: { config_present: true, draft_present: true } }));
+    const snapshot = { ...visualDemo.responses['/api/irrigation/snapshot'], zones: [],
+      restart_required: true, restart_reasons: [
+        'Your weather sources are not connected yet. Restart to connect them.',
+        'Weather source connections changed.',
+      ] };
+    await page.route(/\/api\/(v1\/)?irrigation\/(snapshot|stream)$/, route =>
+      route.request().url().endsWith('/stream')
+        ? route.fulfill({ contentType: 'text/event-stream', body: `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n` })
+        : route.fulfill({ json: snapshot }));
+    await page.goto('/setup');
+    await expect(page.locator('html')).toHaveAttribute('data-hydrated', 'true');
+    await page.getByRole('combobox', { name: 'Display mode', exact: true }).selectOption(mode);
+    const notice = page.locator('.health-banner--sticky');
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText('Settings saved. Restart LocalSky to use them.');
+    await expect(notice).not.toContainText('watering');
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await geometry(page);
+    for (const scroll of [0, 120]) {
+      await page.evaluate(top => window.scrollTo({ top, behavior: 'instant' }), scroll);
+      const banner = (await notice.boundingBox())!;
+      const brand = (await page.locator('.setup-brand').boundingBox())!;
+      expect(banner.y + banner.height).toBeLessThanOrEqual(brand.y);
+    }
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await page.screenshot({ path: testInfo.outputPath(`restart-${mode}-${width}.png`), fullPage: true });
+    await notice.getByRole('button', { name: 'Restart LocalSky now' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Restart LocalSky now?' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(notice).toBeVisible();
+    expect(writes).toEqual([]);
+  });
 }
 
 for (const style of ['field','slate','classic']) for (const mode of ['light','dark']) for (const width of [390,1440]) {

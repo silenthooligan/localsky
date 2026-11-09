@@ -270,6 +270,8 @@ pub(crate) fn build_per_zone(cfg: &crate::config::schema::Config) -> PerZone {
             slug: key.clone(),
             name: z.display_name.clone(),
             soil_sensor_id: z.soil_sensor_id.clone(),
+            soil_probes: z.soil_probes.clone(),
+            soil_aggregation: z.soil_aggregation,
             saturation_pct: z.saturation_pct_soil,
             target_min_pct: z.target_min_pct_soil,
             sprinkler_type: z.sprinkler_type,
@@ -559,11 +561,22 @@ pub struct ZoneSoilCfg {
     pub slug: String,
     pub name: String,
     pub soil_sensor_id: Option<String>,
+    pub soil_probes: Vec<crate::config::SoilProbeConfig>,
+    pub soil_aggregation: crate::config::SoilAggregation,
     pub saturation_pct: f64,
     pub target_min_pct: f64,
     /// The zone's head, carried to the engine so a restriction that
     /// exempts drip or bubbler irrigation can stand aside for it.
     pub sprinkler_type: crate::config::schema::SprinklerType,
+}
+
+impl ZoneSoilCfg {
+    pub fn soil_bindings(&self) -> Vec<crate::config::SoilProbeConfig> {
+        crate::config::soil::bindings(&self.soil_probes, self.soil_sensor_id.as_deref())
+    }
+    pub fn has_soil_probe(&self) -> bool {
+        !self.soil_bindings().is_empty()
+    }
 }
 
 /// Offline guard for a raw soil reading: a value outside the physical band

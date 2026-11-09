@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
@@ -30,7 +30,7 @@ pub struct Config {
     /// Bumped by a recorded migration (`config::migrate`); defaults to
     /// CURRENT_SCHEMA_VERSION when a hand-edited TOML omits it (so a
     /// missing key does not fail the whole parse). v2 (0.9.0) moved the
-    /// server-owned records into `localsky.ledger.toml`.
+    /// server-owned records into `localsky.ledger.toml`. v3 adds soil probe lists.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default)]
@@ -1239,11 +1239,9 @@ pub struct YolinkFieldMap {
     /// when `zone_slug` is set (then this maps a per-zone soil channel).
     #[serde(default)]
     pub field: String,
-    /// When set, this mapping is a per-ZONE soil channel, not a global
-    /// WeatherField: the value is emitted as a KeyedReading under
-    /// `soilmoisture_<zone_slug>` (a zone binds it via
-    /// `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`). Mirrors the
-    /// MQTT soil-subscription path.
+    /// Mark this mapping as a soil probe associated with a zone. Each
+    /// topic/entity/path has its own channel, independent of the zone name.
+    /// Bind the discovered probe ID in the zone's soil_probes list.
     #[serde(default)]
     pub zone_slug: Option<String>,
     /// YoLink device id (deviceId from /api Home.getDeviceList).
@@ -1307,10 +1305,9 @@ pub struct TuyaFieldMap {
     /// maps a per-zone soil channel).
     #[serde(default)]
     pub field: String,
-    /// When set, emit a per-ZONE soil KeyedReading under
-    /// `soilmoisture_<zone_slug>` instead of a global WeatherField (a zone binds
-    /// it via `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`). Tuya
-    /// is the dominant cheap-soil-probe OEM, so this is the common soil path.
+    /// Mark this mapping as a soil probe associated with a zone. Each
+    /// topic/entity/path has its own channel, independent of the zone name.
+    /// Bind the discovered probe ID in the zone's soil_probes list.
     #[serde(default)]
     pub zone_slug: Option<String>,
     pub device_id: String,
@@ -1371,10 +1368,9 @@ pub struct HaPassthroughConfig {
     /// stitch sensors from arbitrary HA integrations into the engine.
     #[serde(default)]
     pub field_map: BTreeMap<String, String>,
-    /// Map of HA entity_id -> zone_slug for per-ZONE soil probes. Each listed
-    /// entity is emitted as a KeyedReading under `soilmoisture_<zone_slug>`
-    /// (a zone binds it via `soil_sensor_id = "source:<id>:soilmoisture_
-    /// <zone_slug>"`) instead of a global WeatherField. Additive to field_map.
+    /// Map of HA entity_id -> zone_slug for soil probes. Each entity emits
+    /// an independent KeyedReading. Bind its discovered ID in soil_probes.
+    /// Additive to field_map.
     #[serde(default)]
     pub soil_zone_map: BTreeMap<String, String>,
 }
@@ -1414,16 +1410,9 @@ pub struct MqttSubscription {
     /// "0.value"). When unset, the entire payload is parsed as a number.
     #[serde(default)]
     pub json_path: Option<String>,
-    /// Optional zone slug for per-zone soil moisture. When set, the MQTT
-    /// adapter does NOT emit a global typed Observation (which the merge bus
-    /// keys by WeatherField and so cannot disambiguate per zone, and which
-    /// would clobber the global humidity field). Instead it emits a per-zone
-    /// soil CHANNEL recorded in sensor_history under the canonical key
-    /// `soilmoisture_<zone_slug>` (see bus_recorder::zone_soil_key). A zone
-    /// binds it via `soil_sensor_id = "source:<source_id>:soilmoisture_<zone_slug>"`,
-    /// after which resolve_soil_pct, the /sensors/soil + /sensors/inventory
-    /// discovery, and the Sensors view all treat it like a native Ecowitt
-    /// `soilmoisture<N>` channel.
+    /// Mark this mapping as a soil probe associated with a zone. Each
+    /// topic/entity/path has its own channel, independent of the zone name.
+    /// Bind the discovered probe ID in the zone's soil_probes list.
     #[serde(default)]
     pub zone_slug: Option<String>,
     /// Optional linear transform: published_value * scale + offset.
@@ -1464,9 +1453,9 @@ pub struct HttpWebhookField {
     /// maps a per-zone soil channel for a DIY gateway).
     #[serde(default)]
     pub field: String,
-    /// When set, emit a per-ZONE soil KeyedReading under
-    /// `soilmoisture_<zone_slug>` instead of a global WeatherField (a zone binds
-    /// it via `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`).
+    /// Mark this mapping as a soil probe associated with a zone. Each
+    /// topic/entity/path has its own channel, independent of the zone name.
+    /// Bind the discovered probe ID in the zone's soil_probes list.
     #[serde(default)]
     pub zone_slug: Option<String>,
     #[serde(default)]
@@ -1543,8 +1532,9 @@ pub struct PrometheusQuery {
     /// (then this maps a per-zone soil channel instead of a global field).
     #[serde(default)]
     pub field: String,
-    /// When set, emit a per-ZONE soil KeyedReading under `soilmoisture_<zone_slug>`
-    /// instead of a global WeatherField.
+    /// Mark this mapping as a soil probe associated with a zone. Each
+    /// topic/entity/path has its own channel, independent of the zone name.
+    /// Bind the discovered probe ID in the zone's soil_probes list.
     #[serde(default)]
     pub zone_slug: Option<String>,
     /// PromQL instant query that must evaluate to a single scalar/first-vector
@@ -1618,7 +1608,9 @@ pub struct InfluxQuery {
     /// WeatherField variant name (snake_case). Ignored when `zone_slug` is set.
     #[serde(default)]
     pub field: String,
-    /// When set, emit a per-ZONE soil KeyedReading instead of a global field.
+    /// Mark this mapping as a soil probe associated with a zone. Each
+    /// topic/entity/path has its own channel, independent of the zone name.
+    /// Bind the discovered probe ID in the zone's soil_probes list.
     #[serde(default)]
     pub zone_slug: Option<String>,
     /// InfluxQL that returns one field, e.g.
@@ -2181,10 +2173,15 @@ pub struct ZoneConfig {
     /// predates the picker.
     #[serde(default)]
     pub controller_zone_name: Option<String>,
-    /// Soil moisture sensor entity (any source). Optional; engine uses
-    /// modeled bucket when absent.
+    /// Legacy single-probe address. Used only when soil_probes is empty.
     #[serde(default)]
     pub soil_sensor_id: Option<String>,
+    /// Independent probes. When nonempty, takes precedence over soil_sensor_id.
+    #[serde(default)]
+    pub soil_probes: Vec<SoilProbeConfig>,
+    /// How fresh, valid, included probes combine into the zone reading.
+    #[serde(default)]
+    pub soil_aggregation: SoilAggregation,
     /// Phase E soil-status band low edge (%).
     #[serde(default = "default_target_min_pct")]
     pub target_min_pct_soil: f64,
@@ -3304,5 +3301,48 @@ mod scheduling_model_default_tests {
             pinned.engine.effective_scheduling_model(),
             SchedulingModel::Weekly
         );
+    }
+}
+
+/// One independently monitored soil probe. Exclusion keeps the binding and history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+pub struct SoilProbeConfig {
+    pub sensor_id: String,
+    #[serde(default)]
+    pub excluded_from_decisions: bool,
+    #[serde(default = "crate::config::soil::default_stale_after_s")]
+    pub stale_after_s: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+pub enum SoilAggregation {
+    #[default]
+    Median,
+    Average,
+    Minimum,
+}
+
+impl SoilAggregation {
+    pub fn combine(self, mut values: Vec<f64>) -> Option<f64> {
+        values.retain(|v| v.is_finite());
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_by(f64::total_cmp);
+        Some(match self {
+            Self::Minimum => values[0],
+            Self::Average => values.iter().sum::<f64>() / values.len() as f64,
+            Self::Median => {
+                let middle = values.len() / 2;
+                if values.len().is_multiple_of(2) {
+                    (values[middle - 1] + values[middle]) / 2.0
+                } else {
+                    values[middle]
+                }
+            }
+        })
     }
 }

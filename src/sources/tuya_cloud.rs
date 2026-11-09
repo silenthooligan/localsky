@@ -322,10 +322,13 @@ impl TuyaCloud {
                 };
                 let value = raw * m.scale + m.offset;
                 // Per-zone soil channel -> KeyedReading.
-                if let Some(zone) = &m.zone_slug {
+                if let Some(_zone) = &m.zone_slug {
                     poll = poll.with(SourceEvent::KeyedReading {
                         source_id: self.id.clone(),
-                        key: crate::sources::bus_recorder::zone_soil_key(zone),
+                        key: crate::config::soil::probe_key(
+                            "tuya",
+                            &[&m.device_id, &m.status_code],
+                        ),
                         value,
                         at_epoch: chrono::Utc::now().timestamp(),
                     });

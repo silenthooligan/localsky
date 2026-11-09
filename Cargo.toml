@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -151,6 +151,14 @@ web-sys = { version = "0.3", optional = true, features = [
     "Storage",
     "Navigator",
     "Clipboard",
+    # components::geo_search "Use my location": navigator.geolocation.
+    "Geolocation",
+    "Position",
+    "PositionError",
+    "PositionOptions",
+    "Coordinates",
+    # components::geo_search "Pick on map": the geo-pick event from geo-picker.js.
+    "CustomEvent",
     "ServiceWorkerContainer",
     "ServiceWorkerRegistration",
     "ServiceWorker",

@@ -10,6 +10,7 @@ pub mod controllers_form;
 pub mod feedback;
 pub mod footer;
 pub mod forecast;
+pub mod geo_search;
 pub mod health_banner;
 pub mod historyview;
 pub mod humidity;

@@ -74,6 +74,10 @@ struct SoilProbe {
     ec: Option<f64>,
     #[serde(default)]
     bound_zone_slug: Option<String>,
+    #[serde(default)]
+    excluded_from_decisions: bool,
+    #[serde(default)]
+    usable_for_decisions: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -255,37 +259,15 @@ pub fn SettingsSensors() -> impl IntoView {
         opts
     };
 
-    // Bind a probe to a zone. `zone_key` empty -> unbind (null out whichever
-    // zone currently holds this probe). Otherwise set that zone's
-    // `soil_sensor_id` to the probe id (overwriting whatever it had), and
-    // clear the probe off any OTHER zone so a probe maps to one zone. Then
-    // PUT the full Config, exactly the zone-editor save path.
+    // Move or unbind one probe while preserving every other binding and its
+    // decision settings. PUT the full Config through the zone-editor path.
     let bind = Callback::new(move |(probe_id, zone_key): (String, String)| {
         if saving.get() {
             return;
         }
         config_json.update(|cfg| {
             if let Some(zones) = cfg.get_mut("zones").and_then(|z| z.as_object_mut()) {
-                for (slug, z) in zones.iter_mut() {
-                    let Some(obj) = z.as_object_mut() else {
-                        continue;
-                    };
-                    let holds_this = obj
-                        .get("soil_sensor_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == probe_id)
-                        .unwrap_or(false);
-                    if slug == &zone_key {
-                        obj.insert(
-                            "soil_sensor_id".into(),
-                            serde_json::Value::String(probe_id.clone()),
-                        );
-                    } else if holds_this {
-                        // Another zone had this probe; a probe binds to one
-                        // zone, so release it there.
-                        obj.insert("soil_sensor_id".into(), serde_json::Value::Null);
-                    }
-                }
+                crate::config::soil::bind_json(zones, &probe_id, &zone_key);
                 // Unbind: the loop above already nulled the holder.
             }
         });
@@ -619,7 +601,20 @@ fn soil_probe_row(
         .moisture_pct
         .map(|m| format!("{m:.1}%"))
         .unwrap_or_else(|| "-".to_string());
-    let age = fmt_age(p.age_s);
+    let age = if p.moisture_pct.is_none() {
+        "No reading".to_string()
+    } else {
+        fmt_age(p.age_s)
+    };
+    let decision_status = if p.excluded_from_decisions {
+        "Excluded"
+    } else if p.bound_zone_slug.is_none() {
+        "Not bound"
+    } else if p.usable_for_decisions {
+        "Included"
+    } else {
+        "Unavailable or stale"
+    };
     let bound_slug = p.bound_zone_slug.clone().unwrap_or_default();
 
     // Small chips: battery, temp, EC, shown only when present.
@@ -662,6 +657,7 @@ fn soil_probe_row(
                 <span class="soil-card__pill">{age}</span>
             </div>
             <div class="soil-card__value">{reading}</div>
+            <span class="soil-card__pill">{decision_status}</span>
             <div class="zone-soil-live" style="margin-top:0; flex-wrap:wrap">
                 {chips}
             </div>

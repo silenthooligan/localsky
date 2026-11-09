@@ -79,7 +79,7 @@ impl HttpWebhook {
             let value = raw * mapping.scale + mapping.offset;
             // Per-zone soil channel: emit a KeyedReading like the MQTT adapter so
             // a DIY gateway can feed zone-bound soil (field is ignored).
-            if let Some(zone) = mapping
+            if let Some(_zone) = mapping
                 .zone_slug
                 .as_deref()
                 .map(str::trim)
@@ -87,7 +87,10 @@ impl HttpWebhook {
             {
                 let _ = self.bus.send(SourceEvent::KeyedReading {
                     source_id: self.id.clone(),
-                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                    key: crate::config::soil::probe_key(
+                        "http",
+                        &[mapping.json_path.as_deref().unwrap_or("")],
+                    ),
                     value,
                     at_epoch: now_epoch(),
                 });
@@ -243,7 +246,7 @@ mod tests {
         let SourceEvent::KeyedReading { key, value, .. } = rx.try_recv().unwrap() else {
             panic!("expected keyed reading");
         };
-        assert_eq!(key, "soilmoisture_back_garden");
+        assert_eq!(key, crate::config::soil::probe_key("http", &["soil"]));
         assert_eq!(value, 41.0);
     }
 

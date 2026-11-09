@@ -662,6 +662,7 @@ pub(crate) fn build_zone_run_evidence(
 ///                            source channel (Ecowitt etc.)
 ///   - bare `sensor.x`      → HA entity (legacy / back-compat)
 /// `None` when unassigned or the reading is unavailable.
+#[cfg(test)]
 pub(crate) async fn resolve_soil_pct(
     spec: Option<&str>,
     map: &HashMap<String, Value>,
@@ -685,8 +686,7 @@ pub(crate) async fn resolve_soil_pct(
     state_f64(map, spec)
 }
 
-/// Build the engine's per-zone soil list from the boot-resolved zone
-/// config, pulling each zone's live reading via `resolve_soil_pct`.
+/// Combine each zone's fresh, included probes using its configured policy.
 pub(crate) async fn resolve_soil_zones(
     cfg: &[ZoneSoilCfg],
     map: &HashMap<String, Value>,
@@ -695,25 +695,22 @@ pub(crate) async fn resolve_soil_zones(
     let now = Utc::now().timestamp();
     let mut out = Vec::with_capacity(cfg.len());
     for z in cfg {
-        let raw = resolve_soil_pct(z.soil_sensor_id.as_deref(), map, history).await;
-        let mut pct = apply_soil_quality(raw);
-        // A stale `source:` reading (no fresh sample within the fault
-        // window) must fail safe to offline so it can never drive the dry-soil
-        // veto or a saturation skip on data the gateway stopped refreshing. The
-        // engine's protected probe-data gate then holds the zone, and
-        // detect_soil_probe_faults reports it. HA entities have no local
-        // history to judge recency, so they are left to apply_soil_quality.
-        if pct.is_some() && soil_reading_stale(z.soil_sensor_id.as_deref(), history, now).await {
-            pct = None;
+        let probes = z.soil_bindings();
+        let mut values = Vec::new();
+        for probe in &probes {
+            if probe.excluded_from_decisions {
+                continue;
+            }
+            if let Some(value) = resolve_fresh_probe(probe, map, history, now).await {
+                values.push(value);
+            }
         }
+        let pct = z.soil_aggregation.combine(values);
         out.push(ZoneSoil {
             slug: z.slug.clone(),
             name: z.name.clone(),
             pct,
-            probe_configured: z
-                .soil_sensor_id
-                .as_ref()
-                .is_some_and(|id| !id.trim().is_empty()),
+            probe_configured: !probes.is_empty(),
             saturation_pct: z.saturation_pct,
             target_min_pct: z.target_min_pct,
             governed_by_soil_model: false,
@@ -724,34 +721,38 @@ pub(crate) async fn resolve_soil_zones(
     out
 }
 
-/// True when a `source:` soil channel's most recent sample is older than the
-/// fault window, so the cached value is stale and must not drive a watering
-/// decision. `ha:` entities and missing/non-source specs are never considered
-/// stale here (no local history to judge recency).
-pub(crate) async fn soil_reading_stale(
-    spec: Option<&str>,
+/// Freshness belongs to a measurement, never the source's latest heartbeat.
+pub(crate) async fn resolve_fresh_probe(
+    probe: &crate::config::SoilProbeConfig,
+    map: &HashMap<String, Value>,
     history: Option<&crate::persistence::SensorHistoryStore>,
     now: i64,
-) -> bool {
-    let Some(rest) = spec.and_then(|s| s.strip_prefix("source:")) else {
-        return false;
+) -> Option<f64> {
+    let spec = probe.sensor_id.as_str();
+    let (value, epoch) = if let Some(rest) = spec.strip_prefix("source:") {
+        let (sid, key) = rest.split_once(':')?;
+        let reading = history?
+            .last_value(sid.to_string(), key.to_string())
+            .await
+            .ok()??;
+        (reading.value, reading.epoch)
+    } else {
+        let entity = spec.strip_prefix("ha:").unwrap_or(spec);
+        let state = map.get(entity)?;
+        let value = state_f64(map, entity)?;
+        let epoch = state
+            .get("last_reported")
+            .or_else(|| state.get("last_updated"))?
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
+            .timestamp();
+        (value, epoch)
     };
-    let Some((sid, key)) = rest.split_once(':') else {
-        return false;
-    };
-    let Some(h) = history else {
-        return false;
-    };
-    match h.last_value(sid.to_string(), key.to_string()).await {
-        Ok(Some(r)) => now.saturating_sub(r.epoch) >= SOIL_PROBE_FAULT_AFTER_S,
-        _ => false,
+    if epoch <= 0 || epoch > now || now.saturating_sub(epoch) as u64 >= probe.stale_after_s {
+        return None;
     }
+    apply_soil_quality(Some(value))
 }
-
-/// How long a configured soil channel may go without a valid (> 0)
-/// reading before it is reported as faulted. One missed gateway poll is
-/// noise; a full day of zeros is dead hardware.
-pub(crate) const SOIL_PROBE_FAULT_AFTER_S: i64 = 24 * 3600;
 
 /// Upper physical bound for a soil-moisture percentage. A reading above this
 /// is not super-saturated soil, it is a garbage / over-range frame, so
@@ -760,70 +761,61 @@ pub(crate) const SOIL_PROBE_FAULT_AFTER_S: i64 = 24 * 3600;
 /// can never physically exceed 100%.
 pub(crate) const SOIL_PCT_PHYSICAL_MAX: f64 = 100.0;
 
-/// Detect configured-but-dead soil probes. A zone is faulted when it has
-/// a soil sensor configured, its resolved pct is None (missing or <= 0.0,
-/// see `apply_soil_quality`), AND sensor_history confirms persistence:
-/// the channel's last reading above 0.0 is older than 24h, or it never
-/// produced one. A dead WH51 keeps writing 0.0 rows, so the last
-/// above-zero epoch is the signal. Only `source:` channels are checked;
-/// an `ha:` entity has no local history to distinguish a flatline from a
-/// transient blip, so it is never flagged here.
+/// Detect each failed probe independently of the zone aggregate. Exclusion
+/// affects watering decisions, not measurement history or fault visibility.
 pub(crate) async fn detect_soil_probe_faults(
     cfg: &[ZoneSoilCfg],
-    resolved: &[ZoneSoil],
+    map: &HashMap<String, Value>,
     history: Option<&crate::persistence::SensorHistoryStore>,
 ) -> Vec<crate::model::SoilProbeFault> {
-    let Some(h) = history else {
-        return Vec::new();
-    };
     let now = Utc::now().timestamp();
     let mut out = Vec::new();
     for z in cfg {
-        let Some(spec) = z.soil_sensor_id.as_deref() else {
-            continue;
-        };
-        // Healthy: the resolved reading is usable.
-        if resolved
-            .iter()
-            .find(|r| r.slug == z.slug)
-            .and_then(|r| r.pct)
-            .is_some()
-        {
-            continue;
+        for probe in z.soil_bindings() {
+            if resolve_fresh_probe(&probe, map, history, now)
+                .await
+                .is_some()
+            {
+                continue;
+            }
+            let spec = probe.sensor_id.as_str();
+            let since_epoch = if let Some((sid, key)) =
+                spec.strip_prefix("source:").and_then(|s| s.split_once(':'))
+            {
+                let Some(h) = history else {
+                    continue;
+                };
+                let last_good = h
+                    .last_value_above(sid.to_string(), key.to_string(), 0.0)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|r| apply_soil_quality(Some(r.value)).is_some() && r.epoch <= now)
+                    .map(|r| r.epoch);
+                if last_good.is_some_and(|e| (now.saturating_sub(e) as u64) < probe.stale_after_s) {
+                    continue;
+                }
+                last_good
+            } else {
+                let entity = spec.strip_prefix("ha:").unwrap_or(spec);
+                map.get(entity)
+                    .and_then(|state| {
+                        state
+                            .get("last_reported")
+                            .or_else(|| state.get("last_updated"))
+                    })
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| t.timestamp())
+                    .filter(|t| *t > 0 && *t <= now)
+            };
+            out.push(crate::model::SoilProbeFault {
+                zone_slug: z.slug.clone(),
+                zone_name: z.name.clone(),
+                sensor_id: probe.sensor_id,
+                since_epoch,
+            });
         }
-        let Some((sid, key)) = spec
-            .strip_prefix("source:")
-            .and_then(|rest| rest.split_once(':'))
-        else {
-            continue;
-        };
-        let since_epoch = h
-            .last_value_above(sid.to_string(), key.to_string(), 0.0)
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.epoch);
-        let stale = match since_epoch {
-            Some(e) => now.saturating_sub(e) >= SOIL_PROBE_FAULT_AFTER_S,
-            None => true,
-        };
-        // TODO(G1 flatline): a probe stuck at a plausible constant (e.g. 45%)
-        // keeps refreshing, so stale=false and it slips through here. Detecting
-        // it needs a windowed read of the last N source: samples for this
-        // (sid, key) pair; SensorHistoryStore only exposes last_value /
-        // last_value_above (single row) and series (windowed but key-only, not
-        // source-scoped, so it collides across gateways sharing a soilmoisture
-        // key). Adding a source-scoped windowed read is new store plumbing;
-        // deferred per spec D1 to a fast-follow once that read exists.
-        if !stale {
-            continue;
-        }
-        out.push(crate::model::SoilProbeFault {
-            zone_slug: z.slug.clone(),
-            zone_name: z.name.clone(),
-            sensor_id: spec.to_string(),
-            since_epoch,
-        });
     }
     out
 }
@@ -848,13 +840,32 @@ pub(crate) async fn resolve_soil_extras(
 ) -> Vec<ZoneSoilExtra> {
     let mut out = Vec::with_capacity(cfg.len());
     for z in cfg {
-        let spec = z.soil_sensor_id.as_deref();
-        out.push(ZoneSoilExtra {
+        let mut extra = ZoneSoilExtra {
             slug: z.slug.clone(),
-            temp_f: resolve_soil_sibling(spec, |n| format!("soiltemp{n}f"), history).await,
-            ec: resolve_soil_sibling(spec, |n| format!("soilec{n}"), history).await,
-            battery_pct: resolve_soil_sibling(spec, |n| format!("soilbatt{n}"), history).await,
-        });
+            ..Default::default()
+        };
+        let now = Utc::now().timestamp();
+        let probes = z.soil_bindings();
+        for probe in probes.iter().filter(|p| !p.excluded_from_decisions) {
+            if resolve_fresh_probe(probe, &HashMap::new(), history, now)
+                .await
+                .is_none()
+            {
+                continue;
+            }
+            let spec = Some(probe.sensor_id.as_str());
+            if let Some(v) = resolve_soil_sibling(spec, |n| format!("soiltemp{n}f"), history).await
+            {
+                extra.temp_f = Some(extra.temp_f.map_or(v, |old| old.min(v)));
+            }
+            if let Some(v) = resolve_soil_sibling(spec, |n| format!("soilbatt{n}"), history).await {
+                extra.battery_pct = Some(extra.battery_pct.map_or(v, |old| old.min(v)));
+            }
+            if probes.len() == 1 {
+                extra.ec = resolve_soil_sibling(spec, |n| format!("soilec{n}"), history).await;
+            }
+        }
+        out.push(extra);
     }
     out
 }

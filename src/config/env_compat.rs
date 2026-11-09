@@ -395,6 +395,8 @@ fn seed_legacy_zones(cfg: &mut Config) {
         controller_station: station.to_string(),
         controller_zone_name: None,
         soil_sensor_id: None,
+        soil_probes: Default::default(),
+        soil_aggregation: Default::default(),
         target_min_pct_soil: 30.0,
         saturation_pct_soil: 70.0,
         photo_url: None,

@@ -1,15 +1,16 @@
 // LocationStep. Lat / lon / elevation / timezone, persisted into the
-// wizard draft on every commit (load on mount, save on change). An
-// address search drives the existing Nominatim proxy
-// (GET /api/wizard/geocode?q=) so nobody has to know their coordinates,
-// and the timezone autofills from the offline tzf dataset
-// (GET /api/v1/location/timezone) whenever lat/lon change, unless the
-// owner entered the timezone manually.
+// wizard draft on every commit (load on mount, save on change). The
+// shared GeoSearch box (address search through the server's geocode
+// relay, or the device's own position) fills the coordinates so nobody
+// has to know them, and the timezone autofills from the offline tzf
+// dataset (GET /api/v1/location/timezone) whenever lat/lon change, unless
+// the owner entered the timezone manually.
 
 use leptos::prelude::*;
 
+use crate::components::geo_search::{GeoPick, GeoSearch};
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{Button, FormField, HelpHint};
+use crate::components::ui::{FormField, HelpHint};
 use crate::components::units_fmt::use_unit_prefs;
 
 /// Meters per foot. Elevation is stored in meters (Open-Meteo and the
@@ -48,11 +49,6 @@ pub fn LocationStep() -> impl IntoView {
     let save_error = RwSignal::new(Option::<String>::None);
     let save_revision = RwSignal::new(0_u64);
     let timezone_user_edited = RwSignal::new(false);
-
-    // Address search state.
-    let query = RwSignal::new(String::new());
-    let searching = RwSignal::new(false);
-    let results: RwSignal<Vec<(String, f64, f64)>> = RwSignal::new(Vec::new());
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
@@ -266,43 +262,15 @@ pub fn LocationStep() -> impl IntoView {
         persist_now();
     };
 
-    let on_search = move |_| {
-        let q = query.get_untracked().trim().to_string();
-        if q.is_empty() || searching.get_untracked() {
-            return;
-        }
-        searching.set(true);
-        results.set(Vec::new());
-        #[cfg(feature = "hydrate")]
-        leptos::task::spawn_local(async move {
-            let url = format!("/api/wizard/geocode?q={}", crate::text::query_value(&q));
-            if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
-                if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    let list = v
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|r| {
-                                    Some((
-                                        r.get("display_name")?.as_str()?.to_string(),
-                                        r.get("lat")?.as_str()?.parse::<f64>().ok()?,
-                                        r.get("lon")?.as_str()?.parse::<f64>().ok()?,
-                                    ))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    results.set(list);
-                }
-            }
-            searching.set(false);
-        });
-        #[cfg(not(feature = "hydrate"))]
-        {
-            let _ = q;
-            searching.set(false);
-        }
-    };
+    // A picked place (or the device's own position) is a new location:
+    // take its coordinates, re-derive the elevation over any earlier
+    // auto-fill (the owner can still edit after), and commit.
+    let on_pick = Callback::new(move |pick: GeoPick| {
+        lat.set(Some(pick.lat));
+        lon.set(Some(pick.lon));
+        elevation_user_edited.set(false);
+        commit();
+    });
 
     let lat_err: Signal<Option<String>> = Signal::derive(move || {
         // None (empty field) is not an error message on its own, but it does
@@ -348,71 +316,24 @@ pub fn LocationStep() -> impl IntoView {
         }
     };
 
-    let results_view = move || {
-        let list = results.get();
-        if list.is_empty() {
-            return ().into_any();
-        }
-        list.into_iter()
-            .map(|(name, la, lo)| {
-                let label = name.clone();
-                view! {
-                    <button
-                        type="button"
-                        class="geo-result"
-                        on:click=move |_| {
-                            lat.set(Some(la));
-                            lon.set(Some(lo));
-                            results.set(Vec::new());
-                            // A freshly chosen place is a new location:
-                            // re-derive its elevation, overriding any prior
-                            // auto-fill (but the user can still edit after).
-                            elevation_user_edited.set(false);
-                            commit();
-                        }
-                    >
-                        <span class="geo-result__name">{label}</span>
-                        <span class="geo-result__coords">{format!("{la:.4}, {lo:.4}")}</span>
-                    </button>
-                }
-            })
-            .collect_view()
-            .into_any()
-    };
-
     view! {
         <div class="setup-step">
             <h2 class="setup-step__title">"Where are you?"<HelpHint topic="location"/></h2>
             <p class="setup-step__body">
                 "Your location sets the forecast, the radar, sunrise and how "
                 "much water the lawn loses to the sun each day. Search an "
-                "address or type coordinates; the time zone fills itself in."
+                "address, use this device's location, or type coordinates; "
+                "the time zone fills itself in."
             </p>
 
-            <FormField
-                label="Find by address".to_string()
-                helptext="City, street, or landmark (OpenStreetMap lookup).".to_string()
-                error=Signal::derive(|| None::<String>)
-            >
-                <div class="geo-search">
-                    <input
-                        type="text"
-                        class="ui-input"
-                        placeholder=crate::voice::LOCATION_SEARCH_EXAMPLE
-                        prop:value=move || query.get()
-                        on:input=move |ev| query.set(event_target_value(&ev))
-                        on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
-                    />
-                    <Button
-                        variant="ghost"
-                        disabled=Signal::derive(move || !loaded.get() || searching.get())
-                        on_click=Callback::new(move |_| on_search(()))
-                    >
-                        {move || if searching.get() { "Searching…" } else { "Search" }}
-                    </Button>
-                </div>
-            </FormField>
-            <div class="geo-results">{results_view}</div>
+            <GeoSearch
+                disabled=Signal::derive(move || !loaded.get())
+                position=Signal::derive(move || match (lat.get(), lon.get()) {
+                    (Some(la), Some(lo)) if !(la == 0.0 && lo == 0.0) => Some((la, lo)),
+                    _ => None,
+                })
+                on_pick=on_pick
+            />
 
             <FormField
                 label="Latitude".to_string()

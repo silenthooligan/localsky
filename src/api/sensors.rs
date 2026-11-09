@@ -116,6 +116,9 @@ fn classify(entity_id: &str, device_class: &str) -> Option<&'static str> {
 
 /// Friendly label for an Ecowitt/raw local channel key.
 fn pretty_key(key: &str) -> String {
+    if let Some(label) = crate::config::soil::probe_label(key) {
+        return label;
+    }
     if let Some(rest) = key.strip_prefix("soilmoisture") {
         // Zone-bound MQTT soil channels are keyed `soilmoisture_<zone_slug>`;
         // numbered native channels are `soilmoisture<N>`. Render the slug form
@@ -174,7 +177,13 @@ async fn discover_ha() -> Vec<DiscoveredSensor> {
             source: "home_assistant".into(),
             current_pct,
             unit,
-            age_s: 0,
+            age_s: s
+                .get("last_reported")
+                .or_else(|| s.get("last_updated"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| chrono::Utc::now().timestamp() - t.timestamp())
+                .unwrap_or(-1),
         });
     }
     out
@@ -182,14 +191,20 @@ async fn discover_ha() -> Vec<DiscoveredSensor> {
 
 /// Local soil channels recorded in sensor_history (e.g. an Ecowitt gateway
 /// posting straight to /ingest/ecowitt, bypassing HA).
-async fn discover_local_soil(db: Arc<Mutex<Connection>>) -> Vec<DiscoveredSensor> {
+async fn discover_local_soil(
+    db: Arc<Mutex<Connection>>,
+    cfg: Option<&crate::config::Config>,
+) -> Vec<DiscoveredSensor> {
     let store = SensorHistoryStore::new(db);
     let now = chrono::Utc::now().timestamp();
-    store
+    let mut out: Vec<_> = store
         .soil_channels()
         .await
         .unwrap_or_default()
         .into_iter()
+        .filter(|r| {
+            !cfg.is_some_and(|c| crate::config::soil::legacy_mapped_key(c, &r.source_id, &r.key))
+        })
         .map(|r| DiscoveredSensor {
             id: format!("source:{}:{}", r.source_id, r.key),
             label: format!("{} · {}", r.source_id, pretty_key(&r.key)),
@@ -197,30 +212,58 @@ async fn discover_local_soil(db: Arc<Mutex<Connection>>) -> Vec<DiscoveredSensor
             source: r.source_id,
             current_pct: Some(r.value),
             unit: "%".into(),
-            age_s: (now - r.epoch).max(0),
+            age_s: now - r.epoch,
         })
-        .collect()
+        .collect();
+    if let Some(cfg) = cfg {
+        for source in &cfg.sources {
+            for (_, key) in crate::config::soil::mapped_probes(&source.source) {
+                let id = format!("source:{}:{key}", source.id);
+                if out.iter().any(|p| p.id == id) {
+                    continue;
+                }
+                out.push(DiscoveredSensor {
+                    id,
+                    label: format!("{} · {}", source.id, pretty_key(&key)),
+                    role: "soil".into(),
+                    source: source.id.clone(),
+                    current_pct: None,
+                    unit: "%".into(),
+                    age_s: -1,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Soil channels only, powers the zone soil-sensor picker.
 async fn soil(
-    axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
+    axum::extract::State(state): axum::extract::State<SensorsState>,
 ) -> Json<Vec<DiscoveredSensor>> {
+    let cfg = match &state.inventory {
+        Some(h) => h.cfg_store.load().await.ok(),
+        None => None,
+    };
     let mut out: Vec<DiscoveredSensor> = discover_ha()
         .await
         .into_iter()
         .filter(|d| d.role == "soil")
         .collect();
-    out.extend(discover_local_soil(db).await);
+    out.extend(discover_local_soil(state.db, cfg.as_ref()).await);
     Json(out)
 }
 
 /// Everything LocalSky could use, grouped by role, the hub's full picture.
 async fn discovered(
-    axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
+    axum::extract::State(state): axum::extract::State<SensorsState>,
 ) -> Json<std::collections::BTreeMap<String, Vec<DiscoveredSensor>>> {
+    let cfg = match &state.inventory {
+        Some(h) => h.cfg_store.load().await.ok(),
+        None => None,
+    };
     let mut all = discover_ha().await;
-    all.extend(discover_local_soil(db).await);
+    all.extend(discover_local_soil(state.db, cfg.as_ref()).await);
     let mut grouped: std::collections::BTreeMap<String, Vec<DiscoveredSensor>> =
         std::collections::BTreeMap::new();
     for d in all {
@@ -283,6 +326,9 @@ struct SoilSensor {
     /// or null when unbound.
     bound_zone_slug: Option<String>,
     bound_zone_name: Option<String>,
+    excluded_from_decisions: bool,
+    stale_after_s: u64,
+    usable_for_decisions: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -317,6 +363,9 @@ use crate::config::kind_labels::controller_kind_label as controller_kind_tag;
 
 /// Map a soil-channel `key` to a friendly channel label.
 fn channel_label(key: &str) -> String {
+    if let Some(label) = crate::config::soil::probe_label(key) {
+        return label;
+    }
     if let Some(rest) = key.strip_prefix("soilmoisture") {
         // `soilmoisture_<zone_slug>` (zone-bound MQTT) vs `soilmoisture<N>`.
         if let Some(zone) = rest.strip_prefix('_') {
@@ -459,7 +508,8 @@ async fn remove_soil(
     // to one zone, but sweep all for safety.
     let mut zones_unbound = 0usize;
     for z in cfg.zones.values_mut() {
-        if z.soil_sensor_id.as_deref() == Some(spec.as_str()) {
+        if z.soil_bindings().iter().any(|p| p.sensor_id == spec) {
+            z.soil_probes.retain(|p| p.sensor_id != spec);
             z.soil_sensor_id = None;
             zones_unbound += 1;
         }
@@ -528,6 +578,12 @@ async fn build_inventory(
     // Native `source:` channels.
     let native = store.soil_channels().await.unwrap_or_default();
     for r in &native {
+        if cfg
+            .as_ref()
+            .is_some_and(|c| crate::config::soil::legacy_mapped_key(c, &r.source_id, &r.key))
+        {
+            continue;
+        }
         let id = format!("source:{}:{}", r.source_id, r.key);
         // Battery/temp/EC siblings live in the same source under a swapped
         // key suffix; reachable only for numbered `soilmoisture<N>` channels.
@@ -566,12 +622,15 @@ async fn build_inventory(
             source_label,
             source_kind,
             moisture_pct: Some(r.value),
-            age_s: (now - r.epoch).max(0),
+            age_s: now - r.epoch,
             battery_pct,
             temp_f,
             ec,
             bound_zone_slug: None,
             bound_zone_name: None,
+            excluded_from_decisions: false,
+            stale_after_s: crate::config::soil::DEFAULT_STALE_AFTER_S,
+            usable_for_decisions: false,
         });
     }
 
@@ -590,19 +649,53 @@ async fn build_inventory(
             ec: None,
             bound_zone_slug: None,
             bound_zone_name: None,
+            excluded_from_decisions: false,
+            stale_after_s: crate::config::soil::DEFAULT_STALE_AFTER_S,
+            usable_for_decisions: false,
         });
     }
 
-    // Resolve zone bindings: a zone references a sensor by an id string in
-    // ZoneConfig.soil_sensor_id; match it byte-for-byte against each
-    // sensor's id so the binding round-trips.
+    // Include configured probes even if they never reported. Each probe's
+    // own timeout and exclusion state remains visible when peers are healthy.
     if let Some(cfg) = cfg.as_ref() {
-        for s in soil.iter_mut() {
-            for (slug, z) in &cfg.zones {
-                if z.soil_sensor_id.as_deref() == Some(s.id.as_str()) {
-                    s.bound_zone_slug = Some(slug.clone());
-                    s.bound_zone_name = Some(z.display_name.clone());
-                    break;
+        for (slug, zone) in &cfg.zones {
+            for probe in zone.soil_bindings() {
+                if !soil.iter().any(|s| s.id == probe.sensor_id) {
+                    let (source_id, key) = probe
+                        .sensor_id
+                        .strip_prefix("source:")
+                        .and_then(|s| s.split_once(':'))
+                        .unwrap_or(("home_assistant", probe.sensor_id.as_str()));
+                    let (source_label, source_kind) = source_meta(Some(cfg), source_id);
+                    soil.push(SoilSensor {
+                        id: probe.sensor_id.clone(),
+                        channel_label: channel_label(key),
+                        source_id: source_id.into(),
+                        source_label,
+                        source_kind,
+                        moisture_pct: None,
+                        age_s: 0,
+                        battery_pct: None,
+                        temp_f: None,
+                        ec: None,
+                        bound_zone_slug: None,
+                        bound_zone_name: None,
+                        excluded_from_decisions: false,
+                        stale_after_s: probe.stale_after_s,
+                        usable_for_decisions: false,
+                    });
+                }
+                if let Some(sensor) = soil.iter_mut().find(|s| s.id == probe.sensor_id) {
+                    sensor.bound_zone_slug = Some(slug.clone());
+                    sensor.bound_zone_name = Some(zone.display_name.clone());
+                    sensor.excluded_from_decisions = probe.excluded_from_decisions;
+                    sensor.stale_after_s = probe.stale_after_s;
+                    sensor.usable_for_decisions = !probe.excluded_from_decisions
+                        && sensor
+                            .moisture_pct
+                            .is_some_and(|v| v.is_finite() && v > 0.0 && v <= 100.0)
+                        && sensor.age_s >= 0
+                        && (sensor.age_s as u64) < probe.stale_after_s;
                 }
             }
         }
@@ -818,6 +911,8 @@ mod inventory_tests {
             controller_station: "1".to_string(),
             controller_zone_name: None,
             soil_sensor_id: soil_sensor_id.map(|s| s.to_string()),
+            soil_probes: Default::default(),
+            soil_aggregation: Default::default(),
             target_min_pct_soil: 30.0,
             saturation_pct_soil: 70.0,
             photo_url: None,
@@ -975,6 +1070,52 @@ mod inventory_tests {
         assert!(f.connected, "fixture reports a flow sensor wired in");
         assert_eq!(f.gpm, Some(8.4));
         assert_eq!(f.age_s, Some(0));
+    }
+
+    #[tokio::test]
+    async fn inventory_keeps_missing_stale_and_excluded_peers_visible() {
+        let store = fresh_store().await;
+        let now = chrono::Utc::now().timestamp();
+        let mut cfg = test_config();
+        let zone = cfg.zones.get_mut("back_yard").unwrap();
+        zone.soil_sensor_id = None;
+        zone.soil_probes = (1..=4)
+            .map(|n| crate::config::SoilProbeConfig {
+                sensor_id: format!("source:ecowitt_gw:soilmoisture{n}"),
+                excluded_from_decisions: n == 3,
+                stale_after_s: 900,
+            })
+            .collect();
+        for (n, epoch) in [(1, now), (2, now - 1000), (3, now)] {
+            store
+                .insert(Reading {
+                    source_id: "ecowitt_gw".into(),
+                    key: format!("soilmoisture{n}"),
+                    value: 36.0,
+                    epoch,
+                })
+                .await
+                .unwrap();
+        }
+        let inventory = build_inventory(store, Some(cfg), None).await;
+        assert_eq!(inventory.soil.len(), 4);
+        let find = |n| {
+            inventory
+                .soil
+                .iter()
+                .find(|p| p.id == format!("source:ecowitt_gw:soilmoisture{n}"))
+                .unwrap()
+        };
+        assert!(find(1).usable_for_decisions);
+        assert!(!find(2).usable_for_decisions);
+        assert!(find(3).excluded_from_decisions);
+        assert!(!find(3).usable_for_decisions);
+        assert!(find(4).moisture_pct.is_none());
+        assert!(!find(4).usable_for_decisions);
+        assert!(inventory
+            .soil
+            .iter()
+            .all(|p| p.bound_zone_slug.as_deref() == Some("back_yard")));
     }
 
     #[tokio::test]

@@ -75,16 +75,11 @@
 //
 // Restored: this block was deleted with the zone-math purge because it sat
 // physically inside that comment section, but it is unrelated to it and
-// three live components still emit it (settings/zones.rs,
-// settings/sensors.rs, setup/sensors.rs).
+// the settings and setup sensor cards still emit it.
 .zone-soil-live {
   display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
   margin-top: 0.5rem; padding: 6px 10px; border-radius: var(--radius-sm);
   background: var(--elev-1); border: 1px solid var(--elev-border);
-  &__pct { font-weight: 800; color: var(--accent); font-family: var(--font-mono); }
-  &__origin { color: var(--text-muted); font-size: var(--text-meta); }
-  &__manage { margin-left: auto; color: var(--accent); font-size: var(--text-meta); text-decoration: none;
-    &:hover { text-decoration: underline; } }
 }
 
 .sensor-readout__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }

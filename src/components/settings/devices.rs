@@ -661,21 +661,7 @@ pub fn SettingsDevices() -> impl IntoView {
     let on_bind_soil = Callback::new(move |(probe_id, zone_slug): (String, String)| {
         let mut cfg = config.get();
         if let Some(zones) = cfg.get_mut("zones").and_then(|v| v.as_object_mut()) {
-            for (slug, z) in zones.iter_mut() {
-                let Some(zobj) = z.as_object_mut() else {
-                    continue;
-                };
-                let holds =
-                    zobj.get("soil_sensor_id").and_then(|v| v.as_str()) == Some(probe_id.as_str());
-                if slug == &zone_slug {
-                    zobj.insert(
-                        "soil_sensor_id".into(),
-                        serde_json::Value::String(probe_id.clone()),
-                    );
-                } else if holds {
-                    zobj.insert("soil_sensor_id".into(), serde_json::Value::Null);
-                }
-            }
+            crate::config::soil::bind_json(zones, &probe_id, &zone_slug);
         }
         config.set(cfg.clone());
         result_msg.set(String::new());
@@ -1268,6 +1254,17 @@ fn migrate_source_id_refs(cfg: &mut serde_json::Value, old: &str, new: &str) {
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.strip_prefix(&old_prefix))
                 .map(|rest| format!("source:{new}:{rest}"));
+            if let Some(probes) = zobj.get_mut("soil_probes").and_then(|v| v.as_array_mut()) {
+                for probe in probes {
+                    if let Some(rest) = probe
+                        .get("sensor_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.strip_prefix(&old_prefix))
+                    {
+                        probe["sensor_id"] = serde_json::json!(format!("source:{new}:{rest}"));
+                    }
+                }
+            }
             if let Some(newval) = repointed {
                 zobj.insert("soil_sensor_id".into(), serde_json::Value::String(newval));
             }
@@ -1374,6 +1371,13 @@ fn clear_source_id_refs(cfg: &mut serde_json::Value, id: &str) {
                 .get("soil_sensor_id")
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| s.starts_with(&prefix));
+            if let Some(probes) = zobj.get_mut("soil_probes").and_then(|v| v.as_array_mut()) {
+                probes.retain(|p| {
+                    !p.get("sensor_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.starts_with(&prefix))
+                });
+            }
             if points_at_removed {
                 zobj.insert("soil_sensor_id".into(), serde_json::Value::Null);
             }
@@ -1623,8 +1627,7 @@ fn device_card(
                                                 .map(|zs| {
                                                     zs.iter()
                                                         .map(|(slug, z)| {
-                                                            if z.get("soil_sensor_id").and_then(|v| v.as_str())
-                                                                == Some(pid.as_str())
+                                                            if crate::config::soil::json_bindings(z).iter().any(|p| p.sensor_id == pid)
                                                             {
                                                                 bound = Some(slug.clone());
                                                             }

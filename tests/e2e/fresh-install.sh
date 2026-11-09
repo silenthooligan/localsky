@@ -11,8 +11,10 @@
 #   GET /api/v1/info     -> location_configured=false
 set -eu
 IMG="${1:?image}"
-NAME=localsky-fresh
 MODE="${2:-plain}"
+# Suffixed with the mode and the image tag (the build's sha) so two gates
+# on one docker daemon never remove each other's container; see pre-merge.sh.
+NAME="localsky-fresh-$MODE-$(printf '%s' "$IMG" | sed 's/.*://' | cut -c1-12)"
 if [ "$MODE" = haos ]; then
   set -- -e SUPERVISOR_TOKEN=test-only -e HA_TOKEN=test-only -e HA_URL=http://127.0.0.1:9 -e VAPID_PUBLIC_KEY=test-only
 else

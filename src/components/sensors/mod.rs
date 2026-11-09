@@ -645,9 +645,10 @@ pub fn SensorsPage(
                                             zones
                                                 .iter()
                                                 .find(|(k, _)| k.replace('-', "_") == slug)
-                                                .and_then(|(_, zc)| zc.get("soil_sensor_id"))
-                                                .and_then(|v| v.as_str())
-                                                .map(str::to_string)
+                                                .and_then(|(_, zc)| {
+                                                    let probes = crate::config::soil::json_bindings(zc);
+                                                    (probes.len() == 1).then(|| probes[0].sensor_id.clone())
+                                                })
                                         });
                                     view! { <SoilDetail z probe_id on_remove=remove_probe/> }.into_any()
                                 }
@@ -668,13 +669,7 @@ pub fn SensorsPage(
                                             zones
                                                 .iter()
                                                 .filter(|(_, z)| {
-                                                    z.get("soil_sensor_id")
-                                                        .and_then(|v| v.as_str())
-                                                        .map(|spec| {
-                                                            spec == id
-                                                                || spec.starts_with(&format!("source:{id}"))
-                                                        })
-                                                        .unwrap_or(false)
+                                                    crate::config::soil::json_bindings(z).iter().any(|p| p.sensor_id == id || p.sensor_id.starts_with(&format!("source:{id}:")))
                                                 })
                                                 .map(|(slug, z)| {
                                                     (

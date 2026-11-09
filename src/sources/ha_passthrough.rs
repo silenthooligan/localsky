@@ -338,7 +338,7 @@ impl HaPassthrough {
             };
             poll = poll.with(SourceEvent::KeyedReading {
                 source_id: self.id.clone(),
-                key: crate::sources::bus_recorder::zone_soil_key(zone),
+                key: crate::config::soil::probe_key("ha", &[entity_id]),
                 value,
                 at_epoch,
             });
@@ -623,7 +623,10 @@ mod tests {
         }
         assert_eq!(seen["AirTempF"], now);
         assert_eq!(seen["RhPct"], now - 3600);
-        assert_eq!(seen["soilmoisture_orchard"], now - 7200);
+        assert_eq!(
+            seen[&crate::config::soil::probe_key("ha", &["sensor.soil"])],
+            now - 7200
+        );
     }
 
     #[test]

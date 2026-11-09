@@ -113,3 +113,5 @@ pub use skip_rules::SettingsSkipRules;
 pub use theme::SettingsTheme;
 pub use units::SettingsUnits;
 pub use zones::SettingsZones;
+
+mod soil_probes;

@@ -93,21 +93,23 @@ Used during first-run; always mounted, and **public only until the first account
 | `/api/v1/wizard/scan_zones` | POST | `{ "controller": <ControllerEntry> }`; zone discovery for controllers that support it. Returns `{ "zones": [ { "station_id", "name" } ] }`. Callers use it to offer the controller's own zones as choices: the zone editor's station picker, the controller editor's bind table, and the setup wizard's zone import. A redacted secret in the posted entry is restored from the stored config by entry id (`400 unmatched_redacted_secret` when no stored value matches). `422 controller_unsupported` when the kind is not probeable at all (`mqtt_command`, `ha_service_call`, `esphome_native`); `502 zone_scan_failed` when the controller is unreachable, rejects the credential, is rate limited, **or has no zone-discovery endpoint** (`hydrawise`, `bhyve`, `rainbird`, whose detail reads "operation not supported by this controller"). A client cannot tell "this kind cannot enumerate" from "this controller is offline" by status alone, so gate on the kind before calling: only `rachio`, `opensprinkler_direct`, `http_generic` and `dry_run` can enumerate |
 | `/api/v1/wizard/probe_soil` | POST | `{ "host": "<gateway host>", "source_id": "..." }` (`source_id` optional); reads an Ecowitt gateway's live soil channels off its local API so the Sensors step can offer them for zone binding. `422` for an empty or non-LAN host, `502` if unreachable |
 | `/api/v1/wizard/discover` | GET | One LAN sweep: passive Tempest, Ecowitt broadcast, OpenSprinkler probe |
-| `/api/v1/wizard/geocode?q=<address>` | GET | Server-side proxy to Nominatim with the required User-Agent |
+| `/api/v1/wizard/geocode?q=<address>` | GET | Address search relay. OpenStreetMap Nominatim with the required User-Agent; when the typed form finds nothing, one retry with the town segment dropped, then the US Census Bureau geocoder for queries that read as a US address (ZIP, state code or state name). 30 requests per minute per client IP (`429 rate_limited`); upstream Nominatim calls are spaced one second apart per instance. `502` only when Nominatim itself failed and no fallback answered; no match is an empty `200` list |
 
-`geocode` returns up to 5 candidates:
+`geocode` returns up to 5 candidates. `source` is `osm` or `census`:
 
 ```json
 [
   {
     "display_name": "Orlando, Florida, USA",
     "lat": "28.5383",
-    "lon": "-81.3792"
+    "lon": "-81.3792",
+    "source": "osm"
   },
   {
-    "display_name": "Cambridge, Cambridgeshire, England, United Kingdom",
-    "lat": "52.2053",
-    "lon": "0.1218"
+    "display_name": "400 S Orange Ave, Orlando, FL 32801",
+    "lat": "28.538340",
+    "lon": "-81.379240",
+    "source": "census"
   }
 ]
 ```

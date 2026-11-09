@@ -378,7 +378,9 @@ use serde::{Deserialize, Serialize};
 /// 2.5.0: the weather snapshot adds `sky`, the current condition judged from
 /// every source, plus `cloud_cover_pct` and `visibility_mi`. Forecast hourly
 /// `cloud_cover_pct` is null when the provider gave none.
-pub const API_VERSION: &str = "2.5.0";
+/// 2.6.0: independent zone soil probes, aggregation, per-probe timeouts and
+/// exclusion; sensor inventory exposes per-probe decision eligibility.
+pub const API_VERSION: &str = "2.6.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

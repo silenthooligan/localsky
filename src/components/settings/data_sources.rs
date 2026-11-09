@@ -1282,13 +1282,13 @@ pub fn RestartBanner(
             // shows the notice; it previously sat at the top of the page
             // and a bottom-of-form save looked like it silently did not
             // take (issue #8 follow-up).
-            <div class="health-banner health-banner--sticky" role="status">
+            <div id="restart-notice" class="health-banner health-banner--sticky" role="status" tabindex="-1">
                 <span class="health-banner__icon" aria-hidden="true">
                     <Icon name="alert-triangle" size=16/>
                 </span>
                 <div class="health-banner__text">
                     <strong>"Restart required to apply."</strong>
-                    " Your configuration is saved. Restart LocalSky to apply the changes before watering can resume."
+                    " Settings saved. Restart LocalSky to use them."
                     // One line per server reason; plain divs keep the banner
                     // tight (no default list margins to fight).
                     {move || reasons.get()

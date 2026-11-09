@@ -7,7 +7,7 @@ Saves validate the candidate, retain a config snapshot, and apply supported chan
 ## Top-level structure
 
 ```toml
-schema_version = 2
+schema_version = 3
 forecast_provider = "..."     # optional root-level source ID
 
 [deployment]
@@ -149,7 +149,7 @@ pressure_in_hg = "davis"
 forecast_provider = "nws_forecast"
 ```
 
-The Settings > Devices data-sources editor is the visual equivalent: drag rows or use arrow keys to reorder each reading's chain (toggling between Automatic smart defaults and Custom), and pick the forecast provider. Soil moisture is out of scope here; it is bound per zone via `soil_sensor_id`.
+The Settings > Devices data-sources editor is the visual equivalent: drag rows or use arrow keys to reorder each reading's chain (toggling between Automatic smart defaults and Custom), and pick the forecast provider. Soil moisture is out of scope here; it is bound per zone via `soil_probes`.
 
 ## `[[controllers]]`
 
@@ -172,7 +172,7 @@ Supported `kind` values: `opensprinkler_direct`, `http_generic`, `mqtt_command`,
 
 ## Editable, migrating ids
 
-Source and controller `id` fields are editable. Renaming one migrates every reference automatically: the `field_source_chains` picks, the `forecast_provider` pin, each zone's `soil_sensor_id`, and each zone's `controller_id`. A rename never leaves a dangling reference. Rename through the Settings UI or by editing the config and applying it.
+Source and controller `id` fields are editable. Renaming one migrates every reference automatically: the `field_source_chains` picks, the `forecast_provider` pin, each zone's probe IDs (including legacy `soil_sensor_id`), and each zone's `controller_id`. A rename never leaves a dangling reference. Rename through the Settings UI or by editing the config and applying it.
 
 ## `[zones.<slug>]`
 
@@ -195,7 +195,8 @@ max_run_minutes = null           # null = 60; longest single run (whole minutes,
 controller_id = "os_main"
 controller_station = "1"         # the controller's own id for this zone
 controller_zone_name = null      # the controller's name for it; a label only
-soil_sensor_id = null            # optional; no probe just means no soil gate
+soil_probes = []                 # no bindings: use the water balance alone
+soil_aggregation = "median"     # median | average | minimum
 target_min_pct_soil = 30.0
 saturation_pct_soil = 70.0
 weekly_budget_in = null          # null = 1.00 turf, 0.50 shrub/garden/bed
@@ -489,7 +490,7 @@ Bad PUTs return 422 with the specific failure; on-disk file is untouched.
 
 ## Migrations
 
-There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](https://github.com/silenthooligan/localsky/blob/main/src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `2`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#config-and-database-migrations).
+There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](https://github.com/silenthooligan/localsky/blob/main/src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `3`; older configs migrate their soil binding into the probe list, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#config-and-database-migrations).
 
 LocalSky records a config snapshot on every save. Each successful write (a settings `PUT`, a raw-TOML save, or the wizard apply) first copies the previous on-disk `localsky.toml` to `<config_dir>/snapshots/<unix_ts>.toml`, keeping the newest 20 and pruning older ones. To list and restore them:
 
@@ -527,3 +528,26 @@ LOCALSKY_ANALYTICS_SRC=/stats/u.js            # your tracker script URL
 LOCALSKY_ANALYTICS_WEBSITE_ID=<your-site-id>  # data-website-id value
 LOCALSKY_ANALYTICS_HOST_URL=                  # optional data-host-url
 ```
+
+### Multiple soil probes
+
+Use the zone editor to select probe IDs returned by `/api/v1/sensors/soil`.
+Each binding has `sensor_id`, `excluded_from_decisions` (default false), and
+`stale_after_s` (default 86400; range 1 through 604800 seconds). For example:
+
+```toml
+[[zones.back_yard.soil_probes]]
+sensor_id = "source:ecowitt_gw:soilmoisture1"
+excluded_from_decisions = false
+stale_after_s = 900
+
+[[zones.back_yard.soil_probes]]
+sensor_id = "source:ecowitt_gw:soilmoisture2"
+excluded_from_decisions = true
+stale_after_s = 900
+```
+
+A nonempty `soil_probes` list takes precedence over legacy `soil_sensor_id`.
+An empty list falls back to the legacy field, so clear both to remove all
+bindings. Excluding every probe keeps the zone held. See
+[probe aggregation and freshness](soil-sensors.md#combine-probes-and-handle-failures).

@@ -140,7 +140,10 @@ fn bound_zone_for(draft: &serde_json::Value, probe_id: &str) -> Option<String> {
         .and_then(|c| c.get("zones"))
         .and_then(|v| v.as_object())?;
     for (slug, z) in zones {
-        if z.get("soil_sensor_id").and_then(|v| v.as_str()) == Some(probe_id) {
+        if crate::config::soil::json_bindings(z)
+            .iter()
+            .any(|p| p.sensor_id == probe_id)
+        {
             return Some(slug.clone());
         }
     }
@@ -215,24 +218,7 @@ pub fn SensorsStep() -> impl IntoView {
             else {
                 return;
             };
-            for (slug, z) in zones.iter_mut() {
-                let Some(obj) = z.as_object_mut() else {
-                    continue;
-                };
-                let holds_this = obj
-                    .get("soil_sensor_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s == probe_id)
-                    .unwrap_or(false);
-                if slug == &zone_key {
-                    obj.insert(
-                        "soil_sensor_id".into(),
-                        serde_json::Value::String(probe_id.clone()),
-                    );
-                } else if holds_this {
-                    obj.insert("soil_sensor_id".into(), serde_json::Value::Null);
-                }
-            }
+            crate::config::soil::bind_json(zones, &probe_id, &zone_key);
         });
         let candidate = draft.get_untracked();
         saving.set(true);

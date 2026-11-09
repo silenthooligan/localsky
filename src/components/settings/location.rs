@@ -7,6 +7,7 @@
 
 use leptos::prelude::*;
 
+use crate::components::geo_search::{GeoPick, GeoSearch};
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
 use crate::components::ui::{Button, FormField, Panel, SkeletonRows};
 
@@ -20,13 +21,6 @@ pub fn SettingsLocation() -> impl IntoView {
     let elevation_user_edited = RwSignal::new(false);
     let tz = RwSignal::new(String::new());
     let display_name = RwSignal::new(String::new());
-
-    // Address search (mirrors the setup wizard's LocationStep) so editing your
-    // location later is as easy as setting it the first time -- no decimal
-    // coordinates required.
-    let query = RwSignal::new(String::new());
-    let searching = RwSignal::new(false);
-    let results: RwSignal<Vec<(String, f64, f64)>> = RwSignal::new(Vec::new());
 
     let loaded = RwSignal::new(false);
     // Initial-load state: Some(err) when the config GET failed. The editor body is
@@ -176,76 +170,18 @@ pub fn SettingsLocation() -> impl IntoView {
         }
     };
 
-    // Geocode the typed address via the Nominatim proxy.
-    let on_search = move |_: ()| {
-        let q = query.get_untracked().trim().to_string();
-        if q.is_empty() || searching.get_untracked() {
-            return;
-        }
-        searching.set(true);
-        results.set(Vec::new());
-        #[cfg(feature = "hydrate")]
-        wasm_bindgen_futures::spawn_local(async move {
-            let url = format!("/api/wizard/geocode?q={}", crate::text::query_value(&q));
-            if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
-                if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    let list = v
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|r| {
-                                    Some((
-                                        r.get("display_name")?.as_str()?.to_string(),
-                                        r.get("lat")?.as_str()?.parse::<f64>().ok()?,
-                                        r.get("lon")?.as_str()?.parse::<f64>().ok()?,
-                                    ))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    results.set(list);
-                }
-            }
-            searching.set(false);
-        });
-        #[cfg(not(feature = "hydrate"))]
-        {
-            let _ = q;
-            searching.set(false);
-        }
-    };
-
-    let results_view = move || {
-        let list = results.get();
-        if list.is_empty() {
-            return ().into_any();
-        }
-        list.into_iter()
-            .map(|(name, la, lo)| {
-                view! {
-                    <button
-                        type="button"
-                        class="geo-result"
-                        on:click=move |_| {
-                            lat.set(la);
-                            lon.set(lo);
-                            results.set(Vec::new());
-                            // A freshly chosen place is a new location:
-                            // re-derive its elevation, overriding any prior
-                            // auto-fill (the user can still edit after).
-                            elevation_user_edited.set(false);
-                            suggest_tz();
-                            suggest_elevation();
-                        }
-                    >
-                        <span class="geo-result__name">{name}</span>
-                        <span class="geo-result__coords">{format!("{la:.4}, {lo:.4}")}</span>
-                    </button>
-                }
-            })
-            .collect_view()
-            .into_any()
-    };
+    // Address search (the same GeoSearch box as the setup wizard) so editing
+    // your location later is as easy as setting it the first time, no
+    // decimal coordinates required. A picked place is a new location:
+    // re-derive its elevation over any earlier auto-fill (the user can
+    // still edit after) and its timezone.
+    let on_pick = Callback::new(move |pick: GeoPick| {
+        lat.set(pick.lat);
+        lon.set(pick.lon);
+        elevation_user_edited.set(false);
+        suggest_tz();
+        suggest_elevation();
+    });
 
     view! {
         <div class="settings-page">
@@ -269,30 +205,16 @@ pub fn SettingsLocation() -> impl IntoView {
             >
 
             <Panel title="Coordinates".to_string() help_topic="location">
-                <FormField
-                    label="Find by address".to_string()
-                    helptext="City, street, or landmark (OpenStreetMap lookup). Picks the coordinates + timezone for you.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <div class="geo-search">
-                        <input
-                            type="text"
-                            class="ui-input"
-                            placeholder=crate::voice::LOCATION_SEARCH_EXAMPLE
-                            prop:value=move || query.get()
-                            on:input=move |ev| query.set(event_target_value(&ev))
-                            on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
-                        />
-                        <Button
-                            variant="ghost"
-                            disabled=Signal::derive(move || searching.get())
-                            on_click=Callback::new(move |_| on_search(()))
-                        >
-                            {move || if searching.get() { "Searching…" } else { "Search" }}
-                        </Button>
-                    </div>
-                </FormField>
-                <div class="geo-results">{results_view}</div>
+                // Closed until the config has loaded: a pick before that
+                // would be overwritten by the load, silently.
+                <GeoSearch
+                    disabled=Signal::derive(move || !loaded.get())
+                    position=Signal::derive(move || {
+                        let (la, lo) = (lat.get(), lon.get());
+                        (!(la == 0.0 && lo == 0.0)).then_some((la, lo))
+                    })
+                    on_pick=on_pick
+                />
                 <div class="grid settings-field-grid">
                 <FormField
                     label="Latitude".to_string()

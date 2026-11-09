@@ -62,6 +62,9 @@ impl ValidationReport {
 
 pub fn validate(cfg: &Config) -> ValidationReport {
     let mut r = ValidationReport::default();
+    for error in crate::config::soil::validation_errors(cfg) {
+        r.error("soil_probe_config", error);
+    }
     if cfg.notifications.daily_outlook.minute_of_day().is_none() {
         r.error(
             "notification_time_invalid",
@@ -404,7 +407,8 @@ pub fn validate(cfg: &Config) -> ValidationReport {
                 ),
             );
         }
-        if let Some(spec) = z.soil_sensor_id.as_deref() {
+        for probe in z.soil_bindings() {
+            let spec = probe.sensor_id.as_str();
             if let Some(rest) = spec.strip_prefix("source:") {
                 let src = rest.split(':').next().unwrap_or("");
                 if !src.is_empty() && !source_ids.contains(src) {

@@ -43,7 +43,8 @@ pub fn ZonesStep() -> impl IntoView {
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new());
-    let new_soil_sensor = RwSignal::new(String::new());
+    let new_soil_probes = RwSignal::new(Vec::<crate::config::SoilProbeConfig>::new());
+    let new_soil_aggregation = RwSignal::new(crate::config::SoilAggregation::default());
     let new_soil_min = RwSignal::new(30.0f64);
     let new_soil_sat = RwSignal::new(70.0f64);
     // Sensors are configured AFTER zones in the wizard, so the soil-sensor
@@ -266,7 +267,8 @@ pub fn ZonesStep() -> impl IntoView {
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url
-                    new_soil_sensor=new_soil_sensor
+                    new_soil_probes=new_soil_probes
+                    new_soil_aggregation=new_soil_aggregation
                     new_soil_min=new_soil_min
                     new_soil_sat=new_soil_sat
                     soil_sensor_opts=soil_sensor_opts
@@ -291,7 +293,8 @@ pub fn ZonesStep() -> impl IntoView {
                             new_sched_model,
                             new_station,
                             new_photo_url,
-                            new_soil_sensor,
+                            new_soil_probes,
+                            new_soil_aggregation,
                             new_soil_min,
                             new_soil_sat,
                         );

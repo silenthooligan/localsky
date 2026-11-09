@@ -617,17 +617,21 @@ pub async fn health_report(state: HealthState, full_detail: bool) -> HealthRespo
                             })
                             .unwrap_or_default();
                         for z in cfg.zones.values() {
-                            let Some(sid) = z.soil_sensor_id.as_deref() else {
-                                continue;
-                            };
-                            if faulted.contains(sid) {
-                                continue;
-                            }
-                            if let Some((src_id, _)) = sid
-                                .strip_prefix("source:")
-                                .and_then(|rest| rest.split_once(':'))
+                            for probe in z
+                                .soil_bindings()
+                                .into_iter()
+                                .filter(|p| !p.excluded_from_decisions)
                             {
-                                owner_labels.insert(src_id.to_string());
+                                let sid = probe.sensor_id.as_str();
+                                if faulted.contains(sid) {
+                                    continue;
+                                }
+                                if let Some((src_id, _)) = sid
+                                    .strip_prefix("source:")
+                                    .and_then(|rest| rest.split_once(':'))
+                                {
+                                    owner_labels.insert(src_id.to_string());
+                                }
                             }
                         }
                     }
