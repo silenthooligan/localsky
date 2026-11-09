@@ -34,6 +34,13 @@ checksums when upgrading tools or the wasm-bindgen lockfile entry.
 
 ## Recovery
 
+The 1.1.0 tag uses a macOS 14 runner that GitHub retired on November 2, 2026.
+`recover-110-release.yml` repeats the complete release dependency chain on
+macOS 15 and the existing Linux runners. Every checkout, build revision and
+image proof is pinned to the unchanged public 1.1.0 commit. The workflow checks
+the tag before each job and preserves already-published releases on retries.
+Dispatch it from main; neither release tag moves.
+
 Use **Re-run failed jobs** on the release run. Successful jobs remain available;
 image digest and validation artifacts are retained for 30 days. GitHub reruns
 the original commit. Transient download/API errors are retried, but failed tests,
