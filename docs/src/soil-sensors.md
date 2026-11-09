@@ -52,7 +52,9 @@ MQTT soil mappings require one exact topic per probe. Weather mappings still
 support wildcards. Retained messages received after subscribing or reconnecting
 do not refresh soil measurements. LocalSky waits for a live publication.
 Existing mapped channels receive independent IDs on upgrade; their old mixed
-history is retained without being attributed to a particular probe.
+history is retained without being attributed to a particular probe. From 1.1.1
+the old shared zone readings are no longer listed under Devices or a source's
+live readings, and each probe is labeled by its topic, entity or query.
 
 ## Temperature, conductivity, and battery
 

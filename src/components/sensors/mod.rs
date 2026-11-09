@@ -210,6 +210,13 @@ pub fn SensorsPage(
     let prefs = use_unit_prefs();
     let sources = RwSignal::new(Vec::<SourceRow>::new());
     let conditions = RwSignal::new(Vec::<ConditionsRow>::new());
+    // The station row and card describe a Tempest only when there is one.
+    // Every other install sees its merged current conditions here: live
+    // sources plus the forecast filling what they do not report.
+    let has_tempest = Signal::derive(move || {
+        let w = weather.get();
+        is_tempest_install(&sources.get(), &w.station_serial, &w.hub_serial)
+    });
     // The detail selection is URL state (derived reactively from the search
     // string), so SSR + hydrate agree and the back gesture steps one level.
     // Picks navigate (push) via `nav_to`; the existing ?source= deep link still
@@ -510,11 +517,12 @@ pub fn SensorsPage(
                     // live/no-packet state gets its own dot+text chip: the
                     // leading dot's color never carries health alone.
                     <p class="sensors-list__group">"Weather station"</p>
+                    {move || view! {
                     <SensorRow
                         active=Signal::derive(move || selected.get() == Sel::Tempest)
                         on_pick=Callback::new(move |()| nav_to.run(Sel::Tempest))
                         dot=Signal::derive(move || if weather.get().last_packet_epoch > 0 { "var(--status-online)" } else { "var(--verdict-off)" })
-                        title="Tempest".to_string()
+                        title=station_title(has_tempest.get()).to_string()
                         sub=Signal::derive(move || {
                             let p = prefs.get();
                             let w = weather.get();
@@ -526,6 +534,7 @@ pub fn SensorsPage(
                             ("status-chip--unknown", "no packet yet")
                         })
                     />
+                    }}
 
                     // Soil probes.
                     {move || {
@@ -622,7 +631,7 @@ pub fn SensorsPage(
 
                 <div class="sensors-detail">
                     {move || match selected.get() {
-                        Sel::Tempest => view! { <TempestDetail s=weather prefs/> }.into_any(),
+                        Sel::Tempest => view! { <TempestDetail s=weather prefs tempest=has_tempest/> }.into_any(),
                         Sel::Soil(slug) => {
                             match snap.get().soil_forecasts.into_iter().find(|z| z.zone_slug == slug) {
                                 Some(z) => {
@@ -771,6 +780,27 @@ fn SensorRow(
     }
 }
 
+/// Name of the station row: a Tempest only when one is present.
+fn station_title(tempest: bool) -> &'static str {
+    if tempest {
+        "Tempest"
+    } else {
+        "Current conditions"
+    }
+}
+
+/// A Tempest is present when an enabled Tempest source is configured, or when
+/// the live snapshot carries a Tempest station or hub serial (the implicit LAN
+/// listener heard one). Anything else feeding the snapshot (MQTT, Ecowitt,
+/// a forecast) is not a Tempest and must not be shown as one.
+fn is_tempest_install(sources: &[SourceRow], station_serial: &str, hub_serial: &str) -> bool {
+    sources
+        .iter()
+        .any(|s| s.enabled && matches!(s.kind.as_str(), "tempest_udp" | "tempest_ws"))
+        || !station_serial.is_empty()
+        || !hub_serial.is_empty()
+}
+
 /// One label/value row in a detail group.
 #[component]
 fn F(#[prop(into)] k: String, #[prop(into)] v: String) -> impl IntoView {
@@ -788,10 +818,23 @@ fn FieldGroup(#[prop(into)] title: String, children: Children) -> impl IntoView 
 }
 
 #[component]
-fn TempestDetail(s: ReadSignal<Snapshot>, prefs: Signal<UnitPrefs>) -> impl IntoView {
+fn TempestDetail(
+    s: ReadSignal<Snapshot>,
+    prefs: Signal<UnitPrefs>,
+    /// A Tempest is configured or reporting. Without one the card is the
+    /// merged current conditions, and the Tempest-only rows (station, battery,
+    /// lull, rapid wind, precipitation type) would only show placeholders.
+    tempest: Signal<bool>,
+) -> impl IntoView {
     move || {
         let d = s.get();
         let p = prefs.get();
+        let tempest = tempest.get();
+        let lightning = tempest
+            || d.lightning_count_last_min > 0
+            || d.lightning_strikes_last_hour > 0
+            || d.lightning_avg_dist_mi.is_some()
+            || d.last_strike_distance_mi.is_some();
         let precip = match d.precip_type {
             1 => "rain",
             2 => "hail",
@@ -810,11 +853,17 @@ fn TempestDetail(s: ReadSignal<Snapshot>, prefs: Signal<UnitPrefs>) -> impl Into
             <div class="sensor-detail-card entity-stripe entity-stripe--sensor is-static">
                 <div class="sensor-detail-card__head">
                     <div class="sensor-detail-card__title-group">
-                        <h2>"Tempest weather station"</h2>
+                        <h2>{if tempest { "Tempest weather station" } else { "Current conditions" }}</h2>
                         <span class="entity-badge entity-badge--sensor">"Sensor"</span>
                     </div>
                     <span class=format!("status-chip {fresh_tone}")>{fresh_word}</span>
                 </div>
+                {(!tempest).then(|| view! {
+                    <p class="sensors-section__hint">
+                        "Combined from your sources. A reading no live source reports comes from the forecast; "
+                        "Current conditions sources, above, lists where each reading comes from."
+                    </p>
+                })}
                 <div class="sensor-groups">
                     <FieldGroup title="Air">
                         <F k="Temperature" v=format!("{} {}", temp_value(d.air_temp_f, p), temp_unit(p))/>
@@ -827,32 +876,36 @@ fn TempestDetail(s: ReadSignal<Snapshot>, prefs: Signal<UnitPrefs>) -> impl Into
                     <FieldGroup title="Wind">
                         <F k="Average" v=fmt_wind(d.wind_avg_mph, p)/>
                         <F k="Gust" v=fmt_wind(d.wind_gust_mph, p)/>
-                        <F k="Lull" v=fmt_wind(d.wind_lull_mph, p)/>
+                        {tempest.then(|| view! { <F k="Lull" v=fmt_wind(d.wind_lull_mph, p)/> })}
                         <F k="Direction" v=format!("{} ({:.0}°)", dir_card(d.wind_dir_deg), d.wind_dir_deg)/>
-                        <F k="Rapid" v=fmt_wind(d.rapid_wind_mph, p)/>
+                        {tempest.then(|| view! { <F k="Rapid" v=fmt_wind(d.rapid_wind_mph, p)/> })}
                     </FieldGroup>
                     <FieldGroup title="Rain">
                         <F k="Today" v=fmt_rain_amount(d.rain_in_today, p)/>
                         <F k="Rate" v=fmt_rain_rate(d.rain_intensity_in_hr, p)/>
                         <F k="Last minute" v=fmt_rain_amount(d.rain_in_last_min, p)/>
-                        <F k="Type" v=precip.to_string()/>
+                        {tempest.then(|| view! { <F k="Type" v=precip.to_string()/> })}
                     </FieldGroup>
                     <FieldGroup title="Light">
                         <F k="Solar" v=format!("{:.0} W/m²", d.solar_w_m2)/>
                         <F k="Illuminance" v=format!("{:.0} lux", d.illuminance_lx)/>
                         <F k="UV index" v=format!("{:.1}", d.uv_index)/>
                     </FieldGroup>
+                    {lightning.then(|| view! {
                     <FieldGroup title="Lightning">
                         <F k="Last minute" v=d.lightning_count_last_min.to_string()/>
                         <F k="Last hour" v=d.lightning_strikes_last_hour.to_string()/>
                         <F k="Avg distance" v=d.lightning_avg_dist_mi.map(|m| fmt_distance_mi(m, p)).unwrap_or_else(|| "-".into())/>
                         <F k="Last strike" v=d.last_strike_distance_mi.map(|m| fmt_distance_mi(m, p)).unwrap_or_else(|| "-".into())/>
                     </FieldGroup>
+                    })}
+                    {tempest.then(|| view! {
                     <FieldGroup title="Station">
                         <F k="Battery" v=format!("{:.2} V ({:.0}%)", d.battery_v, d.battery_pct)/>
                         <F k="Station" v=if d.station_serial.is_empty() { "-".into() } else { d.station_serial.clone() }/>
                         <F k="Hub" v=if d.hub_serial.is_empty() { "-".into() } else { d.hub_serial.clone() }/>
                     </FieldGroup>
+                    })}
                 </div>
             </div>
         }
@@ -961,6 +1014,15 @@ fn reading_label(key: &str) -> String {
         "rainratein" => "Rain rate (in/hr)",
         "dailyrainin" => "Rain today (in)",
         _ if key.starts_with("soilmoisture") => {
+            // A mapped probe (1.1.0) is keyed by an encoded identity; name it
+            // by the topic, entity or query it came from instead.
+            if let Some(selector) = crate::config::soil::probe_label(key) {
+                return if selector.is_empty() {
+                    "Soil moisture, probe (%)".to_string()
+                } else {
+                    format!("Soil moisture, {selector} (%)")
+                };
+            }
             // Zone-bound MQTT soil is keyed `soilmoisture_<zone_slug>`; native
             // channels are `soilmoisture<N>`. Render the slug form by zone.
             let rest = &key[12..];
@@ -1223,5 +1285,55 @@ fn SourceDetail(
                 view! { <crate::components::ui::SkeletonRows count=3/> }.into_any()
             }}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1.1.0 probe channel is listed by its topic, never by its encoded
+    /// identity, which ran off the card and hid the value beside it.
+    #[test]
+    fn a_mapped_probe_reading_is_labelled_by_its_topic() {
+        let key = crate::config::soil::probe_key(
+            "mqtt",
+            &["devices/sensor-soil1/sensor/soil_moisture/state", ""],
+        );
+        assert_eq!(
+            reading_label(&key),
+            "Soil moisture, devices/sensor-soil1/sensor/soil_moisture/state (%)"
+        );
+        assert_eq!(
+            reading_label("soilmoisture_back_yard"),
+            "Soil moisture, back yard (%)"
+        );
+        assert_eq!(reading_label("soilmoisture2"), "Soil moisture ch2 (%)");
+    }
+
+    fn source(kind: &str, enabled: bool) -> SourceRow {
+        SourceRow {
+            id: kind.to_string(),
+            kind: kind.to_string(),
+            status: "online".to_string(),
+            stale_for_s: None,
+            enabled,
+        }
+    }
+
+    /// An MQTT station plus the default forecast is not a Tempest, so the
+    /// card must not present its merged readings as one.
+    #[test]
+    fn only_a_tempest_source_or_tempest_identity_makes_the_card_a_tempest() {
+        let mqtt = [source("mqtt", true), source("open_meteo", true)];
+        assert!(!is_tempest_install(&mqtt, "", ""));
+        assert_eq!(station_title(false), "Current conditions");
+        assert!(is_tempest_install(&[source("tempest_udp", true)], "", ""));
+        assert!(is_tempest_install(&[source("tempest_ws", true)], "", ""));
+        assert!(!is_tempest_install(&[source("tempest_udp", false)], "", ""));
+        // The implicit LAN listener heard a station before any source row.
+        assert!(is_tempest_install(&mqtt, "ST-00012345", ""));
+        assert!(is_tempest_install(&[], "", "HB-00012345"));
+        assert_eq!(station_title(true), "Tempest");
     }
 }

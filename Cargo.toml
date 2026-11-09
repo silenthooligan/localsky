@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -99,7 +99,7 @@ rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"
 # SQLite for the irrigation run-history layer. bundled features so we
 # don't need libsqlite3 on the runtime image (alpine-friendly). Used
 # from spawn_blocking so its sync API doesn't stall the tokio runtime.
-rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
 
 # Web Push: sends notifications to subscribed PWAs via VAPID. Same
 # rustls-tls toggle as reqwest so the runtime image stays OpenSSL-free.

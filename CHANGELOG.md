@@ -2,6 +2,32 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-09
+
+### Fixed
+
+- Home Assistant MQTT: the publisher subscribes to its own availability topic
+  and logs a warning when the broker does not deliver its "online" back, for
+  example an access list that denies the discovery prefix (Mosquitto
+  acknowledges denied publishes). A live "offline" while connected is answered
+  with "online", at most once a minute.
+- Devices and source live readings label soil probes by topic, entity or query
+  instead of the encoded channel ID. Long labels wrap.
+- Devices and source live readings no longer list the pre-1.1.0 shared zone
+  soil channels, which stop updating after the upgrade and could not be bound.
+- Sensors: without a Tempest, the station card is titled "Current conditions",
+  says the forecast fills readings no live source reports, and omits the
+  Tempest-only station, battery, lull, rapid wind and precipitation type rows.
+- MQTT subscriptions offer every weather reading the webhook and REST forms
+  map (humidity, pressure, dew point, gust, direction, solar, illuminance, UV
+  and more), with unit conversion hints. A zone binding is offered only for
+  soil moisture, since a bound topic is always recorded as soil.
+
+### Security
+
+- Bundled SQLite updated through rusqlite 0.41.1 and libsqlite3-sys 0.39.1
+  (RUSTSEC-2026-0459, CVE-2026-119375).
+
 ## [1.1.0] - 2026-11-08
 
 ### Added

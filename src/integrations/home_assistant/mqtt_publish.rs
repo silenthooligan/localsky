@@ -20,13 +20,24 @@
 // dropped broker link all land on "offline" and HA marks the entities
 // unavailable instead of freezing them. A missing flow reading is published
 // as unknown even while LocalSky itself remains online.
+//
+// LocalSky also subscribes to its own availability topic. A broker can accept
+// the connection and then drop every publish: Mosquitto acknowledges a QoS 1
+// publish its ACL denies and the MQTT 3.1.1 PUBACK carries no reason code, so
+// the client cannot tell. Hearing its own "online" come back is the only proof
+// the broker kept it. When that proof does not arrive the log says so, and a
+// live "offline" that lands while this connection is up (a late will from an
+// older session) is answered with "online" again.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, ClientError, Event, LastWill, MqttOptions, Packet, QoS};
+use rumqttc::{
+    AsyncClient, ClientError, Event, LastWill, MqttOptions, Packet, QoS, SubscribeReasonCode,
+};
 use serde::Serialize;
 use thiserror::Error;
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::config::schema::MqttConfig;
@@ -60,9 +71,20 @@ const PAYLOAD_OFFLINE: &str = "offline";
 /// Both cost six.
 const PUBLISHES_PER_ZONE: usize = 6;
 
-/// The yard-wide part of that burst: the retained "online", the verdict and
-/// flow configs, and the verdict and flow state values.
-const PUBLISHES_YARD_WIDE: usize = 5;
+/// The yard-wide part of that burst: the subscription to the availability
+/// topic, the retained "online", the verdict and flow configs, and the verdict
+/// and flow state values.
+const REQUESTS_YARD_WIDE: usize = 6;
+
+/// How long after "online" is sent the broker has to deliver it back before
+/// the log says the broker is not keeping LocalSky's messages. A local broker
+/// echoes in milliseconds; this only has to outlast a busy one.
+const AVAILABILITY_CONFIRM_WITHIN: Duration = Duration::from_secs(15);
+
+/// The least time between two corrections of a stray "offline". Two clients
+/// that both own the topic would otherwise trade it back and forth as fast as
+/// the broker can deliver.
+const AVAILABILITY_REASSERT_EVERY: Duration = Duration::from_secs(60);
 
 /// The yard the sizing below is derived from. Every irrigation controller
 /// LocalSky drives tops out well under this (OpenSprinkler reaches 72 stations
@@ -100,7 +122,7 @@ const BURST_HEADROOM: usize = 512;
 /// Never 0: flume reads that as a rendezvous channel, and the first publish
 /// would deadlock against an eventloop nobody is polling.
 const REQUEST_CHANNEL_CAP: usize =
-    PUBLISHES_PER_ZONE * MAX_BURST_ZONES + PUBLISHES_YARD_WIDE + BURST_HEADROOM;
+    PUBLISHES_PER_ZONE * MAX_BURST_ZONES + REQUESTS_YARD_WIDE + BURST_HEADROOM;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveryDevice {
@@ -196,6 +218,17 @@ impl HaMqttPublisher {
         let topic = self.availability_topic.clone();
         self.client
             .publish(topic, QoS::AtLeastOnce, true, PAYLOAD_ONLINE)
+            .await?;
+        Ok(())
+    }
+
+    /// Subscribe to our own availability topic, before "online" goes out, so
+    /// the broker's delivery of that "online" proves it stored the message.
+    /// Re-issued on every (re)connect: rumqttc connects with a clean session
+    /// and does not replay subscriptions.
+    pub async fn watch_availability(&self) -> Result<(), MqttPublishError> {
+        self.client
+            .subscribe(self.availability_topic.clone(), QoS::AtLeastOnce)
             .await?;
         Ok(())
     }
@@ -581,7 +614,13 @@ impl HaMqttPublisher {
 ///   - the availability topic is republished "online" on every ConnAck and
 ///     armed as that connection's last will, so the window where LocalSky is
 ///     gone or unreachable reads as unavailable in HA rather than as the last
-///     retained numbers.
+///     retained numbers;
+///   - the publisher subscribes to that topic first and expects its own live
+///     "online" back within `AVAILABILITY_CONFIRM_WITHIN`. No echo means the
+///     broker is dropping what LocalSky publishes (typically an ACL that
+///     denies the discovery prefix), which is logged instead of passing as
+///     a healthy connection; a live "offline" while connected is answered
+///     with "online", at most once per `AVAILABILITY_REASSERT_EVERY`.
 pub fn spawn(
     cfg: MqttConfig,
     deployment_display_name: String,
@@ -613,18 +652,27 @@ pub fn spawn(
             // Track whether we have an active session: only publish state once
             // the broker has ConnAck'd (a publish before connect just queues).
             let mut connected = false;
+            // What this connection has heard back on its own availability
+            // topic. Per connection: a reconnect starts the proof over.
+            let mut availability: Option<AvailabilityCheck> = None;
 
             // Inner loop: poll the eventloop (drives I/O + reconnect detection)
             // and react to new snapshots. We `borrow()` the watch on every
             // wake, so a snapshot that arrived before ConnAck is still picked
             // up on the first post-connect publish.
             loop {
+                let confirm_by = availability.as_ref().and_then(AvailabilityCheck::deadline);
                 tokio::select! {
                     ev = eventloop.poll() => {
                         match ev {
                             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                                 connected = true;
                                 info!("ha mqtt publisher: connected; publishing discovery");
+                                // Subscribe before "online" goes out, so the
+                                // broker's delivery of it proves it was kept.
+                                if let Err(e) = publisher.watch_availability().await {
+                                    warn!(error = %e, "ha mqtt publisher: availability subscription failed");
+                                }
                                 // Online first: whatever ended the last
                                 // connection left the topic at "offline", and
                                 // an entity must never appear pointing at a
@@ -632,6 +680,7 @@ pub fn spawn(
                                 if let Err(e) = publisher.publish_online().await {
                                     warn!(error = %e, "ha mqtt publisher: availability publish failed");
                                 }
+                                availability = Some(AvailabilityCheck::new(Instant::now()));
                                 let snap = snap_rx.borrow().clone();
                                 // Everything below enqueues with nothing
                                 // draining the channel, so a yard whose own
@@ -639,7 +688,7 @@ pub fn spawn(
                                 // rather than leaving a connection that went
                                 // quiet for someone to work out.
                                 let burst =
-                                    PUBLISHES_PER_ZONE * snap.zones.len() + PUBLISHES_YARD_WIDE;
+                                    PUBLISHES_PER_ZONE * snap.zones.len() + REQUESTS_YARD_WIDE;
                                 if burst > REQUEST_CHANNEL_CAP {
                                     warn!(
                                         packets = burst,
@@ -655,6 +704,48 @@ pub fn spawn(
                                 // discovered entities are not "unknown".
                                 if let Err(e) = publisher.publish_all_state(&snap).await {
                                     warn!(error = %e, "ha mqtt publisher: initial state publish failed");
+                                }
+                            }
+                            Ok(Event::Incoming(Packet::Publish(p)))
+                                if p.topic == publisher.availability_topic =>
+                            {
+                                let Some(check) = availability.as_mut() else {
+                                    continue;
+                                };
+                                match check.on_message(&p.payload, p.retain, Instant::now()) {
+                                    AvailabilityAction::Confirmed { after_warning } => {
+                                        if after_warning {
+                                            info!(
+                                                topic = %publisher.availability_topic,
+                                                "ha mqtt publisher: the broker now delivers LocalSky's availability; Home Assistant will show it online"
+                                            );
+                                        }
+                                    }
+                                    AvailabilityAction::Reassert => {
+                                        warn!(
+                                            topic = %publisher.availability_topic,
+                                            "ha mqtt publisher: \"offline\" arrived on LocalSky's availability topic while it is connected; publishing \"online\" again. If this repeats, another client (an older LocalSky, or a second instance with the same name) is using this topic"
+                                        );
+                                        if let Err(e) = publisher.publish_online().await {
+                                            warn!(error = %e, "ha mqtt publisher: availability publish failed");
+                                        }
+                                    }
+                                    AvailabilityAction::None | AvailabilityAction::WarnUnconfirmed => {}
+                                }
+                            }
+                            Ok(Event::Incoming(Packet::SubAck(ack))) => {
+                                let refused = ack
+                                    .return_codes
+                                    .iter()
+                                    .any(|c| matches!(c, SubscribeReasonCode::Failure));
+                                if refused {
+                                    if let Some(check) = availability.as_mut() {
+                                        check.unverifiable();
+                                    }
+                                    warn!(
+                                        topic = %publisher.availability_topic,
+                                        "ha mqtt publisher: the broker refused LocalSky's subscription to its own availability topic, so LocalSky cannot confirm the broker keeps what it publishes. Allow this MQTT user to subscribe to the discovery prefix"
+                                    );
                                 }
                             }
                             Ok(_) => {} // PingResp, PubAck, outgoing, etc.
@@ -686,10 +777,125 @@ pub fn spawn(
                             }
                         }
                     }
+                    () = sleep_until_or_never(confirm_by) => {
+                        let Some(check) = availability.as_mut() else {
+                            continue;
+                        };
+                        if let AvailabilityAction::WarnUnconfirmed = check.on_deadline(Instant::now()) {
+                            warn!(
+                                topic = %publisher.availability_topic,
+                                broker = %cfg.host,
+                                port = cfg.port,
+                                discovery_prefix = %publisher.discovery_prefix,
+                                "ha mqtt publisher: the broker accepted the connection but never delivered LocalSky's \"online\" back, so it is not keeping what LocalSky publishes and Home Assistant will show LocalSky offline. Check that this MQTT user may publish and subscribe to the discovery prefix (for Mosquitto: `topic readwrite <prefix>/#` in the ACL). Mosquitto acknowledges publishes its ACL denies, so LocalSky gets no error"
+                            );
+                        }
+                    }
                 }
             }
         }
     });
+}
+
+/// Sleep until `deadline`, or forever when there is none, so a `select!` arm
+/// can carry an optional timer.
+async fn sleep_until_or_never(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// What the spawn loop does after the availability check sees something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvailabilityAction {
+    None,
+    /// Our own live "online" came back: the broker keeps what we publish.
+    /// `after_warning` is true when the log already said otherwise.
+    Confirmed {
+        after_warning: bool,
+    },
+    /// A live "offline" arrived while this connection is up; say "online".
+    Reassert,
+    /// The deadline passed without the broker delivering our "online".
+    WarnUnconfirmed,
+}
+
+/// One connection's proof that the broker keeps LocalSky's availability.
+///
+/// A message the broker sends because the subscription is new carries the
+/// retain flag (MQTT 3.1.1 section 3.3.1.3) and is whatever the topic held
+/// before this connection spoke, so it proves nothing either way. Only a live
+/// "online" confirms, and only a live "offline" is a correction to make.
+#[derive(Debug)]
+struct AvailabilityCheck {
+    sent_at: Instant,
+    confirmed: bool,
+    /// The unconfirmed warning is logged once per connection; a refused
+    /// subscription also lands here, since no echo can arrive at all.
+    settled_unconfirmed: bool,
+    warned: bool,
+    last_reassert: Option<Instant>,
+}
+
+impl AvailabilityCheck {
+    fn new(sent_at: Instant) -> Self {
+        Self {
+            sent_at,
+            confirmed: false,
+            settled_unconfirmed: false,
+            warned: false,
+            last_reassert: None,
+        }
+    }
+
+    /// When to give up waiting for the echo; None once that is decided.
+    fn deadline(&self) -> Option<Instant> {
+        (!self.confirmed && !self.settled_unconfirmed)
+            .then(|| self.sent_at + AVAILABILITY_CONFIRM_WITHIN)
+    }
+
+    /// The broker refused the subscription: no echo can come, so the
+    /// unconfirmed warning would blame publishing for a subscribe problem.
+    fn unverifiable(&mut self) {
+        self.settled_unconfirmed = true;
+    }
+
+    fn on_message(&mut self, payload: &[u8], retained: bool, now: Instant) -> AvailabilityAction {
+        if retained {
+            return AvailabilityAction::None;
+        }
+        if payload == PAYLOAD_ONLINE.as_bytes() {
+            if self.confirmed {
+                return AvailabilityAction::None;
+            }
+            self.confirmed = true;
+            return AvailabilityAction::Confirmed {
+                after_warning: self.warned,
+            };
+        }
+        if payload == PAYLOAD_OFFLINE.as_bytes() {
+            let due = self
+                .last_reassert
+                .is_none_or(|at| now.duration_since(at) >= AVAILABILITY_REASSERT_EVERY);
+            if due {
+                self.last_reassert = Some(now);
+                return AvailabilityAction::Reassert;
+            }
+        }
+        AvailabilityAction::None
+    }
+
+    fn on_deadline(&mut self, now: Instant) -> AvailabilityAction {
+        match self.deadline() {
+            Some(at) if now >= at => {
+                self.settled_unconfirmed = true;
+                self.warned = true;
+                AvailabilityAction::WarnUnconfirmed
+            }
+            _ => AvailabilityAction::None,
+        }
+    }
 }
 
 /// The one retained topic that says whether this LocalSky process is alive.
@@ -1133,6 +1339,7 @@ mod tests {
         let (publisher, mut eventloop) =
             HaMqttPublisher::connect(&cfg, "Yard", "cid").await.unwrap();
         let burst = async {
+            publisher.watch_availability().await.unwrap();
             publisher.publish_online().await.unwrap();
             publisher.publish_all_discovery(&snap).await.unwrap();
             publisher.publish_all_state(&snap).await.unwrap();
@@ -1143,7 +1350,7 @@ mod tests {
         let sent = drained(&mut eventloop);
         assert_eq!(
             sent.len(),
-            PUBLISHES_PER_ZONE * MAX_BURST_ZONES + PUBLISHES_YARD_WIDE,
+            PUBLISHES_PER_ZONE * MAX_BURST_ZONES + REQUESTS_YARD_WIDE,
             "the burst is not the size REQUEST_CHANNEL_CAP was derived from; re-derive it"
         );
         assert!(
@@ -1151,15 +1358,156 @@ mod tests {
             "{} packets do not fit a channel of {REQUEST_CHANNEL_CAP}",
             sent.len()
         );
-        // The availability publish is the one that must never be lost.
-        let Request::Publish(first) = &sent[0] else {
+        // The subscription leads so the broker's delivery of "online" proves
+        // it kept it; the availability publish is the one that must never be
+        // lost, so it comes straight after.
+        let Request::Subscribe(watch) = &sent[0] else {
             panic!(
-                "the burst does not lead with the availability publish: {:?}",
+                "the burst does not lead with the availability subscription: {:?}",
                 sent[0]
             );
         };
-        assert_eq!(first.topic, publisher.availability_topic);
-        assert_eq!(std::str::from_utf8(&first.payload).unwrap(), PAYLOAD_ONLINE);
+        assert_eq!(watch.filters[0].path, publisher.availability_topic);
+        let Request::Publish(online) = &sent[1] else {
+            panic!(
+                "the availability publish does not follow the subscription: {:?}",
+                sent[1]
+            );
+        };
+        assert_eq!(online.topic, publisher.availability_topic);
+        assert_eq!(
+            std::str::from_utf8(&online.payload).unwrap(),
+            PAYLOAD_ONLINE
+        );
+    }
+
+    /// The broker can accept the connection and then drop every publish:
+    /// Mosquitto PUBACKs a QoS 1 publish its ACL denies. Subscribing to the
+    /// availability topic is how LocalSky hears whether its "online" was kept.
+    #[tokio::test]
+    async fn watch_availability_subscribes_to_the_will_topic() {
+        let (publisher, mut eventloop) = HaMqttPublisher::connect(&mqtt_cfg(), "Yard", "cid")
+            .await
+            .unwrap();
+        publisher.watch_availability().await.unwrap();
+        let sent = drained(&mut eventloop);
+        assert_eq!(sent.len(), 1, "expected one packet, got {sent:?}");
+        let Request::Subscribe(s) = &sent[0] else {
+            panic!("watch_availability enqueued {:?}, not a subscribe", sent[0]);
+        };
+        assert_eq!(s.filters.len(), 1);
+        assert_eq!(s.filters[0].path, "homeassistant/yard/availability");
+        assert_eq!(
+            s.filters[0].path,
+            eventloop.mqtt_options.last_will().unwrap().topic
+        );
+    }
+
+    /// The value the broker hands over because the subscription is new is
+    /// what the topic held before this connection spoke, such as the "offline"
+    /// the previous version's will left during an upgrade. It must neither
+    /// confirm nor trigger a correction; only a live echo of our own "online"
+    /// confirms.
+    #[test]
+    fn a_retained_replay_proves_nothing_and_a_live_online_confirms() {
+        let t0 = Instant::now();
+        let mut check = AvailabilityCheck::new(t0);
+        assert_eq!(
+            check.on_message(b"offline", true, t0),
+            AvailabilityAction::None
+        );
+        assert_eq!(
+            check.on_message(b"online", true, t0),
+            AvailabilityAction::None
+        );
+        assert!(
+            check.deadline().is_some(),
+            "a replay must not settle the check"
+        );
+        assert_eq!(
+            check.on_message(b"online", false, t0),
+            AvailabilityAction::Confirmed {
+                after_warning: false
+            }
+        );
+        assert_eq!(check.deadline(), None);
+        assert_eq!(
+            check.on_deadline(t0 + AVAILABILITY_CONFIRM_WITHIN * 2),
+            AvailabilityAction::None,
+            "a confirmed connection must never warn"
+        );
+        assert_eq!(
+            check.on_message(b"online", false, t0),
+            AvailabilityAction::None
+        );
+    }
+
+    /// A broker that silently drops our publishes never echoes "online". The
+    /// log has to say so exactly once per connection, and a late echo (the
+    /// operator fixed the ACL) is reported as recovered.
+    #[test]
+    fn a_missing_echo_warns_once_and_a_late_echo_recovers() {
+        let t0 = Instant::now();
+        let mut check = AvailabilityCheck::new(t0);
+        assert_eq!(check.deadline(), Some(t0 + AVAILABILITY_CONFIRM_WITHIN));
+        assert_eq!(
+            check.on_deadline(t0 + AVAILABILITY_CONFIRM_WITHIN / 2),
+            AvailabilityAction::None
+        );
+        assert_eq!(
+            check.on_deadline(t0 + AVAILABILITY_CONFIRM_WITHIN),
+            AvailabilityAction::WarnUnconfirmed
+        );
+        assert_eq!(check.deadline(), None, "the warning must not repeat");
+        assert_eq!(
+            check.on_deadline(t0 + AVAILABILITY_CONFIRM_WITHIN * 3),
+            AvailabilityAction::None
+        );
+        assert_eq!(
+            check.on_message(b"online", false, t0 + AVAILABILITY_CONFIRM_WITHIN * 4),
+            AvailabilityAction::Confirmed {
+                after_warning: true
+            }
+        );
+    }
+
+    /// A refused subscription means no echo can ever arrive; blaming the
+    /// publish side for it would send the operator to the wrong ACL line.
+    #[test]
+    fn a_refused_subscription_never_reports_a_missing_echo() {
+        let t0 = Instant::now();
+        let mut check = AvailabilityCheck::new(t0);
+        check.unverifiable();
+        assert_eq!(check.deadline(), None);
+        assert_eq!(
+            check.on_deadline(t0 + AVAILABILITY_CONFIRM_WITHIN),
+            AvailabilityAction::None
+        );
+    }
+
+    /// A live "offline" while connected (a late will from an older session)
+    /// is corrected, but not faster than once a minute, so two clients that
+    /// both own the topic cannot flood the broker trading it back and forth.
+    #[test]
+    fn a_live_offline_is_corrected_at_most_once_a_minute() {
+        let t0 = Instant::now();
+        let mut check = AvailabilityCheck::new(t0);
+        assert_eq!(
+            check.on_message(b"offline", false, t0),
+            AvailabilityAction::Reassert
+        );
+        assert_eq!(
+            check.on_message(b"offline", false, t0 + Duration::from_secs(5)),
+            AvailabilityAction::None
+        );
+        assert_eq!(
+            check.on_message(b"offline", false, t0 + AVAILABILITY_REASSERT_EVERY),
+            AvailabilityAction::Reassert
+        );
+        assert_eq!(
+            check.on_message(b"garbage", false, t0),
+            AvailabilityAction::None
+        );
     }
 
     /// `BURST_HEADROOM` is not decoration. `poll()` moves one request per call,
@@ -1186,7 +1534,7 @@ mod tests {
             .expect("an overlapping state burst parked; BURST_HEADROOM is too small");
         let sent = drained(&mut eventloop);
         assert!(
-            sent.len() > PUBLISHES_PER_ZONE * MAX_BURST_ZONES + PUBLISHES_YARD_WIDE,
+            sent.len() > PUBLISHES_PER_ZONE * MAX_BURST_ZONES + REQUESTS_YARD_WIDE,
             "the second burst never queued on top of the first: {} packets",
             sent.len()
         );

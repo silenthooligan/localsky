@@ -142,6 +142,9 @@ pub fn router(st: ApiState) -> Router {
     // entities, so it borrows the IrrigationStore Arc before we hand it
     // off to the irrigation routes' nested router.
     let manifest_router = manifest::router(irrigation.clone(), cfg_store.clone());
+    // The devices list and the per-source readings hide retired pre-1.1.0
+    // zone soil channels, which takes the config.
+    let readings_cfg = cfg_store.clone();
 
     let mut router = tempest_routes
         .nest(
@@ -162,7 +165,10 @@ pub fn router(st: ApiState) -> Router {
             "/forecast",
             forecast::router(forecast_store, history.clone()),
         )
-        .nest("/devices", devices::router(devices, history.clone()))
+        .nest(
+            "/devices",
+            devices::router(devices, history.clone(), Some(readings_cfg.clone())),
+        )
         .merge(info::router())
         .merge(sources::router())
         .merge(manifest_router);
@@ -170,7 +176,7 @@ pub fn router(st: ApiState) -> Router {
     // Observed-weather history (sparklines), only when persistence is mounted.
     if let Some(h) = history {
         router = router
-            .nest("/weather", weather::router(h.clone()))
+            .nest("/weather", weather::router(h.clone(), Some(readings_cfg)))
             .nest("/sensors", sensors::router(h, inventory));
     }
     router

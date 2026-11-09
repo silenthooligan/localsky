@@ -183,8 +183,8 @@
 .sensor-group__fields { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .sensor-field { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); border-bottom: 1px solid var(--elev-line); padding-bottom: var(--space-2); }
 .sensor-field:last-child { border-bottom: none; padding-bottom: 0; }
-.sensor-field dt { margin: 0; color: var(--text-dim); }
-.sensor-field dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); text-align: right; }
+.sensor-field dt { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--text-dim); }
+.sensor-field dd { margin: 0; flex: none; font-family: var(--font-mono); color: var(--text-bright); text-align: right; }
 
 @media (max-width: 860px) {
   .sensors-shell { grid-template-columns: 1fr; }

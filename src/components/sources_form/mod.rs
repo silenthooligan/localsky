@@ -802,7 +802,7 @@ pub fn SourceEditorPanel(
             {move || soil_path_hint(&kind.get())}
 
             {move || (kind.get() == "mqtt").then(|| view! {
-                <Panel title="Soil subscriptions".to_string()>
+                <Panel title="Subscriptions".to_string()>
                     <MqttSoilSubscriptions config_text=config_text zone_slugs=zone_slugs/>
                 </Panel>
             })}

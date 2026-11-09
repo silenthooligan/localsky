@@ -25,6 +25,14 @@ If the mapped reading now works, the fallback recovered that input. It does not 
 
 For a single unavailable entity, verify the exact entity ID, its current state, unit, and mapping in LocalSky. Do not map a preceding-minute rain reading as a daily total; use **Rain last minute (accumulate today)**.
 
+## Home Assistant shows LocalSky offline over MQTT
+
+LocalSky publishes `online` to `<discovery prefix>/<node>/availability` when it connects to the broker, and the broker publishes `offline` for it when that connection ends. If the topic reads `offline` while LocalSky runs, or the retained discovery payloads still name an older `sw_version`, the broker is not keeping what LocalSky publishes.
+
+The usual cause is a broker access list. Mosquitto acknowledges a publish its access list denies, so the connection looks healthy from LocalSky's side, and the broker log shows `Denied PUBLISH from localsky-pub-<name>`. Give the user in the Home Assistant MQTT settings permission to publish and subscribe under the discovery prefix, for example `topic readwrite homeassistant/#`. A user that can only read probe topics is not enough. Also confirm the host and port are the broker Home Assistant uses.
+
+From 1.1.1, LocalSky subscribes to its own availability topic and logs a warning when its `online` does not come back within 15 seconds. An `offline` that arrives while LocalSky is connected is answered with `online`, at most once a minute.
+
 ## Tempest has no readings
 
 The local Tempest path listens for UDP broadcasts on port 50222. Confirm the source is enabled, the hub is on a reachable broadcast network, and Docker uses host networking where necessary.

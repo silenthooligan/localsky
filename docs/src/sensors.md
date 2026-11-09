@@ -28,6 +28,14 @@ For WeatherFlow's preceding-minute precipitation sensor, choose **Rain last minu
 
 [HA weather setup](hacs.md#use-home-assistant-weather-sensors)
 
+## MQTT
+
+Add one subscription per topic and pick what it measures under **Reading**: temperature, humidity, dew point, pressure, wind speed, gust and direction, rain, solar, illuminance, UV, lightning, ET0, flow, leaf wetness, or soil moisture. Readings are stored in the units the form shows (°F, in, mph, inHg). For a metric device, set **Scale** and **Offset**: °C to °F is 1.8 and 32, mm to in is 0.03937, hPa to inHg is 0.02953, km/h to mph is 0.6214.
+
+Soil moisture with a zone becomes that zone's probe and needs the exact topic. Without a zone, the same reading is air humidity.
+
+Readings that no live source reports come from the forecast. On the **Sensors** page, **Current conditions sources** shows where each reading comes from.
+
 ## Ecowitt
 
 Add a supported gateway by its reachable LAN address. Native polling can discover available channels. Custom upload is a separate push path configured on the gateway.
