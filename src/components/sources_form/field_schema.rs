@@ -705,10 +705,10 @@ static F_MET_NORWAY: &[FieldSpec] = &[FieldSpec::text(
 static F_OPENWEATHER: &[FieldSpec] = &[FieldSpec::secret_doc(
     "api_key",
     "API key",
-    "OpenWeather API key from openweathermap.org (free tier; API keys tab after sign-up).",
+    "OpenWeather API key. LocalSky calls One Call API (endpoint 3.0), which needs the separate One Call API subscription; OpenWeather's checkout lists it as OneCall 4.0. The first 1,000 calls a day are free.",
     true,
     "your OpenWeather key",
-    "https://openweathermap.org/api",
+    "https://openweathermap.org/api/one-call-3",
 )];
 
 static F_PIRATE_WEATHER: &[FieldSpec] = &[FieldSpec::secret_doc(

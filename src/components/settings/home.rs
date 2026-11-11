@@ -473,6 +473,8 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
             })
             .collect_view();
 
+        let fault_rows = soil_fault_rows(&h);
+
         // First-run guidance: a short "what's left" checklist driven by real
         // state, shown until the hardware is configured, so a beginner who just
         // finished the wizard has a path instead of a flat wall of sections.
@@ -574,6 +576,27 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
                     <ul class="settings-overview__list">{controller_rows}</ul>
                 </div>
 
+                // A faulted soil probe makes the status "degraded" while every
+                // source and controller above reads green, so name it here.
+                {(!fault_rows.is_empty()).then(|| view! {
+                    <div class="settings-overview__section">
+                        <div class="settings-overview__section-head">
+                            <h3>"Soil probes not reporting"</h3>
+                            <button type="button" class="settings-overview__jump"
+                                on:click=move |_| go.run("sensors")>"Review"</button>
+                        </div>
+                        <ul class="settings-overview__list">
+                            {fault_rows.into_iter().map(|(probe, meta)| view! {
+                                <li class="settings-overview__row">
+                                    <span class="settings-overview__dot is-offline" aria-hidden="true"></span>
+                                    <span class="settings-overview__row-name">{probe}</span>
+                                    <span class="settings-overview__row-meta">{meta}</span>
+                                </li>
+                            }).collect_view()}
+                        </ul>
+                    </div>
+                })}
+
                 <p class="settings-overview__hint">
                     "See live readings in Sensors, or manage connections in Devices."
                 </p>
@@ -581,6 +604,41 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
         }
         .into_any()
     }
+}
+
+/// The soil probes in a health response's `soil_probe_faults`, as (probe name,
+/// zone and reason) rows. A probe is named by the topic or entity its channel
+/// encodes, else by its id.
+fn soil_fault_rows(health: &serde_json::Value) -> Vec<(String, String)> {
+    health
+        .get("soil_probe_faults")
+        .and_then(|v| v.as_array())
+        .map(|faults| {
+            faults
+                .iter()
+                .map(|f| {
+                    let id = f.get("sensor_id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let name = id
+                        .strip_prefix("source:")
+                        .and_then(|rest| rest.split_once(':'))
+                        .and_then(|(_, key)| crate::config::soil::probe_label(key))
+                        .filter(|label| !label.is_empty())
+                        .unwrap_or_else(|| id.to_string());
+                    let zone = f
+                        .get("zone_name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| f.get("zone_slug").and_then(|v| v.as_str()))
+                        .unwrap_or("?");
+                    let reason = if f.get("since_epoch").and_then(|v| v.as_i64()).is_some() {
+                        "no valid reading for 24 hours"
+                    } else {
+                        "no valid reading yet"
+                    };
+                    (name, format!("{zone} · {reason}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Render the editor component for a section key into the detail pane.
@@ -606,5 +664,39 @@ fn section_view(key: &str) -> leptos::prelude::AnyView {
         "history" => view! { <SettingsHistory/> }.into_any(),
         "advanced" => view! { <SettingsAdvanced/> }.into_any(),
         _ => view! { <div/> }.into_any(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A faulted probe is named by its topic and zone, so a "degraded" status
+    /// with every source green has a visible cause.
+    #[test]
+    fn faulted_soil_probes_are_listed_by_topic_and_zone() {
+        let key = crate::config::soil::probe_key(
+            "mqtt",
+            &["devices/sensor-soil9/sensor/soil_moisture/state", ""],
+        );
+        let health = serde_json::json!({ "soil_probe_faults": [
+            { "zone_slug": "back_garden_grass", "zone_name": "Garden Grass",
+              "sensor_id": format!("source:mqtt:{key}"), "since_epoch": 1794200000 },
+            { "zone_slug": "shrubs", "zone_name": "Shrubs",
+              "sensor_id": "ha:sensor.shrub_soil", "since_epoch": null }
+        ]});
+        let rows = super::soil_fault_rows(&health);
+        assert_eq!(
+            rows,
+            [
+                (
+                    "devices/sensor-soil9/sensor/soil_moisture/state".to_string(),
+                    "Garden Grass · no valid reading for 24 hours".to_string()
+                ),
+                (
+                    "ha:sensor.shrub_soil".to_string(),
+                    "Shrubs · no valid reading yet".to_string()
+                )
+            ]
+        );
+        assert!(super::soil_fault_rows(&serde_json::json!({})).is_empty());
     }
 }

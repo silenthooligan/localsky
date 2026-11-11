@@ -826,7 +826,9 @@ async fn dispatch_today(
             // The morning was due and nothing could water it. That used to
             // be a log line. A row per planned zone puts it in History,
             // and a push tells the operator today, not when the lawn does.
-            warn!("smart morning: no default controller configured; skipping today");
+            // "None configured" was wrong for an install whose controller is
+            // switched off: that one is configured, just never built.
+            warn!("smart morning: no controller is running (none configured, or all switched off); skipping today");
             if let Some(rs) = runs {
                 for zone in due.iter().copied() {
                     let row = NewRun {
@@ -845,7 +847,7 @@ async fn dispatch_today(
                     if let Err(e) = rs
                         .insert_skipped(
                             row,
-                            "No controller is configured; nothing could water this morning"
+                            "No controller is running (none is configured, or all are switched off); nothing could water this morning"
                                 .to_string(),
                         )
                         .await
@@ -856,8 +858,8 @@ async fn dispatch_today(
             }
             if let Some(p) = push {
                 p.emit(PushEvent::ControllerOffline {
-                    controller_id: "(none configured)".into(),
-                    error: "no irrigation controller is configured, so this morning did not water"
+                    controller_id: "(none running)".into(),
+                    error: "no irrigation controller is running (none is configured, or all are switched off), so this morning did not water"
                         .into(),
                 });
             }

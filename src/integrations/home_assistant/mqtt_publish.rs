@@ -29,13 +29,16 @@
 // live "offline" that lands while this connection is up (a late will from an
 // older session) is answered with "online" again.
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{
-    AsyncClient, ClientError, Event, LastWill, MqttOptions, Packet, QoS, SubscribeReasonCode,
+    AsyncClient, ClientError, Event, LastWill, MqttOptions, Packet, QoS, SubscribeFilter,
+    SubscribeReasonCode,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -230,6 +233,45 @@ impl HaMqttPublisher {
         self.client
             .subscribe(self.availability_topic.clone(), QoS::AtLeastOnce)
             .await?;
+        Ok(())
+    }
+
+    /// The node this publisher writes to.
+    pub fn published_node(&self) -> PublishedNode {
+        PublishedNode {
+            discovery_prefix: self.discovery_prefix.clone(),
+            node_id: self.node_id.clone(),
+        }
+    }
+
+    /// Subscribe to a previous node's topics so the broker replays what it
+    /// still retains. One SUBSCRIBE, so its SUBACK is told apart from the
+    /// single-filter availability one by its length.
+    async fn watch_node(&self, node: &PublishedNode) -> Result<(), MqttPublishError> {
+        let filters = node
+            .filters()
+            .into_iter()
+            .map(|f| SubscribeFilter::new(f, QoS::AtMostOnce));
+        self.client.subscribe_many(filters).await?;
+        Ok(())
+    }
+
+    /// Remove a previous node: an empty retained payload clears each topic,
+    /// which also makes Home Assistant drop the entity a config described.
+    async fn clear_node(
+        &self,
+        node: &PublishedNode,
+        topics: &BTreeSet<String>,
+    ) -> Result<(), MqttPublishError> {
+        for topic in topics {
+            debug_assert!(node.owns(topic));
+            self.client
+                .publish(topic.clone(), QoS::AtLeastOnce, true, Vec::<u8>::new())
+                .await?;
+        }
+        for filter in node.filters() {
+            self.client.unsubscribe(filter).await?;
+        }
         Ok(())
     }
 
@@ -625,6 +667,9 @@ pub fn spawn(
     cfg: MqttConfig,
     deployment_display_name: String,
     mut snap_rx: tokio::sync::watch::Receiver<Arc<IrrigationSnapshot>>,
+    // Where the node this publisher last wrote is recorded (beside the config
+    // file). None disables the cleanup of a previous node.
+    node_state_path: Option<PathBuf>,
 ) {
     // Stable client id per deployment so a reconnect resumes the same MQTT
     // session identity (and the broker's retained discovery survives).
@@ -655,13 +700,19 @@ pub fn spawn(
             // What this connection has heard back on its own availability
             // topic. Per connection: a reconnect starts the proof over.
             let mut availability: Option<AvailabilityCheck> = None;
+            // Removal of a previous node's retained topics, while it collects
+            // them. Per connection: a reconnect before it finishes starts over.
+            let mut cleanup: Option<NodeCleanup> = None;
 
             // Inner loop: poll the eventloop (drives I/O + reconnect detection)
             // and react to new snapshots. We `borrow()` the watch on every
             // wake, so a snapshot that arrived before ConnAck is still picked
             // up on the first post-connect publish.
             loop {
-                let confirm_by = availability.as_ref().and_then(AvailabilityCheck::deadline);
+                let confirm_by = earliest(
+                    availability.as_ref().and_then(AvailabilityCheck::deadline),
+                    cleanup.as_ref().map(|c| c.until),
+                );
                 tokio::select! {
                     ev = eventloop.poll() => {
                         match ev {
@@ -681,6 +732,8 @@ pub fn spawn(
                                     warn!(error = %e, "ha mqtt publisher: availability publish failed");
                                 }
                                 availability = Some(AvailabilityCheck::new(Instant::now()));
+                                cleanup =
+                                    begin_node_cleanup(&publisher, node_state_path.as_deref()).await;
                                 let snap = snap_rx.borrow().clone();
                                 // Everything below enqueues with nothing
                                 // draining the channel, so a yard whose own
@@ -733,12 +786,30 @@ pub fn spawn(
                                     AvailabilityAction::None | AvailabilityAction::WarnUnconfirmed => {}
                                 }
                             }
+                            Ok(Event::Incoming(Packet::Publish(p)))
+                                if cleanup.as_ref().is_some_and(|c| c.node.owns(&p.topic)) =>
+                            {
+                                // A retained topic of the previous node. An
+                                // empty payload is already a removal.
+                                if p.retain && !p.payload.is_empty() {
+                                    if let Some(c) = cleanup.as_mut() {
+                                        c.topics.insert(p.topic.clone());
+                                    }
+                                }
+                            }
                             Ok(Event::Incoming(Packet::SubAck(ack))) => {
                                 let refused = ack
                                     .return_codes
                                     .iter()
                                     .any(|c| matches!(c, SubscribeReasonCode::Failure));
-                                if refused {
+                                // The availability SUBSCRIBE carries one filter;
+                                // the previous-node cleanup sends its filters
+                                // in one SUBSCRIBE of its own.
+                                if refused && ack.return_codes.len() > 1 {
+                                    warn!(
+                                        "ha mqtt publisher: the broker refused reading the previous Home Assistant node's topics, so they cannot be removed automatically"
+                                    );
+                                } else if refused {
                                     if let Some(check) = availability.as_mut() {
                                         check.unverifiable();
                                     }
@@ -778,6 +849,11 @@ pub fn spawn(
                         }
                     }
                     () = sleep_until_or_never(confirm_by) => {
+                        if cleanup.as_ref().is_some_and(|c| c.until <= Instant::now()) {
+                            if let Some(done) = cleanup.take() {
+                                finish_node_cleanup(&publisher, done, node_state_path.as_deref()).await;
+                            }
+                        }
                         let Some(check) = availability.as_mut() else {
                             continue;
                         };
@@ -804,6 +880,141 @@ async fn sleep_until_or_never(deadline: Option<Instant>) {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
+}
+
+/// The sooner of two optional deadlines.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// File name, beside the config file, recording the node this publisher last
+/// wrote to.
+pub const NODE_STATE_FILE: &str = "ha-mqtt-node.json";
+
+/// How long the broker gets to replay a previous node's retained topics before
+/// they are removed. Retained messages arrive right after the SUBACK.
+const NODE_CLEANUP_COLLECT: Duration = Duration::from_secs(5);
+
+/// The discovery prefix and node id one run published under. The node id
+/// comes from the deployment's Identity name, so renaming it, or changing the
+/// prefix, moves every entity to a new node and leaves the old one behind on
+/// the broker with every entity unavailable in Home Assistant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedNode {
+    pub discovery_prefix: String,
+    pub node_id: String,
+}
+
+impl PublishedNode {
+    /// Subscriptions that replay every retained topic this node published:
+    /// discovery configs, states and its availability.
+    fn filters(&self) -> [String; 3] {
+        let (p, n) = (&self.discovery_prefix, &self.node_id);
+        [
+            format!("{p}/+/{n}/+/config"),
+            format!("{p}/+/{n}/+/state"),
+            availability_topic(p, n),
+        ]
+    }
+
+    /// True for exactly this node's topics, nothing broader.
+    fn owns(&self, topic: &str) -> bool {
+        if topic == availability_topic(&self.discovery_prefix, &self.node_id) {
+            return true;
+        }
+        let Some(rest) = topic
+            .strip_prefix(self.discovery_prefix.as_str())
+            .and_then(|r| r.strip_prefix('/'))
+        else {
+            return false;
+        };
+        let parts: Vec<&str> = rest.split('/').collect();
+        matches!(
+            parts.as_slice(),
+            [component, node, object, "config" | "state"]
+                if !component.is_empty() && *node == self.node_id && !object.is_empty()
+        )
+    }
+}
+
+/// The previous node to clean up: the recorded one, when it differs from the
+/// node this run publishes under.
+fn stale_node(previous: Option<PublishedNode>, current: &PublishedNode) -> Option<PublishedNode> {
+    previous.filter(|p| p != current)
+}
+
+fn read_published_node(path: &Path) -> Option<PublishedNode> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn write_published_node(path: &Path, node: &PublishedNode) -> std::io::Result<()> {
+    let body = serde_json::to_vec_pretty(node).map_err(std::io::Error::other)?;
+    std::fs::write(path, body)
+}
+
+/// A previous node's retained topics, collected for removal.
+#[derive(Debug)]
+struct NodeCleanup {
+    node: PublishedNode,
+    until: Instant,
+    topics: BTreeSet<String>,
+}
+
+/// On connect: start removing the previous node when the recorded one differs,
+/// or record the current node when there is nothing to remove.
+async fn begin_node_cleanup(
+    publisher: &HaMqttPublisher,
+    state_path: Option<&Path>,
+) -> Option<NodeCleanup> {
+    let path = state_path?;
+    let current = publisher.published_node();
+    let Some(previous) = stale_node(read_published_node(path), &current) else {
+        if let Err(e) = write_published_node(path, &current) {
+            warn!(error = %e, path = %path.display(), "ha mqtt publisher: could not record the Home Assistant node");
+        }
+        return None;
+    };
+    if let Err(e) = publisher.watch_node(&previous).await {
+        warn!(error = %e, "ha mqtt publisher: could not read the previous Home Assistant node's topics");
+        return None;
+    }
+    info!(
+        previous_prefix = %previous.discovery_prefix,
+        previous_node = %previous.node_id,
+        node = %current.node_id,
+        "ha mqtt publisher: the Home Assistant node changed; removing the previous node's retained topics"
+    );
+    Some(NodeCleanup {
+        node: previous,
+        until: Instant::now() + NODE_CLEANUP_COLLECT,
+        topics: BTreeSet::new(),
+    })
+}
+
+/// Remove the collected topics, then record the current node. A failure keeps
+/// the old record, so the next connect tries again.
+async fn finish_node_cleanup(
+    publisher: &HaMqttPublisher,
+    done: NodeCleanup,
+    state_path: Option<&Path>,
+) {
+    if let Err(e) = publisher.clear_node(&done.node, &done.topics).await {
+        warn!(error = %e, "ha mqtt publisher: could not remove the previous Home Assistant node's topics");
+        return;
+    }
+    if let Some(path) = state_path {
+        if let Err(e) = write_published_node(path, &publisher.published_node()) {
+            warn!(error = %e, path = %path.display(), "ha mqtt publisher: could not record the Home Assistant node");
+        }
+    }
+    info!(
+        removed = done.topics.len(),
+        previous_node = %done.node.node_id,
+        "ha mqtt publisher: removed the previous Home Assistant node's retained topics"
+    );
 }
 
 /// What the spawn loop does after the availability check sees something.
@@ -1543,5 +1754,145 @@ mod tests {
             "{} packets do not fit a channel of {REQUEST_CHANNEL_CAP}",
             sent.len()
         );
+    }
+
+    fn node(prefix: &str, id: &str) -> PublishedNode {
+        PublishedNode {
+            discovery_prefix: prefix.into(),
+            node_id: id.into(),
+        }
+    }
+
+    /// The cleanup touches exactly the previous node's topics: its discovery
+    /// configs and states under any component, and its availability. Never a
+    /// longer or shorter path, never another node, never another prefix.
+    #[test]
+    fn a_previous_node_owns_only_its_own_topics() {
+        let old = node("homeassistant", "localsky");
+        for topic in [
+            "homeassistant/sensor/localsky/verdict_today/config",
+            "homeassistant/sensor/localsky/zone_bed_planned_seconds/state",
+            "homeassistant/binary_sensor/localsky/zone_bed_running/config",
+            "homeassistant/localsky/availability",
+        ] {
+            assert!(old.owns(topic), "{topic} belongs to the old node");
+        }
+        for topic in [
+            "homeassistant/sensor/garden/verdict_today/config",
+            "homeassistant/sensor/localsky2/verdict_today/config",
+            "homeassistant/sensor/localsky/a/b/config",
+            "homeassistant/sensor/localsky/verdict_today/attributes",
+            "homeassistant/sensor/localsky/config",
+            "ha/sensor/localsky/verdict_today/config",
+            "homeassistant/garden/availability",
+        ] {
+            assert!(!old.owns(topic), "{topic} must not be touched");
+        }
+        // A multi-level prefix works the same way.
+        let deep = node("ha/discovery", "yard");
+        assert!(deep.owns("ha/discovery/sensor/yard/flow/state"));
+        assert!(deep.owns("ha/discovery/yard/availability"));
+        assert!(!deep.owns("ha/sensor/yard/flow/state"));
+        assert_eq!(
+            old.filters(),
+            [
+                "homeassistant/+/localsky/+/config".to_string(),
+                "homeassistant/+/localsky/+/state".to_string(),
+                "homeassistant/localsky/availability".to_string(),
+            ]
+        );
+    }
+
+    /// Only a recorded node that differs from the current one is cleaned up.
+    #[test]
+    fn only_a_different_recorded_node_is_cleaned_up() {
+        let current = node("homeassistant", "garden");
+        assert_eq!(stale_node(None, &current), None);
+        assert_eq!(stale_node(Some(current.clone()), &current), None);
+        assert_eq!(
+            stale_node(Some(node("homeassistant", "localsky")), &current),
+            Some(node("homeassistant", "localsky"))
+        );
+        assert_eq!(
+            stale_node(Some(node("ha", "garden")), &current),
+            Some(node("ha", "garden")),
+            "a changed prefix leaves the old tree behind too"
+        );
+    }
+
+    #[test]
+    fn the_node_record_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-node-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(NODE_STATE_FILE);
+        assert_eq!(read_published_node(&path), None);
+        let n = node("homeassistant", "garden");
+        write_published_node(&path, &n).unwrap();
+        assert_eq!(read_published_node(&path), Some(n));
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(
+            read_published_node(&path),
+            None,
+            "a damaged record is ignored"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The previous node is read with one SUBSCRIBE of three filters, and its
+    /// removal is an empty retained payload per collected topic.
+    #[tokio::test]
+    async fn clearing_a_previous_node_writes_empty_retained_payloads() {
+        let (publisher, mut eventloop) = HaMqttPublisher::connect(&mqtt_cfg(), "Garden", "cid")
+            .await
+            .unwrap();
+        let old = node("homeassistant", "localsky");
+        publisher.watch_node(&old).await.unwrap();
+        let topics: BTreeSet<String> = [
+            "homeassistant/localsky/availability".to_string(),
+            "homeassistant/sensor/localsky/flow/state".to_string(),
+        ]
+        .into();
+        publisher.clear_node(&old, &topics).await.unwrap();
+        let sent = drained(&mut eventloop);
+        let Request::Subscribe(sub) = &sent[0] else {
+            panic!("expected one subscribe first, got {:?}", sent[0]);
+        };
+        assert_eq!(sub.filters.len(), 3);
+        let clears: Vec<_> = sent
+            .iter()
+            .filter_map(|r| match r {
+                Request::Publish(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clears.len(), 2);
+        for p in clears {
+            assert!(p.retain && p.payload.is_empty());
+            assert!(old.owns(&p.topic));
+        }
+        assert_eq!(
+            sent.iter()
+                .filter(|r| matches!(r, Request::Unsubscribe(_)))
+                .count(),
+            3
+        );
+        assert_eq!(publisher.published_node(), node("homeassistant", "garden"));
+    }
+
+    #[test]
+    fn the_earliest_deadline_wins() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(earliest(None, None), None);
+        assert_eq!(earliest(Some(t1), None), Some(t1));
+        assert_eq!(earliest(None, Some(t0)), Some(t0));
+        assert_eq!(earliest(Some(t1), Some(t0)), Some(t0));
     }
 }

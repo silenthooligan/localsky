@@ -68,7 +68,7 @@ pub fn build(
     let cfg = config.cfg.as_ref();
 
     // Device topology, derived from the configured sources and
-    // controllers; rebuilt on config hot-reload. HA's own devices are
+    // controllers; GET /devices rebuilds it from the saved config. HA's own devices are
     // imported on a background loop (a no-op when HA is not configured).
     let device_registry = crate::devices::DeviceRegistry::new();
     if let Some(cfg) = cfg {

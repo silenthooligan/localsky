@@ -264,27 +264,8 @@ pub fn SensorsPage(
     // Zone (slug, display_name) list for the MQTT soil-subscription per-zone
     // binding dropdown in the source editor. Derived from the loaded config so
     // it tracks adds/renames without a separate fetch.
-    let zone_slugs = Memo::new(move |_| {
-        config
-            .get()
-            .get("zones")
-            .and_then(|z| z.as_object())
-            .map(|zones| {
-                zones
-                    .iter()
-                    .map(|(slug, z)| {
-                        (
-                            slug.clone(),
-                            z.get("display_name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(slug)
-                                .to_string(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    });
+    let zone_slugs =
+        Memo::new(move |_| crate::components::sources_form::zone_choices(&config.get()));
 
     // Persist one source entry (add or replace-by-id) via read-modify-write
     // on the full config, then re-load health and land on the source's live

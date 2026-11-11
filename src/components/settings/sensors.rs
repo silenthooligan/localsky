@@ -439,12 +439,25 @@ pub fn SettingsSensors() -> impl IntoView {
             .cloned()
             .collect();
         if supported.is_empty() {
+            // A switched-off controller is not built, so it never reaches the
+            // inventory. Name it instead of claiming there is no controller.
+            let off = switched_off_controllers(&config_json.get());
+            if !off.is_empty() {
+                let verb = if off.len() == 1 { "is" } else { "are" };
+                return view! {
+                    <p class="sensors-section__hint">
+                        {format!("{} {verb} switched off, so LocalSky does not read a flow meter on it. ", off.join(", "))}
+                        <a href="/settings?section=devices" class:u-accent=true>"Switch it on under Devices →"</a>
+                    </p>
+                }
+                .into_any();
+            }
             return view! {
                 <p class="sensors-section__hint">
                     "No flow-capable controller. Flow metering needs a controller with a flow "
                     "input, such as OpenSprinkler. Wire a pulse flow sensor to its FLOW input "
                     "and set the K-factor on the device; LocalSky reads it automatically. "
-                    <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
+                    <a href=doc_url("sensors#flow-meters") target="_blank" rel="noopener noreferrer"
                         class:u-accent=true>
                         "Flow meters: capable vs connected →"
                     </a>
@@ -583,6 +596,34 @@ fn gateway_card(
     }
 }
 
+/// A topic or entity path with a break opportunity after each "/", so a long
+/// MQTT topic wraps at its levels ("devices/sensor-soil4/sensor/") rather than
+/// at a hyphen or mid-word.
+pub(crate) fn path_breaks(label: &str) -> impl IntoView {
+    path_segments(label)
+        .into_iter()
+        .map(|segment| view! { {segment}<wbr/> })
+        .collect_view()
+}
+
+/// The pieces `path_breaks` puts a break after: each keeps its trailing "/".
+fn path_segments(label: &str) -> Vec<String> {
+    label.split_inclusive('/').map(str::to_string).collect()
+}
+
+/// Ids of the configured controllers that are switched off (`enabled = false`).
+fn switched_off_controllers(cfg: &serde_json::Value) -> Vec<String> {
+    cfg.get("controllers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| c.get("enabled").and_then(|v| v.as_bool()) == Some(false))
+                .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One soil probe: live reading, optional chips, and the bind-to-zone select.
 fn soil_probe_row(
     p: SoilProbe,
@@ -649,18 +690,24 @@ fn soil_probe_row(
     let bind_id = probe_id.clone();
     let opts_for_select = zone_opts.clone();
     let selected_slug = bound_slug.clone();
+    // The chip row only when there is a chip: empty, it drew a bordered bar.
+    let chip_row = (!chips.is_empty()).then(|| {
+        view! {
+            <div class="zone-soil-live" style="margin-top:0; flex-wrap:wrap">
+                {chips}
+            </div>
+        }
+    });
 
     view! {
         <div class="soil-card" style="--sc: var(--accent)">
             <div class="soil-card__head">
-                <span class="soil-card__name">{label}</span>
+                <span class="soil-card__name">{path_breaks(&label)}</span>
                 <span class="soil-card__pill">{age}</span>
             </div>
             <div class="soil-card__value">{reading}</div>
-            <span class="soil-card__pill">{decision_status}</span>
-            <div class="zone-soil-live" style="margin-top:0; flex-wrap:wrap">
-                {chips}
-            </div>
+            <span class="soil-card__pill soil-card__status">{decision_status}</span>
+            {chip_row}
             <label class="sensor-readout__k" class:u-mt2=true>"Bound zone"</label>
             <select
                 class="ui-input"
@@ -845,5 +892,39 @@ fn empty_state() -> impl IntoView {
                 </p>
             </div>
         </Panel>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Only controllers explicitly switched off are named.
+    #[test]
+    fn switched_off_controllers_are_named() {
+        let cfg = serde_json::json!({ "controllers": [
+            { "id": "OpenSprinkler", "enabled": false },
+            { "id": "dry", "enabled": true },
+            { "id": "legacy" }
+        ]});
+        assert_eq!(super::switched_off_controllers(&cfg), ["OpenSprinkler"]);
+        assert!(super::switched_off_controllers(&serde_json::json!({})).is_empty());
+    }
+
+    /// A long MQTT topic breaks after each level, never mid-word.
+    #[test]
+    fn a_topic_breaks_after_each_level() {
+        assert_eq!(
+            super::path_segments("devices/sensor-soil4/sensor/soil_moisture/state"),
+            [
+                "devices/",
+                "sensor-soil4/",
+                "sensor/",
+                "soil_moisture/",
+                "state"
+            ]
+        );
+        assert_eq!(
+            super::path_segments("sensor.garden_soil"),
+            ["sensor.garden_soil"]
+        );
     }
 }

@@ -43,16 +43,22 @@ pub fn router(registry: DeviceRegistry, db: Db, cfg_store: Cfg) -> Router {
 async fn list(
     State((registry, db, cfg_store)): State<(DeviceRegistry, Db, Cfg)>,
 ) -> Json<Vec<Device>> {
+    let cfg = match cfg_store.as_ref() {
+        Some(store) => store.load().await.ok(),
+        None => None,
+    };
+    // The config-derived devices come from the config as saved now. They used
+    // to be built once at boot, so a source or controller added, removed or
+    // switched off in Settings kept its boot-time card until a restart.
+    if let Some(cfg) = cfg.as_ref() {
+        registry.set(crate::devices::build_devices(cfg));
+    }
     let mut devices = registry.all();
     if let Some(db) = db {
         let soil = SensorHistoryStore::new(db)
             .soil_channels()
             .await
             .unwrap_or_default();
-        let cfg = match cfg_store.as_ref() {
-            Some(store) => store.load().await.ok(),
-            None => None,
-        };
         attach_soil_children(&mut devices, &live_soil_channels(cfg.as_ref(), soil));
     }
     Json(devices)

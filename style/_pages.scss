@@ -32,15 +32,23 @@
 }
 
 // Soil moisture cards.
-.soil-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-4); }
+.soil-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: var(--space-4); }
+// A gateway card spans the row so its probes lay out in columns inside it.
+// Sharing the 260px probe track squeezed it to one column, too narrow for a
+// probe card plus the gateway card's own padding.
+.soil-grid--gateways { grid-template-columns: minmax(0, 1fr); }
 .soil-card {
-  display: flex; flex-direction: column; gap: var(--space-2);
+  display: flex; flex-direction: column; gap: var(--space-2); min-width: 0;
   background: var(--elev-1); border: 1px solid var(--elev-border);
   border-left: 3px solid var(--sc); border-radius: var(--radius);
   box-shadow: var(--shadow-1); padding: var(--space-4);
 }
-.soil-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.soil-card__name { font-weight: 700; color: var(--text-bright); }
+.soil-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
+// A probe named by its MQTT topic is long and has few break points: let it
+// shrink and wrap so the age pill stays inside the card.
+.soil-card__name { font-weight: 700; color: var(--text-bright); min-width: 0; overflow-wrap: anywhere; }
+.soil-card__head > .soil-card__pill { flex: none; }
+.soil-card__status { align-self: flex-start; }
 .soil-card__pill {
   font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
   color: var(--sc); padding: 2px 7px; border-radius: var(--radius-sm);

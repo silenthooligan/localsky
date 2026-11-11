@@ -2,6 +2,41 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-11-10
+
+### Fixed
+
+- MQTT subscriptions offer Humidity as its own reading. Soil moisture asks for
+  its zone and warns when none is chosen.
+- Devices: an MQTT, webhook, REST, Home Assistant passthrough, InfluxDB or
+  Prometheus source lists and counts every weather reading it maps, not only
+  its soil probes. Mapping sources read "Data feed" instead of "Ingest
+  endpoint".
+- Devices: a switched-off controller stays listed with an On/Off switch
+  instead of disappearing, and the zone editor marks it "(off)". Controller
+  cards link to their flow meter.
+- Settings warns about a zone on a switched-off controller (nothing waters
+  it), and the flow meter panel names a switched-off controller instead of
+  reporting none. Its guide link opens the flow meter section. A switched-off
+  controller's card reads "Off", and the morning run says no controller is
+  running instead of claiming none is configured.
+- Source editor opened from Devices: MQTT, webhook, REST and device mappings
+  list the zones again. The zone picker was empty, so a bound soil probe read
+  as unbound. A mapping whose zone no longer exists shows it as "zone not
+  found" instead of dropping it.
+- Devices reflects added, removed and switched sources and controllers without
+  a restart.
+- OpenWeather: setup text and the 401 message name the One Call API
+  subscription the One Call requests need. OpenWeather's checkout lists it as
+  OneCall 4.0.
+- Home Assistant MQTT: after the Identity name or discovery prefix changes,
+  LocalSky removes the previous node's retained topics.
+- Settings: when soil probes that are not reporting make the status
+  "degraded", the overview lists them by topic and zone.
+- Sensors: long probe names wrap at path levels and stay inside their cards;
+  each source's probes use the full row width. The probe editor names probes
+  by topic for screen readers.
+
 ## [1.1.1] - 2026-11-09
 
 ### Fixed

@@ -228,8 +228,9 @@ pub fn kind_blurb(kind: &str) -> &'static str {
              wind, pressure, temperature and humidity, no rain gauge."
         }
         "openweather" => {
-            "Worldwide forecast from OpenWeather. Needs a free API key from your \
-             openweathermap.org account."
+            "Worldwide forecast from OpenWeather One Call. Needs the One Call API \
+             subscription (OneCall 4.0 at checkout) on your openweathermap.org key; a plain \
+             key gets 401."
         }
         "pirate_weather" => {
             "Worldwide forecast from Pirate Weather (a Dark Sky-style API). Needs a free \
@@ -559,6 +560,55 @@ pub fn normalize_source_id_full(s: &str) -> String {
 /// the `{id, priority, enabled, kind, config}` entry (plus `old_id` when an
 /// existing source was renamed), and hands it to `on_commit`, the caller
 /// persists. `on_cancel` dismisses the form.
+/// The (slug, display name) pairs a mapping row can bind a soil probe to,
+/// from a full config. Every page that opens `SourceEditorPanel` for an
+/// existing install passes these; without them a bound row shows no zones.
+pub fn zone_choices(cfg: &serde_json::Value) -> Vec<(String, String)> {
+    cfg.get("zones")
+        .and_then(|z| z.as_object())
+        .map(|zones| {
+            zones
+                .iter()
+                .map(|(slug, z)| {
+                    (
+                        slug.clone(),
+                        z.get("display_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(slug)
+                            .to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The options for a mapping row's zone select as (value, label, selected):
+/// every zone, plus the row's stored zone when it is not one of them (renamed,
+/// removed, or the list not loaded yet). The select then shows what is stored
+/// instead of reading as unbound, and a save cannot silently drop the zone.
+pub fn zone_select_options(
+    zones: Vec<(String, String)>,
+    current: &str,
+) -> Vec<(String, String, bool)> {
+    let current = current.trim();
+    let mut out: Vec<(String, String, bool)> = zones
+        .into_iter()
+        .map(|(slug, name)| {
+            let selected = slug == current;
+            (slug, name, selected)
+        })
+        .collect();
+    if !current.is_empty() && !out.iter().any(|(_, _, selected)| *selected) {
+        out.push((
+            current.to_string(),
+            format!("{current} (zone not found)"),
+            true,
+        ));
+    }
+    out
+}
+
 #[component]
 pub fn SourceEditorPanel(
     #[prop(default = None)] existing: Option<serde_json::Value>,
@@ -908,6 +958,47 @@ pub fn SourceEditorPanel(
 
 #[cfg(test)]
 mod tests {
+    /// A bound row always shows its zone. With no zone list (or a zone renamed
+    /// since) the stored zone is still offered and selected, so the row never
+    /// reads as unbound and a save keeps it.
+    #[test]
+    fn a_stored_zone_is_always_offered_and_selected() {
+        let zones = vec![
+            ("bed".to_string(), "Bed".to_string()),
+            ("lawn".to_string(), "Lawn".to_string()),
+        ];
+        let opts = super::zone_select_options(zones.clone(), "lawn");
+        assert_eq!(opts.iter().filter(|o| o.2).count(), 1);
+        assert_eq!(opts[1], ("lawn".to_string(), "Lawn".to_string(), true));
+        let lost = super::zone_select_options(Vec::new(), "planter_boxes_tree");
+        assert_eq!(
+            lost,
+            [(
+                "planter_boxes_tree".to_string(),
+                "planter_boxes_tree (zone not found)".to_string(),
+                true
+            )]
+        );
+        let unbound = super::zone_select_options(zones, "");
+        assert!(unbound.iter().all(|o| !o.2));
+        assert_eq!(unbound.len(), 2);
+    }
+
+    #[test]
+    fn zone_choices_read_slug_and_display_name() {
+        let cfg = serde_json::json!({ "zones": {
+            "back_garden_grass": { "display_name": "Garden Grass" },
+            "shrubs": {}
+        }});
+        assert_eq!(
+            super::zone_choices(&cfg),
+            [
+                ("back_garden_grass".to_string(), "Garden Grass".to_string()),
+                ("shrubs".to_string(), "shrubs".to_string())
+            ]
+        );
+    }
+
     use super::*;
     use std::collections::BTreeSet;
 

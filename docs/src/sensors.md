@@ -32,7 +32,7 @@ For WeatherFlow's preceding-minute precipitation sensor, choose **Rain last minu
 
 Add one subscription per topic and pick what it measures under **Reading**: temperature, humidity, dew point, pressure, wind speed, gust and direction, rain, solar, illuminance, UV, lightning, ET0, flow, leaf wetness, or soil moisture. Readings are stored in the units the form shows (°F, in, mph, inHg). For a metric device, set **Scale** and **Offset**: °C to °F is 1.8 and 32, mm to in is 0.03937, hPa to inHg is 0.02953, km/h to mph is 0.6214.
 
-Soil moisture with a zone becomes that zone's probe and needs the exact topic. Without a zone, the same reading is air humidity.
+Pick **Soil moisture** for a probe and choose its zone; it needs the exact topic. **Humidity** is a separate entry for air humidity.
 
 Readings that no live source reports come from the forecast. On the **Sensors** page, **Current conditions sources** shows where each reading comes from.
 
@@ -52,7 +52,7 @@ Configure calibration and target bands for the actual probe placement. Choose me
 
 ## Flow meters
 
-Flow reporting requires a supported controller and connected meter. Capability, connection, and a live flow reading are separate states.
+Flow reporting requires a supported controller and connected meter. Capability, connection, and a live flow reading are separate states. Open a controller's **Flow meter** action under Devices to see them.
 
 A missing flow reading stays unknown. Watering duration is not metered volume, and a controller's water-level percentage is not a flow measurement.
 

@@ -33,6 +33,12 @@ The usual cause is a broker access list. Mosquitto acknowledges a publish its ac
 
 From 1.1.1, LocalSky subscribes to its own availability topic and logs a warning when its `online` does not come back within 15 seconds. An `offline` that arrives while LocalSky is connected is answered with `online`, at most once a minute.
 
+Changing the deployment's Identity name, or the discovery prefix, moves LocalSky to a new MQTT node. The old node's retained topics stay on the broker, and Home Assistant keeps a LocalSky device from them with every entity unavailable. From 1.1.2, LocalSky records the node it publishes under and removes the previous node's retained topics after a change. On earlier versions, delete the topics under `<prefix>/+/<old node>/` and `<prefix>/<old node>/availability` yourself.
+
+## OpenWeather returns 401
+
+LocalSky calls OpenWeather One Call API (endpoint 3.0). It needs OpenWeather's separate "One Call API" subscription, which their checkout lists as OneCall 4.0, and the first 1,000 calls a day are free. A key without that subscription gets 401 even though it works on the 2.5 endpoints. Subscribe in your OpenWeather account. LocalSky polls every 10 minutes, about 144 calls a day.
+
 ## Tempest has no readings
 
 The local Tempest path listens for UDP broadcasts on port 50222. Confirm the source is enabled, the hub is on a reachable broadcast network, and Docker uses host networking where necessary.

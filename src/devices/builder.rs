@@ -10,6 +10,8 @@
 use crate::config::schema::{Config, ControllerKind, SourceKind};
 use crate::ports::weather_source::WeatherField;
 
+#[cfg(test)]
+use super::DeviceChildKind;
 use super::{Device, DeviceChild, DeviceKind, DeviceOrigin};
 
 /// Build the device topology from config. A device's sensor children are the
@@ -61,7 +63,10 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
     }
 
     // --- Irrigation controllers ---
-    for entry in config.controllers.iter().filter(|c| c.enabled) {
+    // Turned-off controllers are listed too, for the same reason as sources:
+    // the card's on/off switch is how one comes back. Filtering them out left
+    // a controller that the zone editor still offered but nothing could show.
+    for entry in config.controllers.iter() {
         let (model, name) = classify_controller(&entry.controller, &entry.id);
         // Zones bound to this controller. A zone with an empty controller_id
         // belongs to the default controller.
@@ -255,17 +260,73 @@ fn kind_fields(kind: &SourceKind) -> Vec<WeatherField> {
         // posted, not from the kind. Empty until those land.
         // RestPoll fields are config-driven (resolved at runtime from the
         // mappings), not derivable from the kind alone -> empty here.
+        // Mapping-driven sources carry exactly what the operator mapped. Soil
+        // mappings (zone-bound rows) are listed separately as soil channels.
         K::HaPassthrough(_)
         | K::Mqtt(_)
         | K::HttpWebhook(_)
         | K::RestPoll(_)
         | K::Prometheus(_)
-        | K::InfluxDb(_) => Vec::new(),
+        | K::InfluxDb(_) => mapped_fields(kind),
         // Display-only map/dashboard layer: strikes feed the snapshot's
         // lightning buffer, not sensor_history, so it has no per-field
         // sensor children to enumerate.
         K::Blitzortung(_) => Vec::new(),
     }
+}
+
+/// The weather readings a mapping-driven source is configured to deliver, in
+/// mapping order without repeats. Zone-bound rows are soil channels and are
+/// skipped; an unparseable field name is skipped the same way the adapter
+/// drops it at ingest.
+fn mapped_fields(kind: &SourceKind) -> Vec<WeatherField> {
+    use crate::sources::mqtt_subscribe::parse_weather_field;
+    let unbound = |zone: &Option<String>| zone.as_deref().is_none_or(|z| z.trim().is_empty());
+    let parsed: Vec<WeatherField> = match kind {
+        SourceKind::Mqtt(c) => c
+            .subscriptions
+            .iter()
+            .filter(|m| unbound(&m.zone_slug))
+            .filter_map(|m| parse_weather_field(&m.field))
+            .collect(),
+        SourceKind::HttpWebhook(c) => c
+            .fields
+            .iter()
+            .filter(|m| unbound(&m.zone_slug))
+            .filter_map(|m| parse_weather_field(&m.field))
+            .collect(),
+        SourceKind::RestPoll(c) => c
+            .fields
+            .iter()
+            .filter(|m| unbound(&m.zone_slug))
+            .filter_map(|m| parse_weather_field(&m.field))
+            .collect(),
+        SourceKind::Prometheus(c) => c
+            .queries
+            .iter()
+            .filter(|m| unbound(&m.zone_slug))
+            .filter_map(|m| parse_weather_field(&m.field))
+            .collect(),
+        SourceKind::InfluxDb(c) => c
+            .queries
+            .iter()
+            .filter(|m| unbound(&m.zone_slug))
+            .filter_map(|m| parse_weather_field(&m.field))
+            .collect(),
+        SourceKind::HaPassthrough(c) => c
+            .field_map
+            .keys()
+            .filter_map(|name| crate::sources::ha_passthrough::parse_weather_field(name))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut out: Vec<WeatherField> = Vec::new();
+    for f in parsed {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 /// Best-effort stable hardware identity from the source config, used for the
@@ -436,6 +497,60 @@ password_md5 = "a6d82bced638de3def1e9bbb4983225c"
         assert_eq!(ctrl.children.len(), 1);
         assert_eq!(ctrl.children[0].id, "back_yard");
         assert_eq!(ctrl.children[0].label, "Back Yard");
+    }
+
+    /// A turned-off controller stays listed with its flag, so its card can
+    /// switch it back on. It used to vanish while the zone editor kept it.
+    #[test]
+    fn disabled_controller_still_builds_with_enabled_flag() {
+        let mut c = cfg();
+        c.controllers[0].enabled = false;
+        let devices = build_devices(&c);
+        let ctrl = devices
+            .iter()
+            .find(|d| d.id == "controller:os1")
+            .expect("a turned-off controller is still listed");
+        assert_eq!(ctrl.enabled, Some(false));
+        assert_eq!(ctrl.children.len(), 1, "its zones stay grouped under it");
+    }
+
+    /// An MQTT source lists each weather reading it maps, once, in mapping
+    /// order. Zone-bound soil rows are not weather readings.
+    #[test]
+    fn mqtt_source_lists_its_mapped_weather_readings() {
+        let mut c = cfg();
+        c.sources.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "mqtt", "kind": "mqtt", "config": {
+                    "broker_host": "localhost", "subscriptions": [
+                        {"topic": "g/temp", "field": "air_temp_f"},
+                        {"topic": "g/rh", "field": "rh_pct"},
+                        {"topic": "g/temp2", "field": "air_temp_f"},
+                        {"topic": "g/press", "field": "pressure_in_hg"},
+                        {"topic": "soil/1", "field": "rh_pct", "zone_slug": "bed"},
+                        {"topic": "g/junk", "field": "not_a_field"}
+                    ]
+                }
+            }))
+            .unwrap(),
+        );
+        let devices = build_devices(&c);
+        let mqtt = devices.iter().find(|d| d.id == "source:mqtt").unwrap();
+        let keys: Vec<&str> = mqtt.children.iter().map(|ch| ch.id.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "source:mqtt:air_temp_f",
+                "source:mqtt:rh_pct",
+                "source:mqtt:pressure_inhg"
+            ]
+        );
+        assert_eq!(
+            mqtt.children[1].kind,
+            DeviceChildKind::Sensor {
+                role: "humidity".into()
+            }
+        );
     }
 
     #[test]

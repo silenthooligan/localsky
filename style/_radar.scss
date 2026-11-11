@@ -1384,6 +1384,12 @@
   color: var(--text-dim);
   margin: 0;
 }
+// A child named by an MQTT topic or entity id can be longer than the row:
+// let it shrink and wrap rather than push the badge or controls out.
+.device-child__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 // Managed soil rows on a device card: the probe is bound / removed right
 // where it is listed. Aligns center (a select + button are taller than the
 // text chips) and lets the controls hug the right edge.

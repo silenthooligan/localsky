@@ -383,7 +383,7 @@ fn build_mapping(
     out
 }
 
-fn parse_weather_field(name: &str) -> Option<WeatherField> {
+pub(crate) fn parse_weather_field(name: &str) -> Option<WeatherField> {
     // Case-insensitive match against variant names. snake_case is also
     // accepted because the wizard surfaces both forms.
     let n = name.replace('_', "").to_ascii_lowercase();

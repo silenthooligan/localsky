@@ -172,7 +172,24 @@ fn kind_label(kind: &str) -> &'static str {
         "weather_cloud" => "Cloud weather service",
         "irrigation_controller" => "Irrigation controller",
         "ha_bridge" => "Home Assistant bridge",
-        _ => "Ingest endpoint",
+        _ => "Data feed",
+    }
+}
+
+/// The config array, entry id and display noun a device card's on/off switch
+/// writes: `controller:<id>` lives in `controllers`, everything else in
+/// `sources`.
+fn toggle_target(device_id: &str) -> (&'static str, String, &'static str) {
+    match device_id.strip_prefix("controller:") {
+        Some(id) => ("controllers", id.to_string(), "Controller"),
+        None => (
+            "sources",
+            device_id
+                .strip_prefix("source:")
+                .unwrap_or(device_id)
+                .to_string(),
+            "Source",
+        ),
     }
 }
 
@@ -538,14 +555,17 @@ pub fn SettingsDevices() -> impl IntoView {
     // not left dirty. `source_id` is the REAL config source id (never a kind-join),
     // taken from the device's `source_id` backlink stripped of its "source:" prefix.
     #[allow(unused_variables)]
-    let on_toggle = Callback::new(move |(source_id, on): (String, bool)| {
+    let on_toggle = Callback::new(move |(device_id, on): (String, bool)| {
         let mut cfg = config.get();
+        // The device id says which config array the entry lives in:
+        // `source:<id>` or `controller:<id>`.
+        let (array, entry_id, noun) = toggle_target(&device_id);
         // Optimistically flip the entry in the local config signal so the card
         // reflects the new state immediately.
-        if let Some(arr) = cfg.get_mut("sources").and_then(|v| v.as_array_mut()) {
+        if let Some(arr) = cfg.get_mut(array).and_then(|v| v.as_array_mut()) {
             if let Some(slot) = arr
                 .iter_mut()
-                .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(source_id.as_str()))
+                .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(entry_id.as_str()))
             {
                 if let Some(obj) = slot.as_object_mut() {
                     obj.insert("enabled".into(), serde_json::Value::Bool(on));
@@ -561,11 +581,10 @@ pub fn SettingsDevices() -> impl IntoView {
                     crate::components::settings_ui::toast_saved(
                         result_msg,
                         result_ok,
-                        &outcome.confirmation(if on {
-                            "Source turned on."
-                        } else {
-                            "Source turned off."
-                        }),
+                        &outcome.confirmation(&format!(
+                            "{noun} turned {}.",
+                            if on { "on" } else { "off" }
+                        )),
                     );
                     restart_dismissed.set(false);
                     restart_reasons.set(outcome.restart_reasons);
@@ -840,8 +859,13 @@ pub fn SettingsDevices() -> impl IntoView {
         // Returns None for a device that carries no status word (controllers, HA
         // bridges, non-weather kinds); those keep their existing badge-only header.
         let status_for = |d: &Device| -> Option<(&'static str, String)> {
-            // Only config-backed native SOURCES carry a status word (a `source:`
-            // device). Controllers + the HA bridge keep their badge-only header.
+            // A switched-off controller says so on its collapsed card: its zones
+            // do not water, and the switch that brings it back is inside.
+            // Running controllers and the HA bridge keep their badge-only header.
+            if d.origin == "native" && d.id.starts_with("controller:") {
+                return (d.enabled == Some(false)).then(|| ("dim", "Off".to_string()));
+            }
+            // Otherwise only config-backed native SOURCES carry a status word.
             if d.origin != "native" || !d.id.starts_with("source:") {
                 return None;
             }
@@ -932,11 +956,17 @@ pub fn SettingsDevices() -> impl IntoView {
         view! { <ul class="settings-card-list">{rows}</ul> }.into_any()
     };
 
+    // Zones the source editor's mapping rows can bind a soil probe to. The
+    // editor was opened from here without them, so every soil row showed an
+    // empty zone list and looked unbound, and touching it cleared the zone.
+    let zone_slugs =
+        Memo::new(move |_| crate::components::sources_form::zone_choices(&config.get()));
+
     // The editor pane (shown when sel != List), else the browse list.
     let detail = move || {
         match sel.get() {
         Sel::AddSource => view! {
-            <SourceEditorPanel on_commit=persist_entry on_cancel=on_cancel/>
+            <SourceEditorPanel zone_slugs=zone_slugs on_commit=persist_entry on_cancel=on_cancel/>
         }
         .into_any(),
         Sel::EditSource(entry) => {
@@ -947,12 +977,12 @@ pub fn SettingsDevices() -> impl IntoView {
                 .to_string();
             let siblings = ids_except(&config.get(), "sources", &cur_id);
             view! {
-                <SourceEditorPanel existing=Some(entry) sibling_ids=siblings on_commit=persist_entry on_cancel=on_cancel/>
+                <SourceEditorPanel existing=Some(entry) sibling_ids=siblings zone_slugs=zone_slugs on_commit=persist_entry on_cancel=on_cancel/>
             }
             .into_any()
         }
         Sel::AdoptGateway(prefill) => view! {
-            <SourceEditorPanel existing=Some(prefill) on_commit=persist_entry on_cancel=on_cancel/>
+            <SourceEditorPanel existing=Some(prefill) zone_slugs=zone_slugs on_commit=persist_entry on_cancel=on_cancel/>
         }
         .into_any(),
         Sel::AddController => view! {
@@ -1451,8 +1481,8 @@ fn device_card(
     // ha_passthrough + the virtual ingests) AND controllers (`controller:`). The
     // Devices hub is the sole nav path to edit a controller, so it must keep its
     // Edit action; only the read-only HA-imported connection (`ha:` + non-native)
-    // is excluded. (Toggle + Remove stay `source:`-only via native_source below;
-    // controllers have no on/off toggle here.)
+    // is excluded. (Remove stays `source:`-only via native_source below;
+    // controllers get the on/off switch as well.)
     let editable = dev.origin == "native"
         && (dev.id.starts_with("source:") || dev.id.starts_with("controller:"));
     let edit_id = dev.id.clone();
@@ -1468,16 +1498,20 @@ fn device_card(
     // also the virtual mqtt/webhook/prometheus/influxdb/demo ingests and
     // ha_passthrough) gets the on/off toggle + reference-safe Remove, so the one
     // list can manage EVERY source kind. Controllers (controller:) + HA-imported
-    // devices are excluded.
+    // devices are excluded from Remove.
     let native_source =
         dev.origin == "native" && dev.id.starts_with("source:") && source_id.is_some();
     // A native weather source carries a config-backed enabled flag, so it gets a
     // WORKING on/off toggle (a cloud source MUST; a local station may too). The
     // toggle reflects `enabled != Some(false)`. HA-imported sources (enabled ==
-    // None) get no toggle. Remove is offered for every native source.
-    let toggleable = native_source && dev.enabled.is_some();
+    // None) get no toggle. Remove is offered for every native source. A native
+    // controller gets the same switch: a turned-off controller is listed (it
+    // used to vanish) and this is how it comes back. Turning one on or off
+    // takes effect at the next restart; the save says so.
+    let native_controller = dev.origin == "native" && dev.id.starts_with("controller:");
+    let toggleable = (native_source || native_controller) && dev.enabled.is_some();
     let removable = native_source;
-    let toggle_source_id = source_id.clone();
+    let toggle_device_id = dev.id.clone();
     let remove_source_id = source_id.clone();
     let enabled_now = dev.enabled != Some(false);
     // A soil-bearing source gets a "Manage probes" action into the sensors
@@ -1687,7 +1721,7 @@ fn device_card(
                     // view. Refetch-driven reseeding must never submit another PUT.
                     let toggle = toggleable.then(|| {
                         let checked = RwSignal::new(enabled_now);
-                        let sid = toggle_source_id.clone().unwrap_or_default();
+                        let sid = toggle_device_id.clone();
                         view! {
                             <Toggle
                                 checked=checked
@@ -1703,6 +1737,14 @@ fn device_card(
                     let probes_btn = has_soil.then(|| {
                         view! {
                             <Button variant="ghost" href="/settings?section=sensors">"Manage probes"</Button>
+                        }
+                    });
+                    // A controller's flow meter lives in the same sensors lens.
+                    // Without this the lens was reachable only from a soil
+                    // source, so a controller-only install could not see it.
+                    let flow_btn = native_controller.then(|| {
+                        view! {
+                            <Button variant="ghost" href="/settings?section=sensors">"Flow meter"</Button>
                         }
                     });
                     // Edit, for a native editable source/controller.
@@ -1727,6 +1769,7 @@ fn device_card(
                     view! {
                         {toggle}
                         {probes_btn}
+                        {flow_btn}
                         {edit_btn}
                         {remove_btn}
                         {ha_note}
@@ -1740,6 +1783,22 @@ fn device_card(
 
 #[cfg(test)]
 mod tests {
+    use super::toggle_target;
+
+    /// The card's switch writes the entry the device id names: a controller
+    /// lives in `controllers`, a source in `sources`.
+    #[test]
+    fn toggle_routes_controllers_and_sources_to_their_arrays() {
+        assert_eq!(
+            toggle_target("controller:OpenSprinkler"),
+            ("controllers", "OpenSprinkler".to_string(), "Controller")
+        );
+        assert_eq!(
+            toggle_target("source:mqtt"),
+            ("sources", "mqtt".to_string(), "Source")
+        );
+    }
+
     use super::{clear_source_id_refs, migrate_controller_id_refs, migrate_source_id_refs};
 
     // Removing a source must CLEAR all three reference kinds so nothing dangles on

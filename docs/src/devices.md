@@ -24,6 +24,8 @@ A controller connects LocalSky to valves. Supported scanners can import controll
 
 Check the controller station for every zone. Display names can differ; LocalSky needs the correct underlying station or entity ID.
 
+A controller that is switched off stays on its card with an On/Off switch, and the zone editor marks it "(off)". Zones bound to it do not water until it is switched on. The change takes effect after a restart.
+
 [Controller guide](controllers.md)
 
 ## Soil sensors

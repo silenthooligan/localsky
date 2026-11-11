@@ -286,6 +286,21 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         let Some(c) = cfg.controllers.iter().find(|c| c.id == z.controller_id) else {
             continue; // already a zone_controller_missing error
         };
+        // A switched-off controller is skipped by build_controllers, so its
+        // zones never water. The zone editor still offers it, so say so here
+        // rather than let the zone sit there looking bound.
+        if !c.enabled {
+            r.warn(
+                "zone_controller_off",
+                format!(
+                    "zone '{slug}' is on controller '{}', which is switched off, so nothing \
+                     waters this zone. Switch the controller on under Settings, then Devices, \
+                     or move the zone to another controller.",
+                    c.id
+                ),
+            );
+            continue;
+        }
         // ESPHome native has no adapter: build_controllers warn-skips the
         // whole controller, so NEITHER binding fires and testing them says
         // nothing useful. Name the real problem instead.
@@ -1355,6 +1370,35 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    /// A zone on a switched-off controller never waters. It looked bound and
+    /// validated clean while the controller was missing from Devices.
+    #[test]
+    fn a_zone_on_a_switched_off_controller_warns() {
+        let mut cfg = base();
+        let mut ctrl = rachio_entry(serde_json::json!({ "front_yard": "uuid-1" }));
+        ctrl.enabled = false;
+        cfg.controllers.push(ctrl);
+        cfg.zones
+            .insert("front_yard".into(), zone_json("rachio_main", ""));
+        let r = validate(&cfg);
+        assert!(
+            r.ok(),
+            "a switched-off controller is a warning, never an error"
+        );
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_controller_off")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("front_yard") && warned[0].contains("switched off"));
+        assert!(
+            !r.warnings.iter().any(|i| i.code == "zone_unbound"),
+            "one warning for one cause"
+        );
     }
 
     /// A zone bound by neither path validated completely clean before this,

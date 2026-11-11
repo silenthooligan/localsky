@@ -36,34 +36,43 @@ use crate::components::ui::{Button, FormField};
 /// zone-bound soil probe never clobbers the global humidity field.
 pub const DEFAULT_SOIL_FIELD: &str = "rh_pct";
 
-/// The first and default "Reading" option. Its value is `rh_pct`: bound to a
-/// zone, the adapter records that zone's soil channel; with no zone it is the
-/// air humidity reading. One option carries both so a stored row always
-/// selects exactly one entry.
-pub const MOISTURE_OPTION: (&str, &str) = (
-    DEFAULT_SOIL_FIELD,
-    "Soil moisture with a zone, humidity without (%)",
-);
+/// The "Reading" value for a soil probe. It exists only in this form: a soil
+/// row is stored as `rh_pct` plus its zone, and the adapter records the zone's
+/// soil channel. "Humidity (%)" is stored as `rh_pct` with no zone, so the
+/// two need separate dropdown values to both be offered.
+pub const SOIL_CHOICE: &str = "soil_moisture";
 
-/// Every (WeatherField value, label) pair the subscription "Reading" dropdown
-/// offers: the moisture option, then each weather reading the webhook and REST
-/// forms map. Every value parses via mqtt_subscribe::parse_weather_field, so
-/// the adapter ingests the topic.
+/// Every (value, label) pair the subscription "Reading" dropdown offers: soil
+/// moisture first (the default), then each weather reading the webhook and
+/// REST forms map, Humidity included. Every value except `SOIL_CHOICE` parses
+/// via mqtt_subscribe::parse_weather_field, so the adapter ingests the topic.
 pub fn subscription_field_options() -> impl Iterator<Item = (&'static str, &'static str)> {
-    std::iter::once(MOISTURE_OPTION).chain(
+    std::iter::once((SOIL_CHOICE, "Soil moisture (%)")).chain(
         super::field_map_forms::WEATHER_FIELD_OPTIONS
             .iter()
-            .copied()
-            .filter(|(value, _)| *value != DEFAULT_SOIL_FIELD),
+            .copied(),
     )
 }
 
+/// The dropdown value a row shows.
+pub fn subscription_choice(row: &MqttSubRow) -> &str {
+    if row.soil {
+        SOIL_CHOICE
+    } else {
+        &row.field
+    }
+}
+
 /// Apply a "Reading" choice to a row. A zone binding always records a soil
-/// channel whatever the reading says, so any other reading drops the zone
-/// rather than turn, say, a temperature topic into a soil probe.
-pub fn choose_subscription_field(row: &mut MqttSubRow, field: &str) {
-    row.field = field.to_string();
-    if field != DEFAULT_SOIL_FIELD {
+/// channel whatever the stored field says, so any other reading drops the
+/// zone rather than turn, say, a temperature topic into a soil probe.
+pub fn choose_subscription_field(row: &mut MqttSubRow, choice: &str) {
+    if choice == SOIL_CHOICE {
+        row.soil = true;
+        row.field = DEFAULT_SOIL_FIELD.to_string();
+    } else {
+        row.soil = false;
+        row.field = choice.to_string();
         row.zone_slug.clear();
     }
 }
@@ -79,6 +88,9 @@ pub struct MqttSubRow {
     pub zone_slug: String,
     pub scale: f64,
     pub offset: f64,
+    /// The row is a soil probe. Form state only, never serialized: a stored
+    /// row is soil when it is `rh_pct` bound to a zone.
+    pub soil: bool,
 }
 
 impl MqttSubRow {
@@ -92,6 +104,7 @@ impl MqttSubRow {
             zone_slug: String::new(),
             scale: 1.0,
             offset: 0.0,
+            soil: true,
         }
     }
 }
@@ -107,6 +120,11 @@ pub fn parse_mqtt_subscriptions(config: &serde_json::Value) -> Vec<MqttSubRow> {
             arr.iter()
                 .filter_map(|s| {
                     let topic = s.get("topic")?.as_str()?.to_string();
+                    let zone_slug = s
+                        .get("zone_slug")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     Some(MqttSubRow {
                         topic,
                         field: s
@@ -119,11 +137,10 @@ pub fn parse_mqtt_subscriptions(config: &serde_json::Value) -> Vec<MqttSubRow> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
-                        zone_slug: s
-                            .get("zone_slug")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
+                        // A zone binding makes the row a soil probe whatever
+                        // its stored field, the same rule the adapter applies.
+                        soil: !zone_slug.trim().is_empty(),
+                        zone_slug,
                         scale: s.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0),
                         offset: s.get("offset").and_then(|v| v.as_f64()).unwrap_or(0.0),
                     })
@@ -407,9 +424,10 @@ pub fn MqttSoilSubscriptions(
                 let rs = rows.get();
                 rs.into_iter().enumerate().map(|(i, row)| {
                     let topic = row.topic.clone();
-                    let field = row.field.clone();
+                    let choice = subscription_choice(&row).to_string();
                     let json_path = row.json_path.clone();
                     let zone = row.zone_slug.clone();
+                    let zone_missing = row.soil && zone.trim().is_empty();
                     let scale = row.scale;
                     let offset = row.offset;
                     let topic_for_err = topic.clone();
@@ -424,7 +442,7 @@ pub fn MqttSoilSubscriptions(
                         rows.update(|r| { if let Some(row) = r.get_mut(i) { choose_subscription_field(row, &v); } });
                         flush();
                     };
-                    let moisture = field == DEFAULT_SOIL_FIELD;
+                    let soil = row.soil;
                     let set_path = move |ev: leptos::ev::Event| {
                         let v = event_target_value(&ev);
                         rows.update(|r| { if let Some(row) = r.get_mut(i) { row.json_path = v; } });
@@ -475,7 +493,7 @@ pub fn MqttSoilSubscriptions(
                                 <select class="ui-input" on:change=set_field>
                                     {subscription_field_options().map(|(val, label)| {
                                         let val = val.to_string();
-                                        let sel = field == val;
+                                        let sel = choice == val;
                                         view! { <option value=val.clone() selected=sel>{label.to_string()}</option> }
                                     }).collect_view()}
                                 </select>
@@ -493,19 +511,18 @@ pub fn MqttSoilSubscriptions(
                                     on:input=set_path
                                 />
                             </FormField>
-                            {moisture.then(|| view! {
+                            {soil.then(|| view! {
                             <FormField
-                                label="Bind to zone (optional)".to_string()
+                                label="Zone".to_string()
                                 helptext="The zone this probe measures; its reading becomes that zone's own soil channel. Finish in the zone editor by picking it as the soil sensor.".to_string()
-                                error=Signal::derive(|| None::<String>)
+                                error=Signal::derive(move || zone_missing.then(|| "Pick the zone this probe measures. Without one the reading is saved as air humidity.".to_string()))
                             >
                                 <select class="ui-input" on:change=set_zone>
                                     <option value="" selected=zone.is_empty()>
-                                        "(no zone: air humidity)"
+                                        "Choose a zone"
                                     </option>
-                                    {zone_slugs.get().into_iter().map(|(slug, name)| {
-                                        let sel = zone == slug;
-                                        view! { <option value=slug.clone() selected=sel>{name}</option> }
+                                    {crate::components::sources_form::zone_select_options(zone_slugs.get(), &zone).into_iter().map(|(slug, name, sel)| {
+                                        view! { <option value=slug selected=sel>{name}</option> }
                                     }).collect_view()}
                                 </select>
                             </FormField>
@@ -791,17 +808,15 @@ mod tests {
         // The Reading dropdown must only offer values the MQTT adapter can
         // resolve; otherwise the subscription is silently dropped at ingest.
         use crate::sources::mqtt_subscribe::parse_weather_field;
-        for (val, _label) in subscription_field_options() {
+        for (val, _label) in subscription_field_options().filter(|(v, _)| *v != SOIL_CHOICE) {
             assert!(
                 parse_weather_field(val).is_some(),
                 "subscription field option {val} is not a parseable WeatherField"
             );
         }
-        // And the soil default is the first option.
-        assert_eq!(
-            subscription_field_options().next().unwrap().0,
-            DEFAULT_SOIL_FIELD
-        );
+        // Soil is first and stores the field the adapter reads for a zone.
+        assert_eq!(subscription_field_options().next().unwrap().0, SOIL_CHOICE);
+        assert!(parse_weather_field(DEFAULT_SOIL_FIELD).is_some());
     }
 
     /// An MQTT weather station can map every reading the webhook and REST
@@ -828,16 +843,45 @@ mod tests {
     }
 
     /// A zone binding always records soil, so choosing any other reading
-    /// must drop it; choosing moisture keeps it.
+    /// must drop it; choosing soil keeps it.
     #[test]
     fn a_weather_reading_drops_the_zone_binding() {
         let mut row = MqttSubRow::new_soil();
         row.zone_slug = "back_yard".into();
-        choose_subscription_field(&mut row, DEFAULT_SOIL_FIELD);
+        choose_subscription_field(&mut row, SOIL_CHOICE);
         assert_eq!(row.zone_slug, "back_yard");
+        assert_eq!(row.field, DEFAULT_SOIL_FIELD);
         choose_subscription_field(&mut row, "air_temp_f");
         assert_eq!(row.field, "air_temp_f");
         assert!(row.zone_slug.is_empty());
+        assert!(!row.soil);
+    }
+
+    /// Humidity has its own entry. Soil and humidity both store `rh_pct`, so a
+    /// stored row shows as soil only when a zone binds it, and each row
+    /// selects exactly one entry.
+    #[test]
+    fn humidity_and_soil_are_separate_entries_over_the_same_field() {
+        let cfg = serde_json::json!({ "subscriptions": [
+            { "topic": "g/rh", "field": "rh_pct" },
+            { "topic": "soil/1", "field": "rh_pct", "zone_slug": "bed" }
+        ]});
+        let rows = parse_mqtt_subscriptions(&cfg);
+        assert_eq!(subscription_choice(&rows[0]), "rh_pct");
+        assert_eq!(subscription_choice(&rows[1]), SOIL_CHOICE);
+        let humidity_label = subscription_field_options()
+            .find(|(v, _)| *v == "rh_pct")
+            .map(|(_, l)| l);
+        assert_eq!(humidity_label, Some("Humidity (%)"));
+        // Choosing Humidity on a soil row drops its zone, and the stored
+        // field stays the one the adapter reads as humidity.
+        let mut row = rows[1].clone();
+        choose_subscription_field(&mut row, "rh_pct");
+        assert_eq!(row.field, "rh_pct");
+        assert!(row.zone_slug.is_empty());
+        assert_eq!(subscription_choice(&row), "rh_pct");
+        // A new row starts as soil.
+        assert_eq!(subscription_choice(&MqttSubRow::new_soil()), SOIL_CHOICE);
     }
 
     #[test]

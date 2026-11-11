@@ -51,8 +51,8 @@ for (const width of [1280, 390]) {
     for (const id of ids.slice(1)) await page.getByRole("combobox", { name: "Add soil probe", exact: true }).selectOption(id);
     await expect(page.locator(".soil-probe-editor__row")).toHaveCount(4);
     await page.getByRole("combobox", { name: "Combine soil readings" }).selectOption("minimum");
-    await page.getByRole("checkbox", { name: `Exclude ${ids[0]} from decisions`, exact: true }).check();
-    await page.getByRole("spinbutton", { name: `Stale timeout for ${ids[1]}`, exact: true }).fill("900");
+    await page.getByRole("checkbox", { name: "Exclude Probe 1 from decisions", exact: true }).check();
+    await page.getByRole("spinbutton", { name: "Stale timeout for Probe 2", exact: true }).fill("900");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`soil-probes-${width}.png`), fullPage: true });
     await page.getByRole("button", { name: "Save zone changes", exact: true }).click();
@@ -65,9 +65,9 @@ for (const width of [1280, 390]) {
     expect(zone.soil_probes[1].stale_after_s).toBe(900);
     await openEditor();
     await expect(page.locator(".soil-probe-editor__row")).toHaveCount(4);
-    await expect(page.getByRole("checkbox", { name: `Exclude ${ids[0]} from decisions`, exact: true })).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Exclude Probe 1 from decisions", exact: true })).toBeChecked();
     await expect(page.getByRole("combobox", { name: "Combine soil readings" })).toHaveValue("minimum");
-    await expect(page.getByRole("spinbutton", { name: `Stale timeout for ${ids[1]}`, exact: true })).toHaveValue("900");
+    await expect(page.getByRole("spinbutton", { name: "Stale timeout for Probe 2", exact: true })).toHaveValue("900");
     expect(errors).toEqual([]);
   });
 }

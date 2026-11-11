@@ -272,9 +272,8 @@ pub fn WeatherFieldMapEditor(
                                     <option value="" selected=zone.is_empty()>
                                         "(not soil, a weather reading)"
                                     </option>
-                                    {zone_slugs.get().into_iter().map(|(slug, name)| {
-                                        let sel = zone == slug;
-                                        view! { <option value=slug.clone() selected=sel>{name}</option> }
+                                    {crate::components::sources_form::zone_select_options(zone_slugs.get(), &zone).into_iter().map(|(slug, name, sel)| {
+                                        view! { <option value=slug selected=sel>{name}</option> }
                                     }).collect_view()}
                                 </select>
                             </FormField>
@@ -635,9 +634,8 @@ pub fn DeviceFieldMapEditor(
                                     <option value="" selected=zone.is_empty()>
                                         "(not soil, a weather reading)"
                                     </option>
-                                    {zone_slugs.get().into_iter().map(|(slug, name)| {
-                                        let sel = zone == slug;
-                                        view! { <option value=slug.clone() selected=sel>{name}</option> }
+                                    {crate::components::sources_form::zone_select_options(zone_slugs.get(), &zone).into_iter().map(|(slug, name, sel)| {
+                                        view! { <option value=slug selected=sel>{name}</option> }
                                     }).collect_view()}
                                 </select>
                             </FormField>

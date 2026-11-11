@@ -41,13 +41,17 @@ pub fn SoilProbeEditor(
                     let timeout_read_id = id.clone();
                     let remove_id = id.clone();
                     let label_id = id.clone();
+                    // The probe's readable name: its picker label, else the
+                    // topic or entity its channel id encodes. Never the raw
+                    // id, which a screen reader would spell out.
+                    let name = Signal::derive(move || options.get().into_iter().find(|(key, ..)| *key == label_id)
+                        .map(|(_, label, _, _)| label).unwrap_or_else(|| label_id.strip_prefix("source:").and_then(|s| s.split_once(':'))
+                            .and_then(|(_, key)| crate::config::soil::probe_label(key)).unwrap_or_else(|| label_id.clone())));
                     view! {
                         <fieldset class="soil-probe-editor__row">
-                            <legend>{move || options.get().into_iter().find(|(key, ..)| *key == label_id)
-                                .map(|(_, label, _, _)| label).unwrap_or_else(|| label_id.strip_prefix("source:").and_then(|s| s.split_once(':'))
-                                    .and_then(|(_, key)| crate::config::soil::probe_label(key)).unwrap_or_else(|| label_id.clone()))}</legend>
+                            <legend>{move || crate::components::settings::sensors::path_breaks(&name.get())}</legend>
                             <label class="soil-probe-editor__exclude">
-                                <input type="checkbox" aria-label=format!("Exclude {id} from decisions")
+                                <input type="checkbox" aria-label=move || format!("Exclude {} from decisions", name.get())
                                     prop:checked=move || probes.get().iter().any(|p| p.sensor_id == check_id && p.excluded_from_decisions)
                                     on:change=move |ev| { let checked = event_target_checked(&ev); probes.update(|rows| {
                                         if let Some(p) = rows.iter_mut().find(|p| p.sensor_id == excluded_id) { p.excluded_from_decisions = checked; }
@@ -56,7 +60,7 @@ pub fn SoilProbeEditor(
                             </label>
                             <label>"Stale after (seconds)"
                                 <input type="number" class="ui-input" min="1" max="604800" step="1"
-                                    aria-label=format!("Stale timeout for {id}")
+                                    aria-label=move || format!("Stale timeout for {}", name.get())
                                     prop:value=move || probes.get().iter().find(|p| p.sensor_id == timeout_read_id).map(|p| p.stale_after_s).unwrap_or(86400)
                                     on:input=move |ev| { if let Ok(value) = event_target_value(&ev).parse::<u64>() {
                                         probes.update(|rows| { if let Some(p) = rows.iter_mut().find(|p| p.sensor_id == timeout_id) { p.stale_after_s = value; } });

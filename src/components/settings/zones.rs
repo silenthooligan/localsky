@@ -1169,11 +1169,7 @@ pub fn ZoneForm(
             .cloned()
             .unwrap_or_default();
         arr.into_iter()
-            .filter_map(|c| {
-                c.get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| (s.to_string(), s.to_string()))
-            })
+            .filter_map(|c| controller_option(&c))
             .collect::<Vec<_>>()
     };
 
@@ -2388,8 +2384,46 @@ pub(crate) fn cap_raise_needs_confirm(
     new_eff > 60 && new_eff > prior_eff
 }
 
+/// One Controller picker entry: (value, label). A turned-off controller keeps
+/// its place but says so, because a zone bound to it does not water until it
+/// is switched back on under Devices.
+fn controller_option(c: &serde_json::Value) -> Option<(String, String)> {
+    let id = c.get("id").and_then(|v| v.as_str())?;
+    let off = c.get("enabled").and_then(|v| v.as_bool()) == Some(false);
+    let label = if off {
+        format!("{id} (off)")
+    } else {
+        id.to_string()
+    };
+    Some((id.to_string(), label))
+}
+
 #[cfg(test)]
 mod tests {
+    /// A turned-off controller is still offered but labeled, since its zones
+    /// do not water until it is switched back on.
+    #[test]
+    fn a_turned_off_controller_is_labeled_in_the_picker() {
+        let on = serde_json::json!({"id": "os1", "enabled": true});
+        let off = serde_json::json!({"id": "OpenSprinkler", "enabled": false});
+        let unset = serde_json::json!({"id": "dry"});
+        assert_eq!(
+            super::controller_option(&on),
+            Some(("os1".to_string(), "os1".to_string()))
+        );
+        assert_eq!(
+            super::controller_option(&off),
+            Some((
+                "OpenSprinkler".to_string(),
+                "OpenSprinkler (off)".to_string()
+            ))
+        );
+        assert_eq!(
+            super::controller_option(&unset),
+            Some(("dry".to_string(), "dry".to_string()))
+        );
+    }
+
     use super::*;
 
     // ---- the picker must never clear a binding it could not enumerate ----

@@ -294,16 +294,29 @@ impl OpenWeather {
             lon = self.location.lon,
             key = self.config.api_key,
         );
-        Ok(self
-            .client
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        let response = self.client.get(&url).send().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(one_call_unauthorized().into());
+        }
+        Ok(response.error_for_status()?.json().await?)
     }
 }
+
+/// The 401 One Call 3.0 answers. The usual cause is a valid key without the
+/// separate "One Call API" subscription: the same key works on the 2.5
+/// endpoints, so the generic "check the credential" hint sends people the
+/// wrong way.
+fn one_call_unauthorized() -> crate::failure::Failure {
+    let mut failure = crate::failure::Failure::http(401, None, "source poll");
+    failure.next_step = ONE_CALL_401_NEXT_STEP;
+    failure
+}
+
+/// Shown with an OpenWeather 401.
+pub(crate) const ONE_CALL_401_NEXT_STEP: &str = "LocalSky calls OpenWeather One Call API \
+     (endpoint 3.0), which needs the separate One Call API subscription on this key. \
+     OpenWeather's checkout lists it as OneCall 4.0; the first 1,000 calls a day are free. \
+     A key that works on the 2.5 endpoints can still get 401 here.";
 
 #[async_trait]
 impl WeatherSource for OpenWeather {
@@ -438,6 +451,18 @@ impl WeatherSource for OpenWeather {
 
 #[cfg(test)]
 mod tests {
+    /// A 401 from One Call 3.0 names the subscription, and the poll's error
+    /// mapping passes that hint through unchanged.
+    #[test]
+    fn a_one_call_401_names_the_subscription() {
+        let err: anyhow::Error = super::one_call_unauthorized().into();
+        let failure = crate::diagnostics::from_anyhow(&err, "source poll");
+        assert_eq!(failure.code.as_str(), "LS_HTTP_401");
+        assert_eq!(failure.http_status, Some(401));
+        assert_eq!(failure.next_step, super::ONE_CALL_401_NEXT_STEP);
+        assert!(failure.next_step.contains("One Call API subscription"));
+    }
+
     use super::*;
 
     fn ow_test() -> OpenWeather {

@@ -256,10 +256,17 @@ fn spawn_mqtt_publisher(config: &BootConfig, stores: &Stores) {
         );
         return;
     }
+    // The node record sits beside the config file, so a renamed Identity or
+    // discovery prefix can remove what the previous name left on the broker.
+    let node_state_path =
+        config.store.path().parent().map(|dir| {
+            dir.join(crate::integrations::home_assistant::mqtt_publish::NODE_STATE_FILE)
+        });
     crate::integrations::home_assistant::mqtt_publish::spawn(
         mqtt_cfg.clone(),
         cfg.deployment.display_name.clone(),
         stores.irrigation.subscribe(),
+        node_state_path,
     );
 }
 

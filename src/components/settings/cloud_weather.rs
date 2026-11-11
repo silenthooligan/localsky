@@ -1694,10 +1694,10 @@ fn CloudRow(
         ),
         // paid (and any unknown): treat as paid, the conservative honest default.
         _ => {
-            let note = if kind == "weatherkit" {
-                "Paid: an Apple Developer account, 99 dollars a year."
-            } else {
-                "Paid: a card on file with the provider."
+            let note = match kind.as_str() {
+                "weatherkit" => "Paid: an Apple Developer account, 99 dollars a year.",
+                "openweather" => "One Call API subscription (OneCall 4.0 at checkout): first 1,000 calls a day free.",
+                _ => "Paid: a card on file with the provider.",
             };
             ("paid", "Paid", Some(note))
         }
