@@ -251,6 +251,9 @@ async fn soil(
         .filter(|d| d.role == "soil")
         .collect();
     out.extend(discover_local_soil(state.db, cfg.as_ref()).await);
+    if let Some(cfg) = cfg.as_ref() {
+        out.retain(|d| !crate::config::soil::is_hidden(cfg, &d.id));
+    }
     Json(out)
 }
 
@@ -264,6 +267,9 @@ async fn discovered(
     };
     let mut all = discover_ha().await;
     all.extend(discover_local_soil(state.db, cfg.as_ref()).await);
+    if let Some(cfg) = cfg.as_ref() {
+        all.retain(|d| d.role != "soil" || !crate::config::soil::is_hidden(cfg, &d.id));
+    }
     let mut grouped: std::collections::BTreeMap<String, Vec<DiscoveredSensor>> =
         std::collections::BTreeMap::new();
     for d in all {
@@ -402,8 +408,10 @@ async fn inventory(
 /// `soil_sensor_id`). When `also_gateway` and the probe lives on an Ecowitt
 /// gateway that has management credentials configured, it ALSO unregisters the
 /// sensor on the gateway (Tier 1) so it stops showing there too. The response
-/// reports each side honestly so the UI never claims a gateway removal that
-/// did not happen.
+/// reports each side so the UI never claims a gateway removal that did not
+/// happen. A probe whose origin would list it again (a Home Assistant entity,
+/// a channel its source still reports) goes on `ui.hidden_soil_probes`, so
+/// Remove also holds for a probe that was never bound.
 #[derive(serde::Deserialize)]
 struct RemoveSoilReq {
     /// The probe spec, e.g. "source:ecowitt_gw:soilmoisture2".
@@ -494,12 +502,9 @@ async fn remove_soil(
                             .to_string();
                 }
             },
-            (Some(_), None) => {
-                detail = "not a gateway soil channel; cleared LocalSky only".to_string()
-            }
-            (None, _) => {
-                detail = "probe is not on an Ecowitt gateway; cleared LocalSky only".to_string()
-            }
+            // Nothing to unregister: the gateway step does not apply, so it
+            // reads as skipped instead of asking for a gateway login.
+            (Some(_), None) | (None, _) => gw = "skipped".to_string(),
         }
     }
 
@@ -514,7 +519,17 @@ async fn remove_soil(
             zones_unbound += 1;
         }
     }
-    if zones_unbound > 0 {
+    // Keep it removed. A Home Assistant entity, and a channel whose source
+    // still reports, would be listed again on the next refresh: there is
+    // nothing of theirs LocalSky can delete for good. A gateway channel that
+    // was just unregistered, or one whose source is gone, cannot come back.
+    let gone_at_gateway = gw == "unregistered" || gw == "not_registered";
+    let hide = crate::config::soil::remove_must_hide(&cfg, &spec, gone_at_gateway);
+    let newly_hidden = hide && !cfg.ui.hidden_soil_probes.contains(&spec);
+    if newly_hidden {
+        cfg.ui.hidden_soil_probes.push(spec.clone());
+    }
+    if zones_unbound > 0 || newly_hidden {
         if let Err(e) = h.cfg_store.save(&cfg).await {
             return resp(
                 0,
@@ -556,6 +571,12 @@ async fn remove_soil(
             detail.push_str(&format!("cleared {dropped} recorded readings"));
         }
     }
+    if hide {
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        detail.push_str("kept out of the sensor lists");
+    }
     resp(zones_unbound, &gw, detail)
 }
 
@@ -585,6 +606,12 @@ async fn build_inventory(
             continue;
         }
         let id = format!("source:{}:{}", r.source_id, r.key);
+        if cfg
+            .as_ref()
+            .is_some_and(|c| crate::config::soil::is_hidden(c, &id))
+        {
+            continue;
+        }
         // Battery/temp/EC siblings live in the same source under a swapped
         // key suffix; reachable only for numbered `soilmoisture<N>` channels.
         let battery_pct = match sibling_key(&r.key, |n| format!("soilbatt{n}")) {
@@ -636,6 +663,12 @@ async fn build_inventory(
 
     // HA soil entities (no native siblings; `ha:` ids).
     for d in discover_ha().await.into_iter().filter(|d| d.role == "soil") {
+        if cfg
+            .as_ref()
+            .is_some_and(|c| crate::config::soil::is_hidden(c, &d.id))
+        {
+            continue;
+        }
         soil.push(SoilSensor {
             id: d.id,
             channel_label: d.label.clone(),
@@ -1070,6 +1103,34 @@ mod inventory_tests {
         assert!(f.connected, "fixture reports a flow sensor wired in");
         assert_eq!(f.gpm, Some(8.4));
         assert_eq!(f.age_s, Some(0));
+    }
+
+    #[tokio::test]
+    async fn inventory_leaves_out_a_removed_probe_but_never_a_bound_one() {
+        let store = fresh_store().await;
+        let now = chrono::Utc::now().timestamp();
+        for key in ["soilmoisture1", "soilmoisture2"] {
+            store
+                .insert(Reading {
+                    epoch: now,
+                    source_id: "ecowitt_gw".into(),
+                    key: key.into(),
+                    value: 40.0,
+                })
+                .await
+                .unwrap();
+        }
+        let mut cfg = test_config();
+        // Channel 2 is unbound and removed. Channel 1 is bound to back_yard,
+        // so its entry in the list must not hide it.
+        cfg.ui.hidden_soil_probes = vec![
+            "source:ecowitt_gw:soilmoisture2".into(),
+            "source:ecowitt_gw:soilmoisture1".into(),
+        ];
+        let inv = build_inventory(store, Some(cfg), None).await;
+        let ids: Vec<&str> = inv.soil.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["source:ecowitt_gw:soilmoisture1"]);
+        assert_eq!(inv.gateways[0].soil_count, 1);
     }
 
     #[tokio::test]

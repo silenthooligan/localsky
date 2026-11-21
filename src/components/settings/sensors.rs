@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
-use crate::components::ui::{ConfirmSheet, HelpHint, Icon, Panel};
+use crate::components::ui::{Button, ConfirmSheet, HelpHint, Icon, Panel};
 use crate::components::units_fmt::{temp_unit, temp_value, use_unit_prefs, UnitPrefs};
 use crate::docs::doc_url;
 
@@ -337,21 +337,28 @@ pub fn SettingsSensors() -> impl IntoView {
             match remove_soil_probe(probe_id, true).await {
                 Ok(r) => {
                     let gw = match r.gateway.as_str() {
-                        "unregistered" => " and unregistered it on the gateway.",
+                        "unregistered" => "; unregistered on the gateway.",
                         "not_registered" => "; the gateway channel was already gone.",
                         "failed" => "; the gateway removal FAILED (check the gateway login / logs).",
                         "unavailable" => "; gateway removal unavailable (add the gateway login to remove it there too).",
                         _ => ".",
                     };
                     result_ok.set(r.gateway != "failed");
-                    result_msg.set(format!(
-                        "Removed probe: unbound {} zone(s){}",
-                        r.zones_unbound, gw
-                    ));
-                    if let Ok(inv) = fetch_inventory().await {
+                    let unbound = match r.zones_unbound {
+                        0 => String::new(),
+                        1 => " and cleared its zone binding".to_string(),
+                        n => format!(" and cleared {n} zone bindings"),
+                    };
+                    result_msg.set(format!("Removed probe{unbound}{gw}"));
+                    // The config carries the removed list. Fetch it and the
+                    // inventory first, then set both, so the probe leaves
+                    // its card and shows under Removed probes in one paint.
+                    let cfg = crate::components::config_client::get_config().await;
+                    let inv = fetch_inventory().await;
+                    if let Ok(inv) = inv {
                         inventory.set(inv);
                     }
-                    if let Ok(cfg) = crate::components::config_client::get_config().await {
+                    if let Ok(cfg) = cfg {
                         config_json.set(cfg);
                     }
                 }
@@ -368,6 +375,84 @@ pub fn SettingsSensors() -> impl IntoView {
             let _ = probe_id;
         }
     });
+
+    // Bring a removed probe back: drop it from `ui.hidden_soil_probes` and
+    // PUT the config, the same read-modify-write the zone binding uses.
+    let restore = Callback::new(move |probe_id: String| {
+        if saving.get() {
+            return;
+        }
+        config_json.update(|cfg| show_probe_again(cfg, &probe_id));
+        let candidate = config_json.get();
+        saving.set(true);
+        result_msg.set(String::new());
+        #[cfg(feature = "hydrate")]
+        wasm_bindgen_futures::spawn_local(async move {
+            match crate::components::config_client::put_config(&candidate)
+                .await
+                .map(|_| ())
+            {
+                Ok(()) => {
+                    crate::components::settings_ui::toast_saved(
+                        result_msg,
+                        result_ok,
+                        crate::voice::SAVED_LIVE,
+                    );
+                    if let Ok(inv) = fetch_inventory().await {
+                        inventory.set(inv);
+                    }
+                }
+                Err(e) => {
+                    result_ok.set(false);
+                    result_msg.set(e);
+                }
+            }
+            saving.set(false);
+        });
+        #[cfg(not(feature = "hydrate"))]
+        {
+            saving.set(false);
+            let _ = candidate;
+        }
+    });
+
+    // Probes Remove keeps out of the lists, each with the way back. A probe
+    // a zone binds is listed above whatever this list says.
+    let hidden_view = move || {
+        let hidden = hidden_probes(&config_json.get());
+        if hidden.is_empty() {
+            return ().into_any();
+        }
+        let rows = hidden
+            .into_iter()
+            .map(|id| {
+                let label = crate::config::soil::hidden_probe_label(&id);
+                let again = format!("Show {label} again");
+                view! {
+                    <li class="hidden-probes__row">
+                        <span class="hidden-probes__name">{path_breaks(&label)}</span>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            aria_label=Signal::derive(move || again.clone())
+                            on_click=Callback::new(move |_| restore.run(id.clone()))
+                        >
+                            "Show again"
+                        </Button>
+                    </li>
+                }
+            })
+            .collect_view();
+        view! {
+            <Panel title="Removed probes".to_string()>
+                <p class="sensors-section__hint" class:u-mb4-only=true>
+                    "Their sources still report them. LocalSky leaves them out of its lists."
+                </p>
+                <ul class="hidden-probes">{rows}</ul>
+            </Panel>
+        }
+        .into_any()
+    };
 
     // SOIL: one card per gateway/source, its probes nested inside.
     let soil_view = move || {
@@ -514,6 +599,8 @@ pub fn SettingsSensors() -> impl IntoView {
                         }
                     }}
 
+                    {hidden_view}
+
                     <Panel title="Flow meters".to_string()>
                         {flow_view}
                     </Panel>
@@ -525,11 +612,7 @@ pub fn SettingsSensors() -> impl IntoView {
             <ConfirmSheet
                 visible=remove_open
                 title="Remove this soil probe?"
-                body=Signal::derive(|| {
-                    "This clears its binding in LocalSky and, if the gateway login is set, \
-                     unregisters it on the gateway (which stops the gateway from re-adding it)."
-                        .to_string()
-                })
+                body=Signal::derive(|| crate::voice::REMOVE_PROBE_BODY.to_string())
                 confirm_label=Signal::derive(|| "Remove".to_string())
                 danger=true
                 on_confirm=do_remove
@@ -609,6 +692,42 @@ pub(crate) fn path_breaks(label: &str) -> impl IntoView {
 /// The pieces `path_breaks` puts a break after: each keeps its trailing "/".
 fn path_segments(label: &str) -> Vec<String> {
     label.split_inclusive('/').map(str::to_string).collect()
+}
+
+/// Removed probes to offer back: `ui.hidden_soil_probes`, minus any a zone
+/// binds (the server lists those regardless, so they need no way back).
+fn hidden_probes(cfg: &serde_json::Value) -> Vec<String> {
+    let bound: Vec<String> = cfg
+        .get("zones")
+        .and_then(|z| z.as_object())
+        .map(|zones| {
+            zones
+                .values()
+                .flat_map(crate::config::soil::json_bindings)
+                .map(|p| p.sensor_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    cfg.pointer("/ui/hidden_soil_probes")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|id| !bound.iter().any(|b| b == id))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Drop one probe from `ui.hidden_soil_probes` in the config document.
+fn show_probe_again(cfg: &mut serde_json::Value, probe_id: &str) {
+    if let Some(list) = cfg
+        .pointer_mut("/ui/hidden_soil_probes")
+        .and_then(|v| v.as_array_mut())
+    {
+        list.retain(|v| v.as_str() != Some(probe_id));
+    }
 }
 
 /// Ids of the configured controllers that are switched off (`enabled = false`).
@@ -897,6 +1016,36 @@ fn empty_state() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn removed_probes_are_offered_back_unless_a_zone_binds_them() {
+        let cfg = serde_json::json!({
+            "ui": {"hidden_soil_probes": ["ha:sensor.old_soil", "source:gw:soilmoisture1"]},
+            "zones": {"bed": {"soil_probes": [{"sensor_id": "source:gw:soilmoisture1"}]}}
+        });
+        assert_eq!(
+            super::hidden_probes(&cfg),
+            vec!["ha:sensor.old_soil".to_string()]
+        );
+        // No list at all (a config saved before 1.1.3) offers nothing.
+        assert!(super::hidden_probes(&serde_json::json!({"zones": {}})).is_empty());
+    }
+
+    #[test]
+    fn show_again_drops_only_that_probe() {
+        let mut cfg = serde_json::json!({
+            "ui": {"hidden_soil_probes": ["ha:sensor.a", "ha:sensor.b"]}
+        });
+        super::show_probe_again(&mut cfg, "ha:sensor.a");
+        assert_eq!(
+            cfg["ui"]["hidden_soil_probes"],
+            serde_json::json!(["ha:sensor.b"])
+        );
+        // A document without the list is left alone.
+        let mut bare = serde_json::json!({"ui": {}});
+        super::show_probe_again(&mut bare, "ha:sensor.a");
+        assert_eq!(bare, serde_json::json!({"ui": {}}));
+    }
+
     /// Only controllers explicitly switched off are named.
     #[test]
     fn switched_off_controllers_are_named() {

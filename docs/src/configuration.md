@@ -456,10 +456,15 @@ runs_retention_days = 0    # default: 0 (keep forever)
 Server-side UI presentation defaults. These set the baseline; per-browser choices persist in each device's localStorage and win over them once a user changes something.
 
 ```toml
+[ui]
+hidden_soil_probes = []                      # soil probes removed from the sensor lists
+
 [ui.radar]
 providers      = []                          # default: [] (Auto, region-smart set)
 default_layers = ["precip", "nexrad", "..."] # overlays on for a browser with no saved preference
 ```
+
+- `ui.hidden_soil_probes`: soil probes you removed that their origin still offers (a Home Assistant sensor, or a channel a source keeps reporting), as probe ids (`ha:<entity>` or `source:<id>:<key>`). The sensor lists and the zone picker leave them out. **Remove probe** adds to this list and **Show again** under Settings, Sensors takes a probe off it. A probe bound to a zone is always listed.
 
 - `ui.radar.providers`: the radar tile providers offered in the layer menu, by catalog id (see `radar_catalog::providers()`). Empty (the default) means Auto: the region-smart recommended set for your station location. Non-empty means exactly this menu, in this order; any catalog provider is allowed anywhere, so you can deliberately switch on an out-of-region source to compare.
 - `ui.radar.default_layers`: which overlays are enabled by default for a browser that has no stored preference yet. Accepts provider ids and feature ids from the radar catalog. Once a user toggles layers, their per-browser choice persists in localStorage and wins over this list.

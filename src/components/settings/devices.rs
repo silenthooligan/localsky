@@ -1183,11 +1183,7 @@ pub fn SettingsDevices() -> impl IntoView {
             <ConfirmSheet
                 visible=remove_probe_open
                 title="Remove this soil probe?"
-                body=Signal::derive(|| {
-                    "Its zone binding is cleared, and if the gateway login is set on the \
-                     source it is unregistered from the gateway as well."
-                        .to_string()
-                })
+                body=Signal::derive(|| crate::voice::REMOVE_PROBE_BODY.to_string())
                 confirm_label=Signal::derive(|| "Remove probe".to_string())
                 danger=true
                 on_confirm=do_remove_soil

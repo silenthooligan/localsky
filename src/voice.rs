@@ -40,6 +40,15 @@ pub const SAVED_LIVE: &str = "Saved. No restart needed.";
 /// operator ends up debugging a setting they already fixed.
 pub const SAVED_NEEDS_RESTART: &str = "Saved. Restart LocalSky to use it.";
 
+/// What the Remove probe question says, on every page that asks it.
+///
+/// Remove is three things at once (the binding, the list, the gateway), and
+/// the one an operator cannot see from the button is that the probe stays
+/// gone when its source still reports. It also names the way back.
+pub const REMOVE_PROBE_BODY: &str = "LocalSky clears its zone binding and stops listing it. \
+     With the gateway login set, the gateway unregisters it too. \
+     Bring it back under Settings, Sensors.";
+
 /// What a save says when it never left the browser.
 ///
 /// The units and theme preferences are per-device on purpose, so the

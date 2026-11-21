@@ -11,6 +11,10 @@
 #   elliptic-curve 0.13 and crypto-bigint 0.5; the fix is in the 0.7 line
 #   (0.7.6+), which the direct p256 0.14 path already uses. Affects VAPID
 #   signing for web push only. Drop when web-push moves to jwt-simple 0.13+.
+# - chrono / chrono-tz (RUSTSEC-2026-0543 and RUSTSEC-2026-0555 added
+#   2026-11-20): marked unmaintained, every version, no patched release. These
+#   are notices, not vulnerabilities. LocalSky's time handling is built on
+#   them (scheduler, history, API). Drop when it moves to a maintained crate.
 # - paste / proc-macro-error2: unmaintained Leptos internals.
 # - smartstring: unmaintained dependency of rhai 1.25.
 # Revisit these when their parent dependency changes. New findings fail.
@@ -28,4 +32,6 @@ exec cargo audit \
   --ignore RUSTSEC-2026-0173 \
   --ignore RUSTSEC-2026-0249 \
   --ignore RUSTSEC-2026-0382 \
-  --ignore RUSTSEC-2026-0387
+  --ignore RUSTSEC-2026-0387 \
+  --ignore RUSTSEC-2026-0543 \
+  --ignore RUSTSEC-2026-0555

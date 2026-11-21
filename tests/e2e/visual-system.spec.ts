@@ -216,6 +216,13 @@ async function fixedReadings(page: Page, change: (responses: Record<string, any>
   change(responses);
   await page.clock.setFixedTime(new Date(visualDemo.now));
   await page.addInitScript(() => localStorage.setItem("nerd_mode", "true"));
+  // The map asks third parties for tiles and radar frames. One that never
+  // answers holds the page's load event and the test with it (the sky
+  // evidence checks timed out this way), so no map image leaves the fixture.
+  await page.route(
+    url => /(^|\.)(openstreetmap\.org|iastate\.edu|librewxr\.net|rainviewer\.com)$/.test(url.hostname),
+    route => route.request().resourceType() === "image" ? route.abort() : route.continue(),
+  );
   const streams: Record<string, string> = {
     "/api/stream": "/api/snapshot", "/api/irrigation/stream": "/api/irrigation/snapshot",
     "/api/forecast/stream": "/api/forecast/snapshot",

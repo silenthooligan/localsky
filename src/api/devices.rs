@@ -74,7 +74,13 @@ async fn list(
 fn live_soil_channels(cfg: Option<&crate::config::Config>, soil: Vec<Reading>) -> Vec<Reading> {
     soil.into_iter()
         .filter(|r| {
-            !cfg.is_some_and(|c| crate::config::soil::legacy_mapped_key(c, &r.source_id, &r.key))
+            !cfg.is_some_and(|c| {
+                crate::config::soil::legacy_mapped_key(c, &r.source_id, &r.key)
+                    || crate::config::soil::is_hidden(
+                        c,
+                        &format!("source:{}:{}", r.source_id, r.key),
+                    )
+            })
         })
         .collect()
 }

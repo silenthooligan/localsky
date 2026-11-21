@@ -2,6 +2,27 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-11-20
+
+### Fixed
+
+- Sensors: **Remove probe** now holds for a probe its origin still offers. A
+  soil sensor found in Home Assistant, or a channel a source keeps reporting,
+  stayed on the Sensors page after Remove because there was no binding or
+  lasting record to clear. LocalSky now leaves a removed probe out of the
+  Sensors lists, the zone picker and Devices. Settings, Sensors lists these
+  under **Removed probes** with **Show again**.
+- Remove probe no longer asks for a gateway login when the probe is not on an
+  Ecowitt gateway.
+- Setup: **Go to restart** keeps the restart notice in view. Followed just as
+  the notice moved to the top of the page, it left the notice out of sight.
+
+### Security
+
+- Bundled zlib updated through libz-sys 1.1.33 (RUSTSEC-2026-0544,
+  CVE-2026-85091).
+- quinn-udp 0.5.16 (RUSTSEC-2026-0538) and rustix 1.1.6 (RUSTSEC-2026-0486).
+
 ## [1.1.2] - 2026-11-10
 
 ### Fixed

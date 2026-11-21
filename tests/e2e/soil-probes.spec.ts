@@ -71,3 +71,76 @@ for (const width of [1280, 390]) {
     expect(errors).toEqual([]);
   });
 }
+
+for (const width of [1280, 390]) {
+  test(`a removed Home Assistant probe leaves the lists and can be shown again at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const id = "ha:sensor.old_planter_soil_moisture";
+    let stored: any = {
+      schema_version: 3,
+      deployment: { location: { lat: 51.5, lon: -0.1 }, units: "imperial" },
+      sources: [], controllers: [], zones: {}, ui: { hidden_soil_probes: [] },
+    };
+    const writes: any[] = [];
+    const removes: any[] = [];
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const inventory = () => {
+      const listed = !stored.ui.hidden_soil_probes.includes(id);
+      return {
+        gateways: listed ? [{ source_id: "home_assistant", label: "Home Assistant", kind: "home_assistant", online: true, soil_count: 1 }] : [],
+        soil: listed ? [{
+          id, channel_label: "Old planter soil moisture (HA)", source_id: "home_assistant",
+          source_label: "Home Assistant", source_kind: "home_assistant", moisture_pct: 31, age_s: 60,
+        }] : [],
+        flow: [],
+      };
+    };
+    await page.route("**/api/**", async route => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname.replace("/api/v1/", "/api/");
+      if (path === "/api/config") {
+        if (request.method() === "PUT") {
+          stored = request.postDataJSON();
+          writes.push(stored);
+          return route.fulfill({ json: { saved: 1, restart_required: false, restart_reasons: [] } });
+        }
+        return route.fulfill({ json: stored });
+      }
+      if (path === "/api/sensors/inventory") return route.fulfill({ json: inventory() });
+      if (path === "/api/sensors/soil/remove" && request.method() === "POST") {
+        removes.push(request.postDataJSON());
+        stored.ui.hidden_soil_probes.push(id);
+        return route.fulfill({ json: { zones_unbound: 0, gateway: "skipped", detail: "kept out of the sensor lists" } });
+      }
+      if (!["GET", "HEAD"].includes(request.method())) return route.fulfill({ status: 409, json: { error: "Unexpected fixture write" } });
+      return route.continue();
+    });
+    await page.goto("/settings/sensors", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.documentElement.dataset.hydrated === "true");
+    const probe = page.getByText("Old planter soil moisture (HA)", { exact: true });
+    await expect(probe).toBeVisible();
+    await expect(page.locator(".hidden-probes__row")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Remove probe", exact: true }).click();
+    await expect(page.getByText("LocalSky clears its zone binding and stops listing it.", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect.poll(() => removes.length).toBe(1);
+    expect(removes[0]).toEqual({ probe_id: id, also_gateway: true });
+
+    // It is gone from the probe cards and offered back under Removed probes.
+    await expect(probe).toHaveCount(0);
+    const row = page.locator(".hidden-probes__row");
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText("sensor.old_planter_soil_moisture (Home Assistant)");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`removed-probes-${width}.png`), fullPage: true });
+
+    await page.getByRole("button", { name: "Show sensor.old_planter_soil_moisture (Home Assistant) again", exact: true }).click();
+    await expect.poll(() => writes.length).toBe(1);
+    expect(stored.ui.hidden_soil_probes).toEqual([]);
+    await expect(probe).toBeVisible();
+    await expect(row).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+}

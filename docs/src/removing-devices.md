@@ -43,19 +43,29 @@ Soil probes are managed wherever you see them:
   button opens the full manager.
 
 The Remove action is the same everywhere. It
-changes three things on the LocalSky side:
+changes four things on the LocalSky side:
 
 1. Clears the probe's binding from whatever zone used it.
 2. Suppresses that zone's offline warning (a removed probe is not a fault).
 3. Deletes the probe's recorded readings, so it disappears from the device
    list and the sensor pickers instead of lingering until data retention
    ages it out.
+4. Keeps the probe out of the lists when its origin still offers it. That
+   covers a sensor LocalSky finds in Home Assistant and a channel a source
+   keeps reporting. LocalSky cannot delete either one at its origin.
 
 If the probe lives on an **Ecowitt gateway** and you have set the gateway login
 on that source (see below), LocalSky can also **unregister the sensor on the
 gateway** in the same click, so it stops showing there too. The confirmation
-tells you exactly what will happen, and the result reports each side honestly:
-it will not claim a gateway removal that did not occur.
+says what will happen. The result reports the LocalSky side and the gateway
+side separately, and never claims a gateway removal that did not occur.
+
+### Bringing a removed probe back
+
+**Settings, Sensors** lists every probe held back this way under **Removed
+probes**. Choose **Show again** to return it to the lists. The list is
+`ui.hidden_soil_probes` in the configuration file. Binding a probe to a zone
+in the configuration file also lists it again, whatever that list says.
 
 ### Gateway registration
 

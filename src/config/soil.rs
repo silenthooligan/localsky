@@ -226,6 +226,58 @@ pub fn validation_errors(cfg: &Config) -> Vec<String> {
     errors
 }
 
+/// True when the user removed this probe and no zone binds it. Remove keeps
+/// such a probe out of the lists when its origin still offers it: a Home
+/// Assistant entity, or a channel its source keeps reporting. A zone binding
+/// wins, so a stale entry never hides a probe that decisions use.
+pub fn is_hidden(cfg: &Config, probe_id: &str) -> bool {
+    cfg.ui.hidden_soil_probes.iter().any(|p| p == probe_id)
+        && !cfg
+            .zones
+            .values()
+            .any(|z| z.soil_bindings().iter().any(|p| p.sensor_id == probe_id))
+}
+
+/// Whether Remove has to remember this probe. A Home Assistant entity, and a
+/// channel whose source is still configured, would be listed again on the
+/// next refresh. A gateway channel that was unregistered there, or one whose
+/// source is gone, cannot come back, so deleting its readings is enough.
+pub fn remove_must_hide(cfg: &Config, probe_id: &str, gone_at_gateway: bool) -> bool {
+    if probe_id.starts_with("ha:") {
+        return true;
+    }
+    let source_configured = probe_id
+        .strip_prefix("source:")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(id, _)| cfg.sources.iter().any(|s| s.id == id));
+    source_configured && !gone_at_gateway
+}
+
+/// List label for a hidden probe id: the entity for `ha:` ids, otherwise
+/// the source and its readable channel.
+pub fn hidden_probe_label(probe_id: &str) -> String {
+    if let Some(entity) = probe_id.strip_prefix("ha:") {
+        return format!("{entity} (Home Assistant)");
+    }
+    match probe_id
+        .strip_prefix("source:")
+        .and_then(|rest| rest.split_once(':'))
+    {
+        Some((source, key)) => {
+            let numbered = key
+                .strip_prefix("soilmoisture")
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            let channel = match (probe_label(key), numbered) {
+                (Some(selector), _) => selector,
+                (None, Some(n)) => format!("soil channel {n}"),
+                (None, None) => key.replace('_', " "),
+            };
+            format!("{source} · {channel}")
+        }
+        None => probe_id.to_string(),
+    }
+}
+
 pub fn legacy_mapped_key(cfg: &Config, source_id: &str, key: &str) -> bool {
     cfg.sources
         .iter()
@@ -300,6 +352,52 @@ mod tests {
             .unwrap(),
         );
         cfg
+    }
+
+    #[test]
+    fn a_removed_probe_is_hidden_until_a_zone_binds_it() {
+        let mut cfg = fixture();
+        cfg.ui.hidden_soil_probes = vec![
+            "ha:sensor.old_soil_moisture".into(),
+            "source:mqtt:soilmoisture_bed".into(),
+        ];
+        assert!(is_hidden(&cfg, "ha:sensor.old_soil_moisture"));
+        assert!(!is_hidden(&cfg, "ha:sensor.other"));
+        // The bed zone binds this one, so the stale entry cannot hide it.
+        assert!(!is_hidden(&cfg, "source:mqtt:soilmoisture_bed"));
+        cfg.zones.clear();
+        assert!(is_hidden(&cfg, "source:mqtt:soilmoisture_bed"));
+    }
+
+    #[test]
+    fn remove_remembers_only_a_probe_that_would_come_back() {
+        let cfg = fixture();
+        assert!(remove_must_hide(&cfg, "ha:sensor.old_soil_moisture", false));
+        assert!(remove_must_hide(&cfg, "source:mqtt:soilmoisture1", false));
+        assert!(!remove_must_hide(&cfg, "source:mqtt:soilmoisture1", true));
+        assert!(!remove_must_hide(
+            &cfg,
+            "source:retired_gw:soilmoisture1",
+            false
+        ));
+    }
+
+    #[test]
+    fn hidden_probe_labels_read_as_entity_or_source_channel() {
+        assert_eq!(
+            hidden_probe_label("ha:sensor.old_soil_moisture"),
+            "sensor.old_soil_moisture (Home Assistant)"
+        );
+        let mapped = format!("source:mqtt:{}", probe_key("mqtt", &["soil/1", "moisture"]));
+        assert_eq!(hidden_probe_label(&mapped), "mqtt · soil/1 / moisture");
+        assert_eq!(
+            hidden_probe_label("source:gw:soilmoisture2"),
+            "gw · soil channel 2"
+        );
+        assert_eq!(
+            hidden_probe_label("source:ha:soilmoisture_back_yard"),
+            "ha · soilmoisture back yard"
+        );
     }
 
     #[test]

@@ -261,6 +261,12 @@ mod forecast_track_tests {
 pub struct UiConfig {
     #[serde(default)]
     pub radar: RadarUiConfig,
+    /// Soil probes removed from the sensor lists that LocalSky can still
+    /// see: a Home Assistant entity, or a channel its source keeps
+    /// reporting. Ids as a zone binds them (`ha:<entity>` or
+    /// `source:<id>:<key>`). A probe bound to a zone is always listed.
+    #[serde(default)]
+    pub hidden_soil_probes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

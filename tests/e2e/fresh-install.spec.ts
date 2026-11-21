@@ -117,6 +117,13 @@ test("the wizard's happy path writes a config with a rule and a zone", async ({ 
   await expect(banner).toContainText(/controllers are not connected/i);
   await expect(banner).toContainText(/weather sources are not connected/i);
 
+  // A moment after the save the app-level notice takes over from the step's
+  // own, at the top of the page. The link's target moves with it and has to
+  // stay in view: followed during the handover it used to end up just above
+  // the visible page.
+  await expect(page.locator('main.page > .health-banner')).toBeVisible({ timeout: 20_000 });
+  await expect(banner.getByRole('button', { name: 'Restart LocalSky now' })).toBeInViewport();
+
   // Restart now: the button that copy points at, through to the confirm.
   // It stops AT the confirm on purpose. The pre-merge harness starts the app
   // with `docker run` and no restart policy (tests/e2e/pre-merge.sh), so the

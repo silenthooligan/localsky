@@ -1,6 +1,6 @@
 # LocalSky guide
 
-Service 1.1.2; API 2.6.0.
+Service 1.1.3; API 2.6.0.
 
 
 ---
@@ -10,7 +10,7 @@ Source: https://localsky.io/docs/introduction.html
 # The LocalSky guide
 
 <div class="ls-doc-hero">
-<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.1.2</p>
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v1.1.3</p>
 <p class="ls-doc-tagline">Know your weather.<br><em>Understand your watering.</em></p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
@@ -1586,19 +1586,29 @@ Soil probes are managed wherever you see them:
   button opens the full manager.
 
 The Remove action is the same everywhere. It
-changes three things on the LocalSky side:
+changes four things on the LocalSky side:
 
 1. Clears the probe's binding from whatever zone used it.
 2. Suppresses that zone's offline warning (a removed probe is not a fault).
 3. Deletes the probe's recorded readings, so it disappears from the device
    list and the sensor pickers instead of lingering until data retention
    ages it out.
+4. Keeps the probe out of the lists when its origin still offers it. That
+   covers a sensor LocalSky finds in Home Assistant and a channel a source
+   keeps reporting. LocalSky cannot delete either one at its origin.
 
 If the probe lives on an **Ecowitt gateway** and you have set the gateway login
 on that source (see below), LocalSky can also **unregister the sensor on the
 gateway** in the same click, so it stops showing there too. The confirmation
-tells you exactly what will happen, and the result reports each side honestly:
-it will not claim a gateway removal that did not occur.
+says what will happen. The result reports the LocalSky side and the gateway
+side separately, and never claims a gateway removal that did not occur.
+
+### Bringing a removed probe back
+
+**Settings, Sensors** lists every probe held back this way under **Removed
+probes**. Choose **Show again** to return it to the lists. The list is
+`ui.hidden_soil_probes` in the configuration file. Binding a probe to a zone
+in the configuration file also lists it again, whatever that list says.
 
 ### Gateway registration
 
@@ -2802,7 +2812,7 @@ Back up, update the server, then update the Home Assistant companion if you use 
 
 Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.1.2`.
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v1.1.3`.
 
 ## Docker Compose
 
@@ -3581,7 +3591,7 @@ Source: https://localsky.io/docs/api.html
 
 # API reference
 
-LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.1.2** uses response contract **2.6.0**. The path prefix and contract version are independent.
+LocalSky exposes REST JSON and SSE at **`/api/v1`**. LocalSky **1.1.3** uses response contract **2.6.0**. The path prefix and contract version are independent.
 
 Start with the [API quick start](api-quickstart.md), or download the [OpenAPI read profile](openapi.json). The profile covers selected read operations; the reference below also documents control and administration.
 
@@ -4995,10 +5005,15 @@ runs_retention_days = 0    # default: 0 (keep forever)
 Server-side UI presentation defaults. These set the baseline; per-browser choices persist in each device's localStorage and win over them once a user changes something.
 
 ```toml
+[ui]
+hidden_soil_probes = []                      # soil probes removed from the sensor lists
+
 [ui.radar]
 providers      = []                          # default: [] (Auto, region-smart set)
 default_layers = ["precip", "nexrad", "..."] # overlays on for a browser with no saved preference
 ```
+
+- `ui.hidden_soil_probes`: soil probes you removed that their origin still offers (a Home Assistant sensor, or a channel a source keeps reporting), as probe ids (`ha:<entity>` or `source:<id>:<key>`). The sensor lists and the zone picker leave them out. **Remove probe** adds to this list and **Show again** under Settings, Sensors takes a probe off it. A probe bound to a zone is always listed.
 
 - `ui.radar.providers`: the radar tile providers offered in the layer menu, by catalog id (see `radar_catalog::providers()`). Empty (the default) means Auto: the region-smart recommended set for your station location. Non-empty means exactly this menu, in this order; any catalog provider is allowed anywhere, so you can deliberately switch on an out-of-region source to compare.
 - `ui.radar.default_layers`: which overlays are enabled by default for a browser that has no stored preference yet. Accepts provider ids and feature ids from the radar catalog. Once a user toggles layers, their per-browser choice persists in localStorage and wins over this list.

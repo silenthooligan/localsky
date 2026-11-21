@@ -75,6 +75,19 @@
 }
 .soil-card__remove:focus-visible { @include focus-ring(2px); }
 
+// Removed probes: one quiet row each, the name wrapping at path levels and
+// the way back held at the row's end.
+.hidden-probes { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.hidden-probes__row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  min-width: 0;
+}
+.hidden-probes__name {
+  min-width: 0; overflow-wrap: anywhere;
+  font-size: var(--text-body-sm); color: var(--text-dim);
+}
+.hidden-probes__row > .btn { flex: none; }
+
 // Assigned soil sensor's live reading + origin, shown under the zone's
 // sensor picker so the zone carries the full data picture. Also the chip
 // row inside .soil-card on settings/devices and in the setup wizard, which

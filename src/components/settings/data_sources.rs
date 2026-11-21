@@ -1215,6 +1215,33 @@ pub fn RestartBanner(
             && (persistent || !dismissed.get())
             && (persistent || !runtime_pending.is_some_and(|pending| pending.0.get()))
     };
+    // A page's own notice hands over to the app-level one a moment after a
+    // save, and the two sit in different places. A "Go to restart" link
+    // (`#restart-notice`) followed during that handover lost its target
+    // mid-scroll and left the notice just out of view. Whichever notice
+    // appears while the address still names it brings itself into view.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        if !show() {
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            // One turn of the event loop, so the notice is in the document.
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            let Some(win) = web_sys::window() else {
+                return;
+            };
+            if win.location().hash().ok().as_deref() != Some("#restart-notice") {
+                return;
+            }
+            if let Some(el) = win
+                .document()
+                .and_then(|d| d.get_element_by_id("restart-notice"))
+            {
+                el.scroll_into_view();
+            }
+        });
+    });
     // Restart lifecycle: idle -> confirm/POST -> overlay until the server
     // cycles -> hard reload. Error text renders inline in the banner.
     let restarting = RwSignal::new(false);
